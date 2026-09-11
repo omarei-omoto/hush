@@ -1,0 +1,19 @@
+{
+  // Publishing config. Developing hush needs no build step — Node runs the
+  // TypeScript in src/ directly — but an installed package cannot: Node refuses
+  // to strip types for anything under node_modules, so `npm install hush`
+  // followed by `hush --version` failed outright until this existed.
+  //
+  // `erasableSyntaxOnly` in the base config means the emit really is only type
+  // removal, and `rewriteRelativeImportExtensions` turns `./vault.ts` into
+  // `./vault.js` on the way out.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"]
+}

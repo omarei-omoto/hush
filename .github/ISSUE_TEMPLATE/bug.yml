@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work the way it says it does
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security problems.** If it lets someone read a secret they
+        should not, please open a [private advisory](https://github.com/omarei-omoto/hush/security/advisories/new)
+        instead of an issue.
+
+        **Never paste a real credential here.** If a value is part of the
+        problem, describe its shape — "a 40-character token starting `sk-`" —
+        or make up one of the same shape.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran and what it did. Paste the output.
+      placeholder: |
+        $ hush run -- npm start
+        ✗ …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The shortest sequence that gets there from a fresh vault.
+      placeholder: |
+        hush init demo
+        hush set FOO=bar
+        hush run -- …
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Your setup
+      description: "Output of `hush doctor` is ideal — it names no values."
+      render: shell
+    validations:
+      required: true

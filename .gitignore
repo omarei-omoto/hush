@@ -1,0 +1,13 @@
+node_modules/
+*.log
+
+# Never commit plaintext env files — that is the entire point of this project.
+.env
+.env.*
+!.env.example
+
+# Local hush state (the vault itself IS committed; these are not).
+.hush/audit.log
+.hush/identity
+.hush/*.local.json
+dist/

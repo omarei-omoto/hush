@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+/*
+ * A real age plugin implementing the C2SP age-plugin.md protocol, standing in
+ * for a YubiKey or a Secure Enclave.
+ *
+ * This is what closes the "needs real hardware" gap as far as it can be closed:
+ * the actual `age` binary drives this over the real plugin protocol, including
+ * the "-> msg" prompt a hardware key uses to ask for a touch. What remains
+ * unverified is only whether age-plugin-yubikey talks to USB correctly, which
+ * is that project's responsibility, not hush's.
+ *
+ * The wrap is a byte flip: reversible, obviously not a cipher, and enough to
+ * prove the key travelled through the plugin and came back intact.
+ */
+const readline = require("node:readline");
+
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+const queue = [];
+const waiters = [];
+rl.on("line", (l) => (waiters.length ? waiters.shift()(l) : queue.push(l)));
+rl.on("close", () => { while (waiters.length) waiters.shift()(null); });
+const nextLine = () => (queue.length ? Promise.resolve(queue.shift()) : new Promise((r) => waiters.push(r)));
+
+async function readStanza() {
+  let line;
+  do { line = await nextLine(); if (line === null) return null; } while (!line.startsWith("-> "));
+  const [type, ...args] = line.slice(3).trim().split(/\s+/);
+  let b64 = "";
+  for (;;) {
+    const l = await nextLine();
+    if (l === null) break;
+    b64 += l;
+    if (l.length < 64) break;
+  }
+  return { type, args, body: Buffer.from(b64, "base64") };
+}
+
+/**
+ * Returns a promise that settles once the bytes have actually left. A bare
+ * write() to a pipe can still be queued when the process ends, and age then
+ * reports "failed to read line: EOF" — the same lost-output trap that bit
+ * `hush run`, which is easy to miss because any added latency hides it.
+ */
+function writeStanza(type, args, body) {
+  let s = "-> " + [type, ...args].join(" ") + "\n";
+  const b64 = Buffer.from(body ?? []).toString("base64").replace(/=+$/, "");
+  if (b64.length === 0) s += "\n";
+  else {
+    for (let i = 0; i < b64.length; i += 64) s += b64.slice(i, i + 64) + "\n";
+    if (b64.length % 64 === 0) s += "\n";
+  }
+  return new Promise((resolve) => process.stdout.write(s, resolve));
+}
+
+/* Stand-in for the hardware operation. Reversible, and deliberately not a real cipher. */
+const transform = (buf) => Buffer.from(buf).map((b) => b ^ 0x5a);
+
+(async () => {
+  const modeArg = process.argv.find((a) => a.startsWith("--age-plugin=")) ?? "";
+  const mode = modeArg.split("=")[1];
+
+  if (mode === "recipient-v1") {
+    const fileKeys = [];
+    for (;;) {
+      const st = await readStanza();
+      if (!st || st.type === "done") break;
+      if (st.type === "wrap-file-key") fileKeys.push(st.body);
+    }
+    // A YubiKey would ask for a touch here; this exercises the same path.
+    await writeStanza("msg", [], Buffer.from("Touch the mock key to continue"));
+    await readStanza();
+    for (let i = 0; i < fileKeys.length; i++) {
+      await writeStanza("recipient-stanza", [String(i), "mock"], transform(fileKeys[i]));
+      await readStanza();
+    }
+    await writeStanza("done", [], null);
+    rl.close();
+    return;
+  }
+
+  if (mode === "identity-v1") {
+    const stanzas = [];
+    for (;;) {
+      const st = await readStanza();
+      if (!st || st.type === "done") break;
+      if (st.type === "recipient-stanza") {
+        stanzas.push({ index: st.args[0], kind: st.args[1], body: st.body });
+      }
+    }
+    await writeStanza("msg", [], Buffer.from("Touch the mock key to decrypt"));
+    await readStanza();
+    for (const s of stanzas) {
+      if (s.kind === "mock") {
+        await writeStanza("file-key", [s.index], transform(s.body));
+        await readStanza();
+        break;
+      }
+    }
+    await writeStanza("done", [], null);
+    rl.close();
+    return;
+  }
+
+  // Called as `age-plugin-mock --identity <file>`: print the recipient.
+  if (process.argv.includes("--identity")) {
+    const { encode } = require(require("node:path").join(__dirname, "bech32.cjs"));
+    await new Promise((r) => process.stdout.write(encode("age1mock", Buffer.alloc(32, 7)) + "\n", r));
+    rl.close();
+    return;
+  }
+  process.exitCode = 1;
+  rl.close();
+})();

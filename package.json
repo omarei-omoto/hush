@@ -1,0 +1,65 @@
+{
+  "name": "@omarei/hush",
+  "version": "0.1.1",
+  "description": "Envelope-encrypted team secrets your AI agent can use but never read. Zero dependencies, zero servers — your git repo is the backend.",
+  "keywords": [
+    "secrets",
+    "dotenv",
+    "env",
+    "encryption",
+    "mcp",
+    "ai-agent",
+    "claude-code",
+    "x25519",
+    "team",
+    "vault"
+  ],
+  "license": "MIT",
+  "author": "omarei",
+  "homepage": "https://github.com/omarei-omoto/hush#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omarei-omoto/hush.git"
+  },
+  "bugs": {
+    "url": "https://github.com/omarei-omoto/hush/issues"
+  },
+  "type": "module",
+  "bin": {
+    "hush": "bin/hush.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/vault.d.ts",
+      "default": "./dist/vault.js"
+    }
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "skills",
+    "native",
+    "docs",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "hush": "node src/cli.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "version": "node -e \"const f='src/version.ts',s=require('fs');s.writeFileSync(f,s.readFileSync(f,'utf8').replace(/VERSION = \\\"[^\\\"]+\\\"/,'VERSION = \\\"'+require('./package.json').version+'\\\"'))\" && git add src/version.ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "typescript": "^5.8.0"
+  }
+}

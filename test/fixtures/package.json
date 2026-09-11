@@ -1,0 +1,4 @@
+{
+  "//": "age invokes a plugin by exact name, so age-plugin-mock cannot take a .cjs extension. The repo is type:module, which would make an extensionless script ESM and break its require() calls. This scopes the fixtures directory back to CommonJS.",
+  "type": "commonjs"
+}

@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A read-only token is all this needs.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test · ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others.
+      fail-fast: false
+      matrix:
+        # macOS is where it is developed; ubuntu is where most people will run
+        # it and where the platform-guarded paths actually get exercised.
+        os: [ubuntu-latest, macos-latest]
+        node: ["22.x", "24.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # devDependencies only — there are no runtime dependencies to install.
+      - run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      # `age` turns on the hardware-path tests, which drive a real C2SP plugin
+      # through the real age binary. Without it they skip.
+      - name: install age
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y age
+          else
+            brew install age
+          fi
+
+      # Run once and read the summary from that run: running the suite twice to
+      # inspect it is a good way to have the two runs disagree.
+      - name: test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/test.out
+      - name: summary
+        if: always()
+        shell: bash
+        run: grep -E '^# (tests|pass|fail|skipped)' /tmp/test.out || true
+
+  package:
+    name: the published package runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: npm ci
+      # Node refuses to strip types under node_modules, so an installed copy has
+      # to run the built output. This is the check that would have caught the
+      # package being completely unusable while every other test passed.
+      - run: npm run build
+      - name: pack, install elsewhere, and use it
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination /tmp
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y > /dev/null
+          npm install /tmp/*.tgz
+          export HUSH_HOME=/tmp/hushhome HUSH_NO_KEYCHAIN=1 HUSH_NO_NUDGE=1 NO_COLOR=1
+          ./node_modules/.bin/hush --version
+          ./node_modules/.bin/hush id --create
+          ./node_modules/.bin/hush init ci
+          ./node_modules/.bin/hush set CI_KEY=ci_value_1234567890
+          ./node_modules/.bin/hush run --quiet -- sh -c 'echo "$CI_KEY"' | grep -q 'redacted:CI_KEY'
+          ./node_modules/.bin/hush verify
+
+  fuzz:
+    name: deeper fuzzing
+    runs-on: ubuntu-latest
+    # Nightly rather than per-PR: the same search, many times over, which is
+    # worth doing but not worth waiting for on every push.
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: npm ci
+      - run: HUSH_FUZZ_SCALE=40 node --test test/fuzz.test.ts

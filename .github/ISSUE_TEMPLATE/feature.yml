@@ -1,0 +1,22 @@
+name: Idea
+description: Something hush should do, or should do differently
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        The situation rather than the solution. "I have three fal accounts and I
+        keep using the wrong one" tells me more than "add a dropdown".
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What do you do about it today?
+      description: Including "nothing, I gave up" — that is useful to know.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you had in mind, if you have something in mind

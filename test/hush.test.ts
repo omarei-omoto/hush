@@ -37,6 +37,28 @@ import { execFileSync } from "node:child_process";
 
 const scratch = () => mkdtempSync(join(tmpdir(), "hush-test-"));
 
+/**
+ * loadPolicy() now also reads ~/.hush/policy.json (see identity.ts's
+ * hushHome()), so any test calling it in-process — rather than spawning a
+ * child with its own env, the way most of this file does — has to pin
+ * HUSH_HOME itself or it is at the mercy of whatever the machine running the
+ * suite happens to have there.
+ */
+function withHushHome<T>(home: string, fn: () => T): T {
+  const saved = process.env.HUSH_HOME;
+  process.env.HUSH_HOME = home;
+  try {
+    return fn();
+  } catch (e) {
+    // Restored in `finally` below either way; this catch exists only so a
+    // thrown error is never mistaken for one swallowed on the way out.
+    throw e;
+  } finally {
+    if (saved === undefined) delete process.env.HUSH_HOME;
+    else process.env.HUSH_HOME = saved;
+  }
+}
+
 describe("crypto", () => {
   test("public/secret keys round-trip through their string form", () => {
     const id = generateIdentity();
@@ -746,12 +768,13 @@ describe("audit regressions", () => {
 
   test("policy.json cannot hold the deny list below the built-in floor", () => {
     const dir = scratch();
+    const home = scratch(); // no floor file in it — an absent floor changes nothing here
     // Exactly what an older hush wrote: a short list, missing interpreters.
     writeFileSync(
       join(dir, "policy.json"),
       JSON.stringify({ denyCommands: ["env", "cat"], allowEnvs: ["dev"] }),
     );
-    const policy = loadPolicy(dir);
+    const policy = withHushHome(home, () => loadPolicy(dir));
 
     assert.ok(policy.denyCommands.includes("node"), "stale config dropped a protection");
     assert.ok(policy.denyCommands.includes("python3"));
@@ -760,15 +783,46 @@ describe("audit regressions", () => {
     // The rest of the file is still honoured.
     assert.deepEqual(policy.allowEnvs, ["dev"]);
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
-  test("unsafeAllowCommands is the only way below the floor", () => {
+  test("unsafeAllowCommands is the only way below the floor, and only once the user's own floor agrees", () => {
     const dir = scratch();
+    const home = scratch();
     writeFileSync(join(dir, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
-    const policy = loadPolicy(dir);
-    assert.ok(!policy.denyCommands.includes("node"), "explicit opt-out did not apply");
-    assert.ok(policy.denyCommands.includes("bash"), "it removed more than asked");
+
+    // The repo alone asking for it does nothing now — see mergePolicies() in
+    // policy.ts. That is the fix: an agent with write access to the repo can
+    // no longer reopen a denied command by itself.
+    const repoOnly = withHushHome(home, () => loadPolicy(dir));
+    assert.ok(repoOnly.denyCommands.includes("node"), "a repo-only unsafeAllowCommands opened the floor without the user's agreement");
+
+    // Once the user's own floor also names it, it works exactly as before.
+    writeFileSync(join(home, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
+    const withFloor = withHushHome(home, () => loadPolicy(dir));
+    assert.ok(!withFloor.denyCommands.includes("node"), "explicit opt-out did not apply once the floor agreed");
+    assert.ok(withFloor.denyCommands.includes("bash"), "it removed more than asked");
+
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("an invalid-JSON repo file still yields the defaults, with the user's floor applied on top", () => {
+    const dir = scratch();
+    const home = scratch();
+    writeFileSync(join(dir, "policy.json"), "{ this is not valid json");
+    // requireApproval's defaults already include everything it could name, so
+    // it cannot show a floor doing anything beyond the defaults; denyCommands
+    // can, since the built-in floor is not the whole of DEFAULT_POLICY here.
+    writeFileSync(join(home, "policy.json"), JSON.stringify({ denyCommands: ["psql"] }));
+
+    const policy = withHushHome(home, () => loadPolicy(dir));
+    assert.deepEqual(policy.allowEnvs, [], "a broken repo file should fall back to the defaults, not crash");
+    assert.ok(policy.denyCommands.includes("node"), "the built-in floor was dropped for a broken repo file");
+    assert.ok(policy.denyCommands.includes("psql"), "the user's floor was not applied on top of the defaults");
+
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
   test("an approval granted for one vault does not carry to another", async () => {

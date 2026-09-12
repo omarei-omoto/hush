@@ -9,14 +9,13 @@
  * short enough to implement here rather than take an SDK for.
  */
 import { createInterface } from "node:readline";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveVaultPath, Vault, audit } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
 import { composeSets, usedSets, librarySets, globalVaultName, openGlobal } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
-import { checkEnv, checkScopes, checkCommand } from "./policy.ts";
-import { requireIdentity } from "./identity.ts";
+import { checkEnv, checkScopes, checkCommand, runScope, approvalCoverageLine, readPolicyFile, mergePolicies } from "./policy.ts";
+import { requireIdentity, hushHome } from "./identity.ts";
 import { scanRepo, reconcile } from "./scan.ts";
 import { runWithSecrets } from "./run.ts";
 import { preview } from "./redact.ts";
@@ -65,6 +64,13 @@ export interface Policy {
   approvalTimeoutSeconds: number;
   /** "off" | "preferred" | "required" — gate approvals behind Touch ID. */
   biometry: "off" | "preferred" | "required";
+  /**
+   * What an "Allow 15 min" grant covers. "command" (the default) scopes it to
+   * the command's basename plus the sets in use; "sets" is the pre-existing,
+   * wider shape that covers any command using those sets. See runScope() in
+   * policy.ts — both surfaces build the scope string through it.
+   */
+  approvalScope: "command" | "sets";
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -90,35 +96,26 @@ export const DEFAULT_POLICY: Policy = {
   approvalTtlSeconds: 900,
   approvalTimeoutSeconds: 120,
   biometry: "preferred",
+  approvalScope: "command",
 };
 
 /**
- * The deny list is a floor, not a setting.
+ * The deny list is a floor, not a setting — and now there are two floors.
  *
  * A plain object merge let an on-disk policy.json *replace* denyCommands, so a
  * file written by an older version silently kept its shorter list and missed
  * every protection added since. Security defaults that apply only to fresh
- * installs are not defaults. Entries in the file are therefore unioned with the
- * built-ins, and going below the floor takes the deliberately unattractive
- * `unsafeAllowCommands`.
+ * installs are not defaults. Entries in the repo file are therefore unioned
+ * with the built-ins, and going below that takes the deliberately unattractive
+ * `unsafeAllowCommands` — which itself now needs the *user's* ~/.hush/policy.json
+ * to agree, because the repo file is something an agent with write access to
+ * the project can edit, and the whole point of a floor is that it cannot.
+ * mergePolicies() in policy.ts has the actual per-field rules.
  */
 export function loadPolicy(hushDir: string): Policy {
-  const p = join(hushDir, "policy.json");
-  if (!existsSync(p)) return DEFAULT_POLICY;
-
-  let raw: Partial<Policy>;
-  try {
-    raw = JSON.parse(readFileSync(p, "utf8")) as Partial<Policy>;
-  } catch {
-    return DEFAULT_POLICY;
-  }
-
-  const unsafeAllow = new Set((raw.unsafeAllowCommands ?? []).map(String));
-  const denyCommands = [
-    ...new Set([...DEFAULT_POLICY.denyCommands, ...(raw.denyCommands ?? [])]),
-  ].filter((cmd) => !unsafeAllow.has(cmd));
-
-  return { ...DEFAULT_POLICY, ...raw, denyCommands, unsafeAllowCommands: [...unsafeAllow] };
+  const floor = readPolicyFile(join(hushHome(), "policy.json"));
+  const repo = readPolicyFile(join(hushDir, "policy.json"));
+  return mergePolicies(DEFAULT_POLICY, floor, repo);
 }
 
 // --------------------------------------------------------------- JSON-RPC
@@ -488,11 +485,15 @@ async function callTool(name: string, args: any): Promise<unknown> {
             `Using sets:  ${resolved.layers.join(", ") || "(none)"}`,
             `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
             `Directory:  ${args.cwd || ctx.root}`,
+            approvalCoverageLine(ctx.policy, command, resolved.layers),
           ],
-          // Exactly the layers composeSets() resolved, joined with "+" — the
-          // same shape resolve() used to build, so a "session" grant cached
-          // under the old scope string still matches under the new one.
-          scope: `run:${resolved.layers.join("+")}`,
+          // Built by runScope(), not by hand: under the default
+          // approvalScope: "command" this names the command too, not only the
+          // sets, so "Allow 15 min" for one command no longer silently covers
+          // every other command sharing those sets. A grant cached under the
+          // old, sets-only shape will not match this one — one re-prompt, then
+          // it is cached under the new shape like anything else.
+          scope: runScope(ctx.policy, command, resolved.layers),
           ttlSeconds: ctx.policy.approvalTtlSeconds,
           timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
           biometry: ctx.policy.biometry,

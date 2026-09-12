@@ -87,6 +87,15 @@ tool that returns one.
 - **A click can be made by anything at your unlocked laptop.** If the agent
   can drive your screen, rung 4 — `hush biometry setup` and
   `"biometry": "required"` — makes the approval a fingerprint instead.
+- **The terminal queue is not a boundary.** With no desktop dialog (a
+  server, `HUSH_APPROVAL_MODE=file`), a request waits as a file under
+  `.hush/pending/` for you to answer with `hush approve` — and an agent with
+  a file tool can answer it too. `biometry: "required"` refuses rather than
+  falling back to that queue, which is why it is the real mitigation.
+- **Set a floor, even an empty one.** An agent that can set environment
+  variables when it runs `hush` can point `HUSH_VAULT` at a copy of the vault
+  in a folder with no policy. With `~/.hush/policy.json` present — even
+  `{}` — the defaults' approvals still apply to that copy.
 - **The line again:** with a software identity, an agent with an unrestricted
   shell can read your key directly and skip all of the above. The prompt is a
   strong deterrent and an audit trail, not a wall. If your agent has that
@@ -142,6 +151,13 @@ tool that returns one.
 rung is a strict checklist: a later check never lifts you past an earlier gap.
 
 ---
+
+## What has been tried against it
+
+[docs/RED-TEAM.md](./RED-TEAM.md) is the log of an adversarial pass over every
+surface hush exposes — what got a value out (and was fixed), what could not,
+and what is accepted and why. Read it before deciding how much to trust the
+prompts.
 
 ## Where hush stops
 

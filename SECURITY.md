@@ -94,6 +94,8 @@ that changes what is cryptographically possible.**
 
 For which of this matters in your situation — alone, with an agent, or as a
 team — and what to turn on for each, see [docs/SAFETY.md](./docs/SAFETY.md).
+What has actually been tried against these surfaces, and with what result, is
+in [docs/RED-TEAM.md](./docs/RED-TEAM.md).
 
 ### What it does not protect
 

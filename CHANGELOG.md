@@ -9,7 +9,8 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 - **"Allow 15 min" covers the command and the sets**, not the sets alone (`approvalScope`).
 - **A user-level policy floor** in `~/.hush/policy.json` that a repo policy can only tighten.
 - **Secure prompts on Linux** through `zenity` / `kdialog`, so off-transcript key entry and approvals are no longer macOS-only.
-- `docs/SAFETY.md` — which of the security model matters in your situation.
+- `docs/SAFETY.md` — which of the security model matters in your situation; `docs/RED-TEAM.md` — an adversarial pass over every surface, with results.
+- **Security:** a forged `grants.local.json` could skip the approval for `reveal` and `add` — those grants now live in memory only; a symlink planted at that path could make a later legitimate approval overwrite an arbitrary file — hush no longer writes through one.
 - Windows declared unsupported (`package.json` `os`) until it has been run.
 - **Your library's `default` is your global environment** — under everything, in every folder; `hush add K=v --library` with no set name lands there.
 - `hush scan` reconciles against every set the project uses, not only the project vault.

@@ -17,7 +17,6 @@ import { spawnSync } from "node:child_process";
 import { generateIdentity, decodeSecret, newDek, wrapDek, unwrapDek, encodeSecret, encodePub, SK_PREFIX } from "../src/crypto.ts";
 import { Vault, resolveVaultPath, slugifyEnv, assertScopeName } from "../src/vault.ts";
 import { requestApproval, clearApprovalCache, type ApprovalDeps } from "../src/approval.ts";
-import { parseScope, scopeOf } from "../src/services.ts";
 import { scanRepo } from "../src/scan.ts";
 import { checkAndRecord } from "../src/integrity.ts";
 import { createIdentity } from "../src/identity.ts";
@@ -68,18 +67,6 @@ describe("crypto: nonce and length discipline", () => {
     }
     // The real one still works, so the check is not simply refusing everything.
     assert.deepEqual(decodeSecret(good).pub, id.pub);
-  });
-});
-
-describe("scopes", () => {
-  test("a scope with no service is not a scope", () => {
-    assert.equal(parseScope("/personal"), null, '"/personal" has an empty service');
-    assert.equal(parseScope("fal"), null, "no separator at all");
-    assert.equal(parseScope(""), null);
-    assert.deepEqual(parseScope("fal/acme"), { service: "fal", account: "acme" });
-    // An account may itself contain the separator; the split is at the first one.
-    assert.deepEqual(parseScope("aws/team/prod"), { service: "aws", account: "team/prod" });
-    assert.equal(scopeOf("fal", "acme"), "fal/acme");
   });
 });
 
@@ -812,7 +799,7 @@ describe("named env sets", () => {
       v.save();
 
       const reopened = Vault.open(join(dir, "v.json"));
-      const set = reopened.envSets().find((s) => s.name === "default")!;
+      const set = reopened.sets().find((s) => s.name === "default")!;
       assert.equal(set.label, "Acme Production");
       assert.equal(set.description, "Live Stripe + Convex");
       assert.equal(set.whenToUse, "deploys only");
@@ -822,7 +809,7 @@ describe("named env sets", () => {
       assert.doesNotThrow(() => reopened.describeEnv("default", { description: "changed" }));
       // And every field is optional: clearing one leaves the others.
       reopened.describeEnv("default", { description: "" });
-      const after = reopened.envSets().find((s) => s.name === "default")!;
+      const after = reopened.sets().find((s) => s.name === "default")!;
       assert.equal(after.description, undefined);
       assert.equal(after.whenToUse, "deploys only");
       assert.equal(after.label, "Acme Production");

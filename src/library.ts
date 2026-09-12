@@ -211,63 +211,6 @@ export function composeSets(
   return { secrets, layers, missing };
 }
 
-/**
- * @deprecated Use composeSets(). Kept for cli.ts's `hush run` and
- * `hush export`, which still resolve an env plus a pile of (service, account)
- * choices themselves; once they build a flat set-name list directly (from a
- * `--use` flag) they can call composeSets() and this goes away.
- *
- * Deliberately *not* implemented by calling composeSets(): its `extra`
- * handling goes through usedSets(hushDir), which re-reads use.json for
- * compatibility. A caller here has already resolved use.json plus `--with`
- * into `choices` itself (see chooseAccounts() in cli.ts), with `--with`
- * winning per service — so that second read would silently re-add the pinned
- * account's other variables even after `--with` overrode it for this run.
- * resolveSets() takes `choices` as given instead, with no read of its own.
- */
-export function compose(
-  project: Vault | null,
-  id: Opener,
-  hushDir: string | null,
-  baseEnv: string,
-  choices: { service: string; account: string }[] = [],
-): Composed {
-  const secrets: Record<string, string> = {};
-  const layers: string[] = [];
-  const missing: string[] = [];
-
-  const links = hushDir ? loadLinks(hushDir) : [];
-  if (links.length) {
-    const library = openGlobal();
-    for (const name of links) {
-      if (!library?.hasSet(name)) {
-        missing.push(name);
-        continue;
-      }
-      Object.assign(secrets, library.materialize(id, name));
-      layers.push(`${globalVaultName()}:${name}`);
-    }
-  }
-
-  if (project) {
-    const names = [
-      ...(project.hasSet(baseEnv) ? [baseEnv] : []),
-      ...choices.map((c) => setNameFor(c.service, c.account)),
-    ];
-    const resolved = project.resolveSets(id, names);
-    Object.assign(secrets, resolved.secrets);
-    layers.push(...resolved.layers);
-  } else if (choices.length) {
-    throw new ValidationError(
-      `No project vault here, so there is no account to use for ${choices
-        .map((c) => setNameFor(c.service, c.account))
-        .join(", ")}.`,
-    );
-  }
-
-  return { secrets, layers, missing };
-}
-
 /** One line per set, for `hush env` and the UI. */
 export interface LibrarySet {
   name: string;
@@ -276,14 +219,15 @@ export interface LibrarySet {
   whenToUse?: string;
   source?: string;
   keys: string[];
-  /** True when the project in hand links this set. */
-  linked: boolean;
 }
 
-export function librarySets(hushDir: string | null): LibrarySet[] {
+// `hushDir` is part of the call-site shape shared with usedSets()/composeSets()
+// (cli.ts, mcp.ts and ui.ts all pass it here without checking whether this
+// particular function still needs it) — kept unused rather than dropped, since
+// removing the parameter would break every one of those call sites.
+export function librarySets(_hushDir: string | null): LibrarySet[] {
   const library = openGlobal();
   if (!library) return [];
-  const linked = new Set(hushDir ? loadLinks(hushDir) : []);
   return library
     .sets()
     // Every vault is born with an empty "default". In a project that is the
@@ -300,7 +244,6 @@ export function librarySets(hushDir: string | null): LibrarySet[] {
       whenToUse: s.whenToUse,
       source: s.source,
       keys: s.keys,
-      linked: linked.has(s.name),
     }));
 }
 

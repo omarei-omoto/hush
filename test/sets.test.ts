@@ -10,17 +10,16 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { generateIdentity } from "../src/crypto.ts";
-import { Vault, loadUse, saveUse, ValidationError } from "../src/vault.ts";
+import { Vault, ValidationError } from "../src/vault.ts";
 import {
   usedSets,
   composeSets,
-  compose,
   librarySets,
   saveLinks,
   globalVaultName,
@@ -42,6 +41,15 @@ function withHome<T>(home: string, fn: () => T): T {
   }
 }
 
+/**
+ * Write .hush/use.json the way a pre-unification vault would have. saveUse()
+ * is gone along with every other writer of this file — loadUse() (and, through
+ * it, usedSets()) still reads it for compatibility, which is the one thing
+ * these tests need to fake.
+ */
+const writeUseFile = (hushDir: string, use: Record<string, string>): void =>
+  writeFileSync(join(hushDir, "use.json"), JSON.stringify(use, null, 2) + "\n");
+
 describe("services: setNameFor", () => {
   test("joins service and account with a slash", () => {
     // The one place the "/" convention lives — CLI/MCP call this rather than
@@ -51,7 +59,7 @@ describe("services: setNameFor", () => {
   });
 });
 
-describe("Vault.sets() / envSets() / hasSet()", () => {
+describe("Vault.sets() / hasSet()", () => {
   const setup = () => {
     const dir = scratch();
     const owner = generateIdentity();
@@ -68,23 +76,6 @@ describe("Vault.sets() / envSets() / hasSet()", () => {
     const names = sets.map((s) => s.name).sort();
     assert.deepEqual(names, ["default", "fal/acme", "prod"]);
     for (const s of sets) assert.ok(!("isAccount" in s), `sets() still carries isAccount for ${s.name}`);
-  });
-
-  test("envSets() is a deprecated alias: same shape as sets(), plus isAccount computed", () => {
-    const { owner, vault } = setup();
-    vault.set(owner, "fal/acme", "FAL_KEY", "x");
-    vault.set(owner, "prod", "DATABASE_URL", "y");
-
-    const sets = vault.sets();
-    const envSets = vault.envSets();
-    assert.deepEqual(
-      envSets.map(({ isAccount: _isAccount, ...rest }) => rest),
-      sets,
-    );
-    const byName = new Map(envSets.map((s) => [s.name, s.isAccount]));
-    assert.equal(byName.get("fal/acme"), true);
-    assert.equal(byName.get("prod"), false);
-    assert.equal(byName.get("default"), false);
   });
 
   test("hasSet() reports existence without materialising anything", () => {
@@ -208,7 +199,7 @@ describe("library: usedSets()", () => {
   test("orders 'default' first, then envs.json links, then use.json compat pairs, last mention wins", () => {
     const hushDir = hushDirScratch();
     saveLinks(hushDir, ["acme-production", "fal/acme"]); // a link that happens to look like a compat name too
-    saveUse(hushDir, { gemini: "team", fal: "acme" }); // fal/acme names the link above again
+    writeUseFile(hushDir, { gemini: "team", fal: "acme" }); // fal/acme names the link above again
 
     const used = usedSets(hushDir);
     // "default" is the floor; "fal/acme" is not repeated and keeps its *last*
@@ -385,12 +376,11 @@ describe("library: composeSets()", () => {
   });
 });
 
-describe("library: compose() vs composeSets() — migration compatibility", () => {
-  // Bites: this is the one the task calls out by name. Build a vault the way
-  // code *before* this change would have — accounts() scopes plus a
-  // use.json pin — then check the unified reader gets the same secrets as
-  // the account-shaped reader did.
-  test("a vault with fal/acme scopes and a use.json pin resolves identically both ways", () => {
+describe("library: use.json compatibility", () => {
+  // Bites: a version that dropped the loadUse() fold in usedSets() would
+  // resolve only "default" here, missing FAL_KEY entirely — a project set up
+  // before sets were unified would silently lose its pinned account.
+  test("a vault with a fal/acme scope and a use.json pin still resolves through usedSets()/composeSets()", () => {
     const home = scratch();
     withHome(home, () => {
       const dir = scratch();
@@ -402,34 +392,24 @@ describe("library: compose() vs composeSets() — migration compatibility", () =
 
       const hushDir = join(dir, ".hush");
       mkdirSync(hushDir, { recursive: true });
-      saveUse(hushDir, { fal: "acme" }); // the old pin, written the old way
+      // The old pin, written directly rather than through saveUse() — which
+      // no longer exists — to fake a project set up before sets were unified.
+      writeUseFile(hushDir, { fal: "acme" });
 
-      // Old-style caller: resolve the pin into (service, account) choices
-      // itself, exactly as chooseAccounts() in cli.ts does, then call compose().
-      const oldChoices = Object.entries(loadUse(hushDir)).map(([service, account]) => ({ service, account }));
-      const viaCompose = compose(vault, owner, hushDir, "default", oldChoices);
-
-      // New-style caller: composeSets() reads the same use.json through
-      // usedSets(), with nothing extra to pass.
-      const viaComposeSets = composeSets(vault, owner, hushDir);
-
-      assert.deepEqual(viaComposeSets.secrets, viaCompose.secrets);
-      assert.deepEqual(viaCompose.secrets, { SHARED: "shared-value", FAL_KEY: "acme-key" });
+      const result = composeSets(vault, owner, hushDir);
+      assert.deepEqual(result.secrets, { SHARED: "shared-value", FAL_KEY: "acme-key" });
+      assert.deepEqual(result.layers, ["default", "fal/acme"]);
     });
   });
 
-  test("use.json is read for compatibility, but nothing in library.ts or vault.ts writes it again", () => {
-    // A quick source grep rather than a behavioural assertion — the claim is
-    // about what calls saveUse(), which a runtime test of these two files
-    // can't observe directly since neither exposes a hook for it. vault.ts
-    // *defines* saveUse() (one occurrence of "saveUse("); library.ts must
-    // have none at all. `hush use` in cli.ts still calls it for old
-    // projects, which is unaffected by this check.
+  test("use.json is read for compatibility, but nothing writes it any more", () => {
+    // A quick source grep rather than a behavioural assertion — saveUse() was
+    // the only writer and it is gone entirely now, so the claim is just that
+    // nothing reintroduces one, while loadUse() keeps reading the file.
     const vaultSrc = readFileSync(join(root, "src/vault.ts"), "utf8");
     const librarySrc = readFileSync(join(root, "src/library.ts"), "utf8");
-    const vaultCalls = [...vaultSrc.matchAll(/saveUse\(/g)].length;
-    assert.equal(vaultCalls, 1, "src/vault.ts calls saveUse() somewhere other than defining it");
-    assert.ok(!/saveUse\(/.test(librarySrc), "src/library.ts calls saveUse()");
+    assert.ok(!/saveUse/.test(vaultSrc), "src/vault.ts still defines or calls saveUse");
+    assert.ok(!/saveUse/.test(librarySrc), "src/library.ts still defines or calls saveUse");
     assert.ok(/loadUse\(/.test(librarySrc), "src/library.ts does not read use.json for compatibility");
   });
 });

@@ -375,7 +375,7 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
       assert.equal(r.code, 0, r.out);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const sets = vault.envSets();
+      const sets = vault.sets();
       const set = sets.find((s) => s.name === "acme-production");
       assert.ok(set, `no set named acme-production among: ${sets.map((s) => s.name).join(", ")}`);
       assert.equal(set!.label, "Acme Production");
@@ -405,7 +405,7 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
       assert.match(r.out, /--as/);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const def = vault.envSets().find((s) => s.name === "default")!;
+      const def = vault.sets().find((s) => s.name === "default")!;
       assert.ok(!def.keys.includes("PLAIN_ONE") && !def.keys.includes("PLAIN_TWO"), "keys were stored despite the failure");
     } finally {
       p.cleanup();
@@ -421,7 +421,7 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
       assert.ok(!r.out.includes("--as"), `--env still printed the --as tip:\n${r.out}`);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const set = vault.envSets().find((s) => s.name === "prod");
+      const set = vault.sets().find((s) => s.name === "prod");
       assert.ok(set && set.keys.includes("PROD_ONE"), "key did not land in the named --env");
     } finally {
       p.cleanup();
@@ -443,7 +443,7 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
       assert.match(second.out, /1 already present/, second.out);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const set = vault.envSets().find((s) => s.name === "acme-production");
+      const set = vault.sets().find((s) => s.name === "acme-production");
       assert.ok(set, "set missing after second import");
       assert.deepEqual(set!.keys.sort(), ["ONLY_IN_A", "ONLY_IN_B", "SHARED_KEY"]);
 
@@ -473,7 +473,7 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
       assert.equal(r.code, 0, r.out);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const set = vault.envSets().find((s) => s.name === "acme-production");
+      const set = vault.sets().find((s) => s.name === "acme-production");
       assert.ok(set && set.source && set.source.endsWith(".env.prod"), `source not recorded: ${JSON.stringify(set)}`);
     } finally {
       p.cleanup();

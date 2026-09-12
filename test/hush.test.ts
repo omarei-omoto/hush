@@ -29,7 +29,7 @@ import { spawnSync, spawn } from "node:child_process";
 import { Redactor, preview } from "../src/redact.ts";
 import { scanRepo, reconcile, parseEnvFile } from "../src/scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "../src/run.ts";
-import { parseWith, knownVars, serviceForVar } from "../src/services.ts";
+import { knownVars, serviceForVar, setNameFor } from "../src/services.ts";
 import { requestApproval, pendingRequests, answerRequest, clearApprovalCache } from "../src/approval.ts";
 import { biometryStatus, authenticate, ensureHelper } from "../src/biometry.ts";
 import { ageAvailable, isAgeRecipient, wrapDekWithAge, unwrapDekWithAge, identityPlugin, ageFingerprint, ageBinary, resetAgeBinaryCache } from "../src/age.ts";
@@ -373,35 +373,23 @@ describe("accounts", () => {
     return { dir, owner, vault };
   };
 
-  test("the same service can hold several accounts", () => {
-    const { owner, vault } = setup();
-    vault.set(owner, "fal/personal", "FAL_KEY", "fal_personal");
-    vault.set(owner, "fal/acme", "FAL_KEY", "fal_acme");
-    vault.set(owner, "fal/client", "FAL_KEY", "fal_client");
-
-    // accountsFor sorts, so this is alphabetical rather than insertion order.
-    assert.deepEqual(vault.accountsFor("fal"), ["acme", "client", "personal"]);
-    assert.equal(vault.get(owner, "fal/acme", "FAL_KEY"), "fal_acme");
-    assert.equal(vault.get(owner, "fal/client", "FAL_KEY"), "fal_client");
-  });
-
-  test("accounts are kept out of the plain environment list", () => {
+  test("account-scoped sets are kept out of the plain environment list", () => {
     const { owner, vault } = setup();
     vault.set(owner, "fal/acme", "FAL_KEY", "x");
     vault.set(owner, "prod", "DATABASE_URL", "y");
     assert.deepEqual(vault.plainEnvs(), ["default", "prod"]);
-    assert.deepEqual(vault.accounts().map((a) => a.scope), ["fal/acme"]);
   });
 
-  test("resolve layers the chosen account over the base environment", () => {
+  test("resolveSets layers the chosen set over the base environment", () => {
     const { owner, vault } = setup();
     vault.set(owner, "default", "PORT_URL", "http://base");
     vault.set(owner, "fal/acme", "FAL_KEY", "fal_acme");
     vault.set(owner, "gemini/team", "GEMINI_API_KEY", "gem_team");
 
-    const { secrets, layers } = vault.resolve(owner, "default", [
-      { service: "fal", account: "acme" },
-      { service: "gemini", account: "team" },
+    const { secrets, layers } = vault.resolveSets(owner, [
+      "default",
+      setNameFor("fal", "acme"),
+      setNameFor("gemini", "team"),
     ]);
     assert.deepEqual(secrets, {
       PORT_URL: "http://base",
@@ -411,24 +399,15 @@ describe("accounts", () => {
     assert.deepEqual(layers, ["default", "fal/acme", "gemini/team"]);
   });
 
-  test("a later account wins over an earlier one for the same variable", () => {
+  test("a later set wins over an earlier one for the same variable", () => {
     const { owner, vault } = setup();
     vault.set(owner, "fal/personal", "FAL_KEY", "personal");
     vault.set(owner, "fal/client", "FAL_KEY", "client");
-    const { secrets } = vault.resolve(owner, "default", [
-      { service: "fal", account: "personal" },
-      { service: "fal", account: "client" },
+    const { secrets } = vault.resolveSets(owner, [
+      setNameFor("fal", "personal"),
+      setNameFor("fal", "client"),
     ]);
     assert.equal(secrets.FAL_KEY, "client");
-  });
-
-  test("asking for an account that does not exist names the ones that do", () => {
-    const { owner, vault } = setup();
-    vault.set(owner, "fal/acme", "FAL_KEY", "x");
-    assert.throws(
-      () => vault.resolve(owner, "default", [{ service: "fal", account: "nope" }]),
-      /No account "nope".*Known: acme/s,
-    );
   });
 
   test("an account's value is bound to its own scope", () => {
@@ -437,12 +416,6 @@ describe("accounts", () => {
     // Copy acme's ciphertext into the client slot by hand.
     vault.data.envs["fal/client"] = { FAL_KEY: { ...vault.data.envs["fal/acme"].FAL_KEY } };
     assert.throws(() => vault.get(owner, "fal/client", "FAL_KEY"));
-  });
-
-  test("parseWith accepts both separators and rejects junk", () => {
-    assert.deepEqual(parseWith("fal:acme"), { service: "fal", account: "acme" });
-    assert.deepEqual(parseWith("gemini=team"), { service: "gemini", account: "team" });
-    assert.throws(() => parseWith("nonsense"), /Use --with/);
   });
 
   test("the catalog knows what the common services need", () => {
@@ -1199,8 +1172,7 @@ describe("resolution consistency", () => {
     vault.set(owner, "default", "BASE_KEY", "base");
     vault.set(owner, "fal/personal", "FAL_KEY", "fal-value");
 
-    const choices = [{ service: "fal", account: "personal" }];
-    const { secrets } = vault.resolve(owner, "default", choices);
+    const { secrets } = vault.resolveSets(owner, ["default", setNameFor("fal", "personal")]);
 
     assert.deepEqual(Object.keys(secrets).sort(), ["BASE_KEY", "FAL_KEY"]);
     assert.equal(secrets.FAL_KEY, "fal-value");
@@ -1920,15 +1892,6 @@ describe("tagging is metadata, not ciphertext", () => {
 });
 
 describe("gaps found by the broad mutation sweep", () => {
-  test("--with rejects anything that is not service:account", () => {
-    // "nonsense" was already covered; these are the shapes a loose pattern lets through.
-    for (const bad of ["a b:c d", "fal:", ":acme", "fal acme", "fal:mod io", "", "  ", "fal::"]) {
-      assert.throws(() => parseWith(bad), /Use --with/, `accepted ${JSON.stringify(bad)}`);
-    }
-    assert.deepEqual(parseWith("fal:acme"), { service: "fal", account: "acme" });
-    assert.deepEqual(parseWith("my-svc.1=acct_2"), { service: "my-svc.1", account: "acct_2" });
-  });
-
   test("the ladder cannot skip a failed rung, however good the later ones are", () => {
     process.env.HUSH_BIOMETRY = "off";
     process.env.HUSH_IDENTITY = encodeSecret(generateIdentity());

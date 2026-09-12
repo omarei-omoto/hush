@@ -6,7 +6,7 @@
  * pointer. The second form is how one team vault serves many repos.
  */
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync,
+  existsSync, mkdirSync, readFileSync, appendFileSync,
   openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, statSync,
 } from "node:fs";
 import { dirname, join, resolve, isAbsolute } from "node:path";
@@ -29,7 +29,7 @@ import {
 } from "./crypto.ts";
 import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from "./age.ts";
 import { hushHome } from "./identity.ts";
-import { isAccountScope, parseScope, scopeOf } from "./services.ts";
+import { isAccountScope } from "./services.ts";
 
 export interface Recipient {
   name: string;
@@ -223,9 +223,10 @@ export interface LinkFile {
 export type UseFile = Record<string, string>;
 
 /**
- * @deprecated Read for compatibility by usedSets() in src/library.ts, which
- * folds each pair into a `service/account` set name. Nothing else should
- * start reading this file — a set name is now just a name.
+ * @deprecated Compatibility read only. usedSets() in src/library.ts reads
+ * this to fold each pair into a `service/account` set name, for a project set
+ * up before sets were unified. Nothing writes this file any more — there is
+ * no (service, account) pin left to save once a set is just a name.
  */
 export function loadUse(hushDir: string): UseFile {
   const p = join(hushDir, "use.json");
@@ -235,16 +236,6 @@ export function loadUse(hushDir: string): UseFile {
   } catch {
     return {};
   }
-}
-
-/**
- * @deprecated There is no (service, account) pin left to save once a set is
- * just a name — `hush use` still writes this file for old vaults, but
- * src/library.ts and src/vault.ts never call it themselves.
- */
-export function saveUse(hushDir: string, use: UseFile): void {
-  mkdirSync(hushDir, { recursive: true });
-  writeFileSync(join(hushDir, "use.json"), JSON.stringify(use, null, 2) + "\n");
 }
 
 // ------------------------------------------------------------------ locating
@@ -797,65 +788,6 @@ export class Vault {
   }
 
   /**
-   * @deprecated Use sets() — a scope with a "/" in it is just a set whose name
-   * has a "/" in it now, not a separate kind of thing.
-   *
-   * Every (service, account) pair holding at least one secret.
-   */
-  accounts(): { service: string; account: string; scope: string; vars: string[] }[] {
-    const out: { service: string; account: string; scope: string; vars: string[] }[] = [];
-    for (const scope of this.envNames()) {
-      const parsed = parseScope(scope);
-      if (!parsed) continue;
-      out.push({ ...parsed, scope, vars: Object.keys(this.data.envs[scope] ?? {}).sort() });
-    }
-    return out.sort((a, b) =>
-      a.service === b.service ? a.account.localeCompare(b.account) : a.service.localeCompare(b.service),
-    );
-  }
-
-  /** @deprecated Use hasSet() with the set name directly, e.g. hasSet("fal/acme"). */
-  accountsFor(service: string): string[] {
-    return this.accounts()
-      .filter((a) => a.service === service.toLowerCase())
-      .map((a) => a.account);
-  }
-
-  /**
-   * @deprecated Use resolveSets(id, names) — a flat, ordered list of set
-   * names, later wins, with no separate "base env plus accounts" shape.
-   *
-   * Build the environment for a run: the base env, then each chosen service
-   * account layered on top. Later layers win, so `--with` beats a pinned default.
-   */
-  resolve(
-    id: Opener,
-    baseEnv: string,
-    choices: { service: string; account: string }[],
-  ): { secrets: Record<string, string>; layers: string[] } {
-    const secrets: Record<string, string> = {};
-    const layers: string[] = [];
-
-    if (this.data.envs[baseEnv]) {
-      Object.assign(secrets, this.materialize(id, baseEnv));
-      layers.push(baseEnv);
-    }
-    for (const { service, account } of choices) {
-      const scope = scopeOf(service, account);
-      if (!this.data.envs[scope]) {
-        const known = this.accountsFor(service);
-        throw new ValidationError(
-          `No account "${account}" for service "${service}".` +
-            (known.length ? ` Known: ${known.join(", ")}` : ` Add one with: hush add ${service} --account ${account}`),
-        );
-      }
-      Object.assign(secrets, this.materialize(id, scope));
-      layers.push(scope);
-    }
-    return { secrets, layers };
-  }
-
-  /**
    * Merge named sets in order, later wins per key. The unified replacement
    * for resolve(): `resolveSets(id, ["default", "fal/acme"])` is what
    * `resolve(id, "default", [{service:"fal",account:"acme"}])` used to be —
@@ -961,23 +893,6 @@ export class Vault {
         };
       })
       .sort((a, b) => a.label.localeCompare(b.label));
-  }
-
-  /**
-   * @deprecated Use sets(). `isAccount` was how the two old vocabularies told
-   * themselves apart; computed here only so cli.ts and ui.ts keep working
-   * until they branch on the name instead.
-   */
-  envSets(): {
-    name: string;
-    label: string;
-    description?: string;
-    whenToUse?: string;
-    source?: string;
-    isAccount: boolean;
-    keys: string[];
-  }[] {
-    return this.sets().map((s) => ({ ...s, isAccount: isAccountScope(s.name) }));
   }
 
   /** A set by this name exists, whether or not it holds anything yet. */

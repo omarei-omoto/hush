@@ -24,6 +24,8 @@ import {
   saveLinks,
   globalVaultName,
   suggestSets,
+  ensureProjectVault,
+  writeProjectDotfiles,
 } from "../src/library.ts";
 import { setNameFor } from "../src/services.ts";
 
@@ -465,6 +467,12 @@ describe("suggestSets()", () => {
   test("the set covering the most needed keys wins the keys it shares with smaller ones", () => {
     const s = suggestSets(["DATABASE_URL", "FAL_KEY"], lib);
     assert.deepEqual(s.picks, ["acme-production"]);
+    // The same with the big set sorting *last*, so alphabetical-first cannot pass by luck.
+    const z = suggestSets(["DATABASE_URL", "FAL_KEY"], [
+      { name: "aaa-fal", keys: ["FAL_KEY"] },
+      { name: "zzz-production", keys: ["DATABASE_URL", "FAL_KEY"] },
+    ]);
+    assert.deepEqual(z.picks, ["zzz-production"], "coverage must beat name order");
     assert.deepEqual(s.provider, { DATABASE_URL: "acme-production", FAL_KEY: "acme-production" });
     assert.deepEqual(s.ambiguous, []);
     assert.deepEqual(s.uncovered, []);
@@ -489,5 +497,35 @@ describe("suggestSets()", () => {
   test("after a tie, the remaining keys are still resolved", () => {
     const s = suggestSets(["FAL_KEY", "GEMINI_API_KEY"], lib.filter((x) => x.name !== "acme-production"));
     assert.ok(s.picks.includes("gemini-team"), "the unambiguous key was abandoned after the tie");
+  });
+});
+
+describe("ensureProjectVault()", () => {
+  // Bites: a version that always creates would re-key a vault that exists;
+  // one that never writes the dotfiles leaves audit.log committable.
+  test("creates a vault with the member as admin once, and the dotfiles git needs", () => {
+    const dir = scratch();
+    const hushDir = join(dir, ".hush");
+    const owner = generateIdentity();
+    const first = ensureProjectVault(hushDir, { name: "me", pub: owner.pub }, "proj");
+    assert.equal(first.created, true);
+    assert.ok(first.vault.canRead(owner), "the member cannot read the vault it was made for");
+    assert.ok(readFileSync(join(hushDir, ".gitignore"), "utf8").includes("*.local.json"));
+    assert.ok(readFileSync(join(hushDir, ".gitattributes"), "utf8").includes("vault.json -merge"));
+
+    first.vault.set(owner, "default", "K", "v");
+    first.vault.save();
+    const again = ensureProjectVault(hushDir, { name: "me", pub: owner.pub }, "proj");
+    assert.equal(again.created, false);
+    assert.ok(again.vault.has("default", "K"), "an existing vault was replaced");
+  });
+
+  test("writeProjectDotfiles does not overwrite a .gitignore someone edited", () => {
+    const dir = scratch();
+    const hushDir = join(dir, ".hush");
+    mkdirSync(hushDir, { recursive: true });
+    writeFileSync(join(hushDir, ".gitignore"), "custom\n");
+    writeProjectDotfiles(hushDir);
+    assert.equal(readFileSync(join(hushDir, ".gitignore"), "utf8"), "custom\n");
   });
 });

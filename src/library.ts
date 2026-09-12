@@ -211,6 +211,43 @@ export function composeSets(
   return { secrets, layers, missing };
 }
 
+// ---------------------------------------------------------- project files
+
+/**
+ * The files every project's .hush/ carries besides the vault: what git must
+ * never see (the audit log, pending approvals, local grants, a loose identity)
+ * and what it must never try to merge (a vault is re-sealed as a whole, so a
+ * textual merge of two versions is a corrupt vault).
+ */
+export function writeProjectDotfiles(hushDir: string): void {
+  mkdirSync(hushDir, { recursive: true });
+  const gitignore = join(hushDir, ".gitignore");
+  if (!existsSync(gitignore)) {
+    writeFileSync(gitignore, ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n"));
+  }
+  const attrs = join(hushDir, ".gitattributes");
+  if (!existsSync(attrs)) {
+    writeFileSync(attrs, ["vault.json -merge", "use.json -merge", ""].join("\n"));
+  }
+}
+
+/**
+ * A project's own vault, made the first time it needs one — a project secret,
+ * a teammate — and not before: a folder that only uses library sets has no
+ * business carrying key material. Returns whether this call created it, so
+ * the caller can say so once.
+ */
+export function ensureProjectVault(
+  hushDir: string,
+  member: Parameters<typeof Vault.create>[2],
+  vaultName: string,
+): { vault: Vault; created: boolean } {
+  const path = join(hushDir, "vault.json");
+  writeProjectDotfiles(hushDir);
+  if (existsSync(path)) return { vault: Vault.open(path), created: false };
+  return { vault: Vault.create(path, vaultName, member), created: true };
+}
+
 // ------------------------------------------------------------- suggestions
 
 export interface Suggestion {

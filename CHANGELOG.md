@@ -4,6 +4,10 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.0 — 2026-09-12
+
 - **Works in any folder.** A folder with only `.hush/envs.json` is a project; the first run in a folder that is not set up scans the code and proposes which of your library sets it needs; a project vault is created the first time a project secret or a teammate needs one.
 - **One question at setup** — "Will an AI agent use secrets here?" — turns approvals on.
 - **"Allow 15 min" covers the command and the sets**, not the sets alone (`approvalScope`).

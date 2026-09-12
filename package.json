@@ -1,6 +1,6 @@
 {
   "name": "@omarei/hush",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Envelope-encrypted team secrets your AI agent can use but never read. Zero dependencies, zero servers — your git repo is the backend.",
   "keywords": [
     "secrets",

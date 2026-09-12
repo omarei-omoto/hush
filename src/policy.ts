@@ -13,6 +13,7 @@
  * the approval-scope helpers both surfaces share.
  */
 import { readFileSync } from "node:fs";
+import { ttlLabel } from "./dialogs.ts";
 import { ValidationError } from "./vault.ts";
 import type { Policy } from "./mcp.ts";
 
@@ -77,11 +78,15 @@ export function runScope(policy: Policy, command: string, layers: string[]): str
   return policy.approvalScope === "sets" ? `run:${sets}` : `run:${basenameOf(command)}:${sets}`;
 }
 
-/** The line added to an approval's detail so a human knows exactly what "Allow 15 min" buys. */
+/**
+ * The line added to an approval's detail so a human knows exactly what the
+ * session button buys — named with the policy's real TTL, the same label the
+ * button itself carries.
+ */
 export function approvalCoverageLine(policy: Policy, command: string, layers: string[]): string {
   const sets = layers.join(", ") || "(none)";
   const what = policy.approvalScope === "sets" ? "any command" : basenameOf(command);
-  return `Allow 15 min covers:  ${what} with ${sets}`;
+  return `${ttlLabel(policy.approvalTtlSeconds)} covers:  ${what} with ${sets}`;
 }
 
 /** Read a policy file (floor or repo), tolerating "missing" and "not valid JSON" alike as "nothing to add". */

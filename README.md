@@ -404,7 +404,8 @@ to a file that output redaction never sees:
   "unsafeAllowCommands": [],
   "allowEnvs": ["default", "work-fal"],
   "denyKeys": ["STRIPE_LIVE_KEY"],
-  "maxRunMs": 120000
+  "maxRunMs": 120000,
+  "approvalScope": "command"
 }
 ```
 
@@ -418,6 +419,18 @@ to a file that output redaction never sees:
   `client-fal`.
 - **`allowCommands`**, if non-empty, is an allowlist — the only command control
   that actually holds. Prefer it for anything sensitive.
+- **`approvalScope`** is what "Allow 15 min" covers: `"command"` (the default)
+  means that command with those sets; `"sets"` means any allowed command with
+  those sets, if you find the prompts too frequent.
+
+**Your floor.** `policy.json` is a file in the repo, so an agent with write
+access can edit it. `~/.hush/policy.json` — same shape, outside every repo —
+is your floor: a repo's policy can only *tighten* relative to it. `allowCommands`
+and `allowEnvs` can only narrow, `requireApproval` and `denyKeys` can only grow,
+`biometry` and `approvalScope` can only get stricter, and
+`unsafeAllowCommands` only takes effect when your floor lists the same command
+— the repo asks, you permit. `hush doctor` shows every place a repo policy
+tried to go below your floor.
 
 ## Finding what a codebase needs
 

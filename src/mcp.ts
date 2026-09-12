@@ -564,7 +564,8 @@ async function callTool(name: string, args: any): Promise<unknown> {
 
       if (!nativeDialogsAvailable()) {
         return text(
-          "Secure on-screen entry isn't available on this platform. Ask the user to run:\n\n" +
+          "Secure on-screen entry isn't available here (macOS, or a Linux desktop with zenity " +
+            "or kdialog, is needed). Ask the user to run:\n\n" +
             (service && account
               ? `    hush add ${service} --account ${account}`
               : service

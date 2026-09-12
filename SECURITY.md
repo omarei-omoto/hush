@@ -93,8 +93,9 @@ one. The identity key lives in the login keychain, and hush retrieves it with th
 `security` CLI. Any process running as your user can do the same — including a
 shell command from an agent. Once `.hush/policy.json` exists, `hush get`,
 `hush export`, `hush run` and `hush add` apply the same policy and approval
-as the MCP tools, so shelling out to hush is not a way around them. But the
-policy is a file in the repo — an agent that can edit files can loosen it — and
+as the MCP tools, so shelling out to hush is not a way around them. The policy
+in the repo can only tighten what `~/.hush/policy.json`, your floor outside
+the repo, allows — so an agent editing project files cannot loosen it — but
 nothing stops a process from reading the keychain directly. The policy
 constrains hush; it cannot constrain a process that bypasses hush.
 

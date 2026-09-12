@@ -189,14 +189,8 @@ describe("configuration has no dead knobs", () => {
   test("every policy field is documented", () => {
     const iface = mcp.slice(mcp.indexOf("export interface Policy {"), mcp.indexOf("const DEFAULT_POLICY"));
     const fields = [...new Set([...iface.matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((m) => m[1]))];
-    // approvalScope (the policy-floor change) is documented in the Policy
-    // interface's own doc comment in mcp.ts rather than in README/SECURITY —
-    // that change was scoped away from touching either file. Every other
-    // field still has to clear the real bar; this is a known, narrow gap, not
     // a loophole for the check in general.
-    const DOCUMENTED_ELSEWHERE = new Set(["approvalScope"]);
     for (const field of fields) {
-      if (DOCUMENTED_ELSEWHERE.has(field)) continue;
       assert.ok(
         readme.includes(field) || security.includes(field),
         `policy field "${field}" is documented nowhere a user would look`,

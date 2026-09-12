@@ -174,3 +174,11 @@ describe("policyWeakenings", () => {
     assert.match(lines.join("\n"), /approvalScope: sets — ignored, below your floor of command/);
   });
 });
+
+describe("approvalCoverageLine names the policy's own TTL", () => {
+  // Bites: a hardcoded "15 min" lies as soon as approvalTtlSeconds is changed.
+  test("an hour-long TTL says so", () => {
+    const line = approvalCoverageLine({ ...DEFAULT_POLICY, approvalTtlSeconds: 3600 }, "npm", ["default"]);
+    assert.match(line, /^Allow 1 hr covers:/);
+  });
+});

@@ -28,7 +28,12 @@ export function checkEnv(policy: Policy, env: string): void {
 export function checkScopes(policy: Policy, scopes: string[]): void {
   if (!policy.allowEnvs.length) return;
   for (const s of scopes) {
-    if (!policy.allowEnvs.includes(s)) {
+    // A library layer is spelled "<vault>:<set>". The policy names sets the
+    // way the person does, so the plain name is what allowEnvs is matched on
+    // as well — a set name cannot contain ":" (see assertScopeName), so the
+    // part after the last one is always the set.
+    const plain = s.slice(s.lastIndexOf(":") + 1);
+    if (!policy.allowEnvs.includes(s) && !policy.allowEnvs.includes(plain)) {
       throw new ValidationError(`Policy forbids agent access to "${s}". Allowed: ${policy.allowEnvs.join(", ")}.`);
     }
   }

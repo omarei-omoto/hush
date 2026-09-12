@@ -769,3 +769,30 @@ describe("mcp — the pre-sets argument names still mean what they meant", () =>
     p.cleanup();
   });
 });
+
+describe("mcp — policy names sets the way the user does", () => {
+  // Bites: a checkScopes that only knew the "main:work-fal" layer spelling
+  // would refuse a library set the policy plainly allows.
+  test("allowEnvs allows a library set by its plain name, and still refuses one it does not name", async () => {
+    const p = project({ allowEnvs: ["default", "acme-production"] });
+    const libPath = join(p.home, "vaults", "global", "vault.json");
+    mkdirSync(dirname(libPath), { recursive: true });
+    const lib = Vault.create(libPath, "global", { name: "tester", pub: p.id.pub });
+    lib.set(p.id, "acme-production", "FAL_KEY", "acme-library-key");
+    lib.set(p.id, "other-lib-set", "FAL_KEY", "other-library-key");
+    lib.save();
+
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npm", args: ["--version"], sets: ["acme-production"] }),
+      call(2, "hush_run", { command: "npm", args: ["--version"], sets: ["other-lib-set"] }),
+    ]);
+    const allowed = s.replies.find((r) => r.id === 1)!.result!;
+    assert.notEqual(allowed.isError, true, allowed.content![0].text);
+    assert.match(allowed.content![0].text!, /exit 0/);
+    const refused = s.replies.find((r) => r.id === 2)!.result!;
+    assert.equal(refused.isError, true, "a library set the policy does not name was injected");
+    assert.match(refused.content![0].text!, /Policy forbids agent access to "global:other-lib-set"/);
+    p.cleanup();
+  });
+});

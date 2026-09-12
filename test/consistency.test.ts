@@ -100,15 +100,22 @@ describe("docs describe the code that exists", () => {
     assert.match(help, /hush help --all/, "the short screen does not point at --all");
   });
 
-  test("commands shown in README code blocks exist", () => {
+  test("commands shown in README code blocks exist, or are pass-through examples", () => {
     const fenced = (readme.match(/```[a-z]*\n[\s\S]*?```/g) ?? []).join("\n");
     const builtins = new Set(["help", "mcp", "ui", "version"]);
+    // `hush npm run dev` is the feature, not a typo: anything after hush that
+    // is not a hush command runs with secrets injected. These are the programs
+    // the README uses to show that, and none of them may ever become a hush
+    // command — the day one does, pass-through for it silently stops.
+    const passThrough = new Set(["npm", "bun", "python"]);
+    for (const p of passThrough) assert.ok(!cliCommands.includes(p), `"${p}" is now a hush command; pick another pass-through example`);
     for (const m of fenced.matchAll(/^\s*(?:\$ )?hush ([a-z-]+)/gm)) {
       assert.ok(
-        cliCommands.includes(m[1]) || builtins.has(m[1]),
+        cliCommands.includes(m[1]) || builtins.has(m[1]) || passThrough.has(m[1]),
         `README shows "hush ${m[1]}", which does not exist`,
       );
     }
+    assert.match(readme, /anything after hush/i, "the README never explains pass-through");
   });
 
   test("internal doc links resolve", () => {

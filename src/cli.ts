@@ -395,6 +395,19 @@ function resolveSetName(name: string, vaults: (Vault | null)[]): string {
   }
 }
 
+/**
+ * A set made from inside a project is a set this project wants: `hush add
+ * .env --as Dev` followed by `hush npm run dev` has to inject it, or the
+ * quick start runs with nothing and says so only in a dim line. --no-use
+ * opts out; a set already used stays where it is in the order.
+ */
+function useHere(hushDir: string, slug: string, a: Args): void {
+  if (bool(a, "no-use")) return;
+  if (usedSets(hushDir).includes(slug)) return;
+  saveLinks(hushDir, [...loadLinks(hushDir), slug]);
+  info(`${green("✓")} this project now uses ${bold(slug)}  ${dim(`(hush use --not ${slug} to stop)`)}`);
+}
+
 function ensureGitignore(hushDir: string): void {
   const p = join(hushDir, ".gitignore");
   const body = ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n");
@@ -452,8 +465,8 @@ async function cmdInit(a: Args): Promise<void> {
     info(`  ${cyan(`hush ui --vault ${name}`)}${dim("      add keys in the browser")}`);
     info(`  ${cyan(`hush link ${name}`)}${dim("            use it from a project (run this inside the project)")}`);
   }
-  info(`  ${cyan("hush import .env")}         bring in what you already have`);
-  info(`  ${cyan("hush set STRIPE_KEY")}      add one secret`);
+  info(`  ${cyan('hush add .env --as "Dev"')}  bring in what you already have, as a set`);
+  info(`  ${cyan("hush add STRIPE_KEY")}      add one secret`);
   info(`  ${cyan("hush install-mcp")}         let your coding agent use them (blind)`);
 }
 
@@ -792,6 +805,7 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
 
   info(`${green("✓")} stored ${bold(String(added))} secret(s) as ${bold(asLabel)} ${dim(`(${slug})`)} in ${where}`);
   if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
+  useHere(hushDir, slug, a);
   info("");
   info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
   maybeNudge(project, hushDir, root);
@@ -976,7 +990,7 @@ async function cmdScan(a: Args): Promise<void> {
       info(`  ${red(m.name.padEnd(width))}  ${dim(m.sites.slice(0, 3).join(", "))}`);
     }
     info("");
-    info(dim(`  add them:  hush set <KEY> --env ${env}`));
+    info(dim(`  add them:  hush add <KEY>${env === "default" ? "" : ` --to ${env}`}`));
   }
   if (r.unused.length && bool(a, "verbose")) {
     info("");
@@ -1292,7 +1306,7 @@ async function cmdGlobal(a: Args): Promise<void> {
     info(`${green("✓")} your library is vault ${bold(target)}`);
     info(dim(`  ${path}`));
     info("");
-    info(`  ${cyan('hush env new "Acme Production" --from .env')}   put something in it`);
+    info(`  ${cyan('hush add .env --as "Acme Production" --library')}   put something in it`);
     return;
   }
 
@@ -1699,10 +1713,13 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
   audit(hushDir, { actor: "cli", action: "add", kind: "service", service, env: slug, stored, where });
   info("");
   info(`${green("✓")} stored ${stored} value(s) for ${bold(slug)}`);
+  // The --account alias promises the old behaviour, and the old behaviour
+  // was "stored, not pinned" — scripts then ran `hush use` themselves.
+  if (accountAlias === undefined) useHere(hushDir, slug, a);
   info("");
   info("Use it:");
-  info(`  ${cyan(`hush run --use ${slug} -- <your command>`)}`);
-  info(`  ${cyan(`hush use ${slug}`)}  ${dim("← this project uses it from now on")}`);
+  info(`  ${cyan("hush npm run dev")}  ${dim("← or any command; the set is injected")}`);
+  info(`  ${cyan(`hush run --use ${slug} -- <cmd>`)}  ${dim("← from a project that does not use it")}`);
   if (where === "library") info(dim(`  in your library (${globalVaultName()}) — never in the repo`));
   else info(dim(`  commit ${vaultPath} to share it`));
 }

@@ -109,9 +109,11 @@ If the user explicitly asks you to reveal a value, tell them to run `hush get
 
 ```bash
 hush ui                              # manage everything in a local browser app
-hush ls                              # this project's sets — library and project
-hush add fal --account acme          # add a set from the terminal (fal/acme)
+hush ls                              # every set — library and project — and which are used
+hush add fal --as "Work fal"         # a set for a known service, typed in the terminal (work-fal)
+hush add .env --as "Dev"             # a .env file as a named set
 hush use work-fal                    # this project uses a set by name
-hush run --use work-fal -- <cmd>     # add one extra set for a single run
-hush dev                             # check setup, then get to work locally
+hush run --use work-fal -- <cmd>     # one extra set for a single run
+hush dev                             # run the package.json dev script with the sets injected
+hush npm run build                   # any command after hush runs the same way
 ```

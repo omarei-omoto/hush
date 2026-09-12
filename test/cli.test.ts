@@ -1505,3 +1505,60 @@ describe("pass-through by path", () => {
     }
   });
 });
+
+// The quick start is "hush add .env --as Dev" then "hush npm run dev". A set the
+// project does not use is not injected, so making a set from inside a project
+// has to make the project use it — or the second line silently does nothing.
+describe("a set made from inside a project is used by it", () => {
+  const links = (p: ReturnType<typeof project>): string[] => {
+    const file = join(p.hushDir, "envs.json");
+    if (!existsSync(file)) return [];
+    return (JSON.parse(readFileSync(file, "utf8")) as { use: string[] }).use;
+  };
+
+  // Bites: without the link, the run below injects nothing and prints no marker.
+  test("add <file> --as makes the project use the new set, so the next run injects it", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.x"), "FAL_KEY=quickstartvalue\n");
+      const r = p.run(["add", ".env.x", "--as", "Dev", "--project"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /now uses dev/, r.out);
+      assert.deepEqual(links(p), ["dev"]);
+      const run = p.run(["sh", "-c", "echo $FAL_KEY"]);
+      assert.match(run.out, /\[redacted:FAL_KEY\]/, "the new set was not injected:\n" + run.out);
+      assert.ok(!run.out.includes("quickstartvalue"), "a live value leaked");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--no-use opts out, and an already-used set keeps its place", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.x"), "FAL_KEY=v\n");
+      assert.equal(p.run(["add", ".env.x", "--as", "Later", "--project", "--no-use"]).code, 0);
+      assert.deepEqual(links(p), [], "--no-use still linked the set");
+      assert.equal(p.run(["use", "later"]).code, 0);
+      writeFileSync(join(p.root, ".env.y"), "OTHER=v\n");
+      assert.equal(p.run(["add", ".env.y", "--as", "Other", "--project"]).code, 0);
+      assert.equal(p.run(["add", ".env.x", "--as", "Later", "--project", "--overwrite"]).code, 0);
+      assert.deepEqual(links(p), ["later", "other"], "re-adding to a used set moved it");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: the service form has its own success path; forgetting the link
+  // there leaves "hush add fal" followed by "hush dev" running without FAL_KEY.
+  test("add <service> --as does the same", () => {
+    const p = project();
+    try {
+      const r = p.run(["add", "fal", "--as", "Work fal", "--project"], "piped-value\n");
+      assert.equal(r.code, 0, r.out);
+      assert.deepEqual(links(p), ["work-fal"]);
+    } finally {
+      p.cleanup();
+    }
+  });
+});

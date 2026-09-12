@@ -566,7 +566,9 @@ async function callTool(name: string, args: any): Promise<unknown> {
           "Secure on-screen entry isn't available on this platform. Ask the user to run:\n\n" +
             (service && account
               ? `    hush add ${service} --account ${account}`
-              : `    hush set ${args.key ?? "<KEY>"} --env ${set}`),
+              : service
+                ? `    hush add ${service} --as "${set}"`
+                : `    hush add ${args.key ?? "<KEY>"} --to ${set}`),
         );
       }
 

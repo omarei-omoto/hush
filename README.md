@@ -14,8 +14,8 @@ context window.
 
 ```bash
 hush init acme                  # a vault in .hush/vault.json — commit it
-hush import .env && rm .env     # your existing secrets, now encrypted
-hush run -- npm run dev         # injected into the process, never onto disk
+hush add .env --as "Dev"        # your existing secrets, now encrypted, as a set called dev
+hush npm run dev                # injected into the process, never onto disk
 hush team add sam hush_pk_1xM…  # commit; sam can decrypt. no invite email.
 hush team rm sam                # re-keys the vault, re-seals every value
 ```
@@ -40,7 +40,7 @@ hush team rm sam                # re-keys the vault, re-seals every value
 ## Contents
 
 - [Install](#install) · [Quick start](#quick-start) · [Why this exists](#why-this-exists)
-- **Using it** — [Named env sets](#named-env-sets) · [Several accounts for one service](#several-accounts-for-one-service) · [Environments](#environments) · [The app](#the-app)
+- **Using it** — [Sets](#sets) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [The app](#the-app)
 - **Agents** — [What your agent gets](#what-your-agent-gets) · [Adding a key off-transcript](#adding-a-key-without-pasting-it-into-the-chat) · [Approvals](#approving-what-runs) · [Policy](#what-the-agent-may-run)
 - **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [CI](#ci)
 - **Hardening** — [The security ladder](#the-security-ladder) · [Touch ID](#touch-id) · [Hardware keys](#hardware-keys)
@@ -80,15 +80,16 @@ and an install behave identically. Still zero runtime dependencies.
 ```bash
 cd your-project
 hush init                    # creates your key + a vault, safe to commit
-hush import .env             # pull in what you already have
+hush add .env --as "Dev"     # what you already have, encrypted, as a set called dev
 rm .env                      # you don't need it any more
 git add .hush && git commit -m "encrypted secrets"
 ```
 
-From now on, instead of `npm run dev`:
+From now on, put `hush` in front of whatever you run:
 
 ```bash
-hush run -- npm run dev
+hush npm run dev             # anything after hush runs with the secrets injected
+hush dev                     # or: find package.json and run its dev script
 ```
 
 Secrets exist in that process's environment and nowhere else. Not on disk, not
@@ -128,127 +129,122 @@ will not get you there and does not pretend to. Full comparison in
 
 # Using it
 
-## Named env sets
+## Sets
 
-A `.env` is not twenty loose keys. It is *a thing*: "Acme production", "my
-personal fal key", "the client's staging box". hush keeps them that way — each
-one named, with a description and a note about when to use it, all optional.
+Everything in hush is a **set**: some keys, a name you chose, an optional
+description, and an optional note on when to use it. `dev`, `prod`,
+`Personal fal`, `Acme Production` — all sets. There is no second concept to
+learn.
 
-They live at two levels:
+A set lives in one of two places:
 
-- **Your library** — `~/.hush/vaults/<name>`. Your own sets, in one place. A key
-  lives here once, so rotating it is one edit rather than one per project.
+- **Your library** — `~/.hush/vaults/<name>`, yours alone, never in any repo.
+  A key you use across projects lives here once, so rotating it is one edit.
 - **This project** — `.hush/vault.json`, committed, shared with your team.
 
-A project *uses* a library set rather than copying it. `.hush/envs.json` names
-the set; the keys never enter the repo. So a teammate who clones it does not get
-your keys — the repo says "this project needs a set called acme-production" and
-each person supplies their own.
+A project *uses* sets. Its own `default` set is always used, as the floor;
+everything else layers on top in the order you added it, later wins.
+`.hush/envs.json` records only the *names* — a teammate who clones the repo
+gets "this project uses a set called acme-production" and supplies their own.
 
 ```bash
-hush global --create                  # make your library (once)
-hush global personal                  # or adopt a vault you already have
-
-hush env new "Acme Production" --from .env.production \
+hush add .env.production --as "Acme Production" --library \
   --description "Live Stripe + Convex" --when "deploys only"
+hush add DATABASE_URL=postgres://… --to "Acme Production"   # one value into a set
+hush add fal --as "Personal fal" --library                   # a known service: asks for FAL_KEY, hidden
 
-hush env use acme-production          # this project uses it
-hush run -- npm start                 # its keys are there
+hush use acme-production      # this project uses it
+hush use                      # what this project uses, in order
+hush use --not acme-production
 ```
 
-```
-$ hush env
+A set you make from inside a project is used by that project automatically
+(`--no-use` to opt out), so `hush add .env --as Dev` followed by `hush npm
+run dev` just works.
 
-Your library  (personal)
+```
+$ hush ls
+
+YOUR LIBRARY  (global)
   ● Acme Production (acme-production)  12 key(s)
       Live Stripe + Convex
       when: deploys only
-    Personal / fal (personal-fal)  3 key(s)
-      my own fal key for side projects
+    Personal fal (personal-fal)  1 key(s)
 
-  ● = used by this project.  hush env use <name> / hush env drop <name>
-
-This project
+THIS PROJECT
   ● default (default)  2 key(s)
+
+  ● = used by this project.
 ```
 
-**Everything already in one pile?** That is where everyone starts. Make the sets
-you want and move keys across — the value is re-encrypted under its new name, so
-it is a real move rather than a relabelling:
+`hush ls <set>` lists one set's key names — never values.
+
+**Everything already in one pile?** That is where everyone starts. Make the
+sets you want and move keys across — the value is re-encrypted under its new
+name, so it is a real move rather than a relabelling:
 
 ```bash
-hush env new "Acme Production"
-hush env move STRIPE_SECRET_KEY DATABASE_URL --to acme-production
+hush env move STRIPE_SECRET_KEY DATABASE_URL --to "Acme Production"
 ```
 
-**Renaming works properly.** The name you type *is* the name: `hush env rename
-acme-production "Acme Prod EU"` re-seals every value under `acme-prod-eu` and
-updates any project pinned to the old one. Nothing is left pointing at a name
-that no longer exists.
+**Renaming works properly.** `hush env rename acme-production "Acme Prod EU"`
+re-seals every value under `acme-prod-eu` and updates any project using the old
+name. Nothing is left pointing at a name that no longer exists.
 
-## Several accounts for one service
+Values are cryptographically bound to their set: a `staging` ciphertext cannot
+be moved into the `prod` slot, even by someone editing the JSON by hand.
 
-This is the thing you hit every day: a personal key for a service, another for
-work, another for a client. Same variable name, different values.
+## Several keys for one service
+
+The thing you hit every day: a personal key for a service, another for work,
+another for a client. Same variable name, different values. Each is a set:
 
 ```bash
-hush add fal --account personal
-hush add fal --account acme
-hush add fal --account client
-hush add gemini --account team
+hush add fal --as "Personal fal" --library    # hush knows fal needs FAL_KEY; asks, hidden
+hush add fal --as "Work fal" --library
+hush add fal --as "Client fal" --library
 ```
 
-hush knows what the common services need, so it just asks for `FAL_KEY`:
-
-```
-$ hush accounts
-
-fal.ai (fal)
-  ● acme          FAL_KEY   ← this project's default
-    client        FAL_KEY
-    personal      FAL_KEY
-
-Google Gemini (gemini)
-  ● team          GEMINI_API_KEY   ← this project's default
-```
-
-Pick one per run, or pin the project's defaults once:
+Use one per project, or one per run:
 
 ```bash
-hush run --with fal:client -- ./build.sh      # this run only
-hush use fal=acme gemini=team                 # the default from now on
-hush run -- ./build.sh                        # uses acme + team
+hush use work-fal                             # this project, from now on
+hush run --use client-fal -- ./build.sh       # this run only — layered last, so it wins
 ```
-
-`.hush/use.json` records only *which account*, never a key — commit it, and your
-team runs against the same accounts you do.
 
 **Unknown service?** Tell it the variables once:
 
 ```bash
-hush add myapi --account staging --vars MYAPI_KEY,MYAPI_SECRET
+hush add myapi --as "Staging myapi" --vars MYAPI_KEY,MYAPI_SECRET
 ```
 
 **From a script or CI**, pipe one line per variable, in the order hush asks:
 
 ```bash
-printf '%s\n' "$FAL_KEY" | hush add fal --account ci
-printf '%s\n%s\n' "$SID" "$TOKEN" | hush add twilio --account main
+printf '%s\n' "$FAL_KEY" | hush add fal --as "CI fal"
+printf '%s\n%s\n' "$SID" "$TOKEN" | hush add twilio --as "Main twilio"
 ```
 
 If nothing arrives on stdin, `hush add` fails rather than reporting success — a
 run that stored no credential must not look like one that did.
 
-## Environments
+## Running things
 
 ```bash
-hush set DATABASE_URL --env prod
-hush run --env prod -- ./deploy.sh
-hush envs
+hush npm run dev              # anything after hush that is not a hush command
+hush bun dev                  #   runs with this project's sets injected
+hush python app.py
+hush ./deploy.sh
+
+hush dev                      # find package.json, run its dev script with the
+hush dev build                #   package manager the lockfile names (bun/pnpm/yarn/npm)
+
+hush run --use prod -- ./deploy.sh    # the explicit form; --use adds a set for this run
 ```
 
-Values are cryptographically bound to their environment: a staging ciphertext
-cannot be moved into the prod slot, even by someone editing the JSON by hand.
+Output is redacted: an injected value that shows up in stdout or stderr comes
+out as `[redacted:KEY]`. A hush command always wins over a same-named program,
+so `hush ls` is hush's `ls`, never `/bin/ls`.
 
 ## The app
 
@@ -305,7 +301,7 @@ hush install-mcp
 | `hush_list_sets` | See which named sets exist — library and project, and whether this project uses each. (`hush_list_accounts` is a deprecated alias for this.) |
 | `hush_describe_secret` | Confirm one is set — length, masked preview, who set it. |
 | `hush_check_repo` | Scan the code, report which env vars are missing from the vault. |
-| `hush_provision` | Prepare a CLI to run with the right account. |
+| `hush_provision` | Prepare a CLI to run with the right set. |
 | `hush_add_secret` | **Have you type a new key on your screen**, never in the chat. |
 | `hush_run` | **Run a command with secrets injected.** Sees output, not values. |
 
@@ -324,8 +320,8 @@ The agent got its answer. The credential never entered the transcript.
 ## Adding a key without pasting it into the chat
 
 This is the flow that matters. You tell your agent *"set up the deploy script
-with my personal fal account"*. It calls `hush_provision`, finds the account has
-no key yet, and calls `hush_add_secret`. A **secure input box opens on your
+with my personal fal key"*. It calls `hush_provision`, finds no set that holds
+one yet, and calls `hush_add_secret`. A **secure input box opens on your
 screen**:
 
 ```
@@ -333,7 +329,7 @@ screen**:
 │  needed to authenticate the deploy script      │
 │                                                │
 │  Service:  fal.ai                              │
-│  Account:  personal                            │
+│  Set:  personal-fal                            │
 │                                                │
 │  Paste the value for FAL_KEY:                  │
 │  [••••••••••••••••••••••••]                    │
@@ -342,7 +338,7 @@ screen**:
 ```
 
 You paste it there. It is encrypted straight into the vault. The agent gets back
-`Stored FAL_KEY in fal/personal. The value never entered this conversation.`
+`Stored FAL_KEY in "personal-fal" (this project). The value never entered this conversation.`
 
 The key went from your keyboard to the vault. It was never in a prompt, never in
 a transcript, never in a provider log.
@@ -355,7 +351,7 @@ Anything that injects a live credential asks first:
 ┌─ hush — approve this? ─────────────────────────┐
 │  Run:  ./deploy.sh --target production         │
 │                                                │
-│  Using accounts:  fal:personal                 │
+│  Using sets:  default, personal-fal            │
 │  Injects:  FAL_KEY                             │
 │  Directory:  /Users/you/myapp                  │
 │                                                │
@@ -365,8 +361,8 @@ Anything that injects a live credential asks first:
 ```
 
 The code also comes back in the agent's tool result, so the transcript and your
-screen can be checked against each other. "Allow 15 min" is scoped to *that set
-of accounts* — switching to a different client's key asks again, which is the
+screen can be checked against each other. "Allow 15 min" is scoped to *that list
+of sets* — switching to a different client's key asks again, which is the
 point.
 
 ```json
@@ -404,7 +400,7 @@ to a file that output redaction never sees:
   "allowCommands": [],
   "denyCommands": ["your-own-additions"],
   "unsafeAllowCommands": [],
-  "allowEnvs": ["default", "fal/dev"],
+  "allowEnvs": ["default", "work-fal"],
   "denyKeys": ["STRIPE_LIVE_KEY"],
   "maxRunMs": 120000
 }
@@ -415,8 +411,9 @@ to a file that output redaction never sees:
 - **`unsafeAllowCommands`** is the only way below that floor. Named to be
   off-putting: allowing `node` or `bash` lets an agent read every injected
   secret and write it anywhere.
-- **`allowEnvs`** covers service accounts too, so `["default", "fal/dev"]` keeps
-  an agent out of `fal/prod`.
+- **`allowEnvs`** names the sets an agent may use — by the name you gave them,
+  wherever they live — so `["default", "work-fal"]` keeps an agent out of
+  `client-fal`.
 - **`allowCommands`**, if non-empty, is an allowlist — the only command control
   that actually holds. Prefer it for anything sensitive.
 
@@ -436,7 +433,7 @@ $ hush scan
 Missing:
   SENDGRID_API_KEY  src/mail.ts, src/jobs/digest.ts
 
-  add them:  hush set SENDGRID_API_KEY --env default
+  add them:  hush add SENDGRID_API_KEY
 ```
 
 Nobody has to maintain a manifest. The code is the manifest.
@@ -595,54 +592,66 @@ and the hook prints that warning every time.
 ## Commands
 
 ```
-setup
-  hush init [name]              create a vault here (.hush/vault.json — commit it)
-  hush ui                       open the local app to manage everything
-  hush id [--create]            show or create this machine's key
-  hush link <vault> [--env e]   point this repo at a vault you already have
-  hush install-mcp              register hush with your coding agent
-  hush install-skill            teach the agent the rules (--global for all)
-  hush approve                  answer a pending approval (non-macOS)
-  hush doctor                   check this machine's setup
-  hush verify                   check it decrypts, is not rolled back, fully re-sealed
-  hush level                    where you are on the security ladder
-  hush secure                   climb the next rung
 
-named env sets                  — a .env you name, describe and reuse
-  hush env                      list your library and this project's sets
-  hush env new <name> [--from <file>] [--description <t>] [--when <t>]
+daily
+  hush add <file>                          save a .env-shaped file as a named set
+  hush add KEY=value [KEY=value…]          save one or more values directly
+  hush add <service>                       e.g. hush add fal — prompted, hidden input
+  hush use <set> [<set>…]                  this project uses these sets, in order (later wins)
+  hush use                                 show what this project uses, and where from
+  hush use --not <set>                     stop using it here
+  hush run [--use <set>…] -- <cmd>         run with them injected, output redacted
+  (pass-through: npm run dev, python app.py, … run the same way)
+  hush dev [script]                        find package.json, run it with them injected
+  hush ls [<set>]                          library, project, what is used — or one set's keys
+  hush rm <KEY> [--from <set>]             remove a key
+  hush rm <set> [--yes]                    remove a whole set
+  hush ui                                  open the local app to manage everything
+  hush team ls|add|rm                      share this project's vault
+
+sets          — a set you name, describe and reuse
   hush env rename <name> <new name>    re-seals every value under the new name
   hush env describe <name> [--description <t>] [--when <t>]
   hush env move <KEY>… --to <set>      carve one big pile into named sets
-  hush env use <name>           this project uses that library set
-  hush env drop <name>          stop using it here
-  hush global [<vault>|--create]  which vault holds your library
+  hush global [<vault>|--create]       which vault holds your library
 
-accounts                        — several keys for the same service
-  hush add <service> --account <name>    e.g. hush add fal --account acme
-  hush accounts [service]                what you have, and for whom
-  hush use fal=acme gemini=team          pin this project's defaults
-  hush run --with fal:client -- <cmd>    override for a single run
-
-secrets
-  hush set <KEY> [--env e]      add or update (prompts, never echoes)
-  hush get <KEY>                reveal one value (asks first)
-  hush ls [--env e]             list names — never values
-  hush rm <KEY>
-  hush import [file]            pull in an existing .env
-  hush export [--out .env]      write plaintext out (last resort)
-
-using them
-  hush run -- <cmd> [args]      run with secrets injected, output redacted
-  hush scan [dir]               what does this codebase need, and is it in the vault?
-  hush envs                     which environments this vault has
-  hush hook <zsh|bash|fish>     auto-load on cd (least safe; unloads on leave)
-
-team
+sharing
   hush team ls
   hush team add <name> <pk>     re-wraps the key for them; commit and they're in
   hush team rm <name>           removes them and re-encrypts everything
+  hush id [--create]            show or create this machine's key
+  hush link <vault> [--env e]   point this repo at a vault you already have
+
+hardening
+  hush level                    where you are on the security ladder
+  hush secure                   climb the next rung
+  hush biometry [setup|test]    gate approvals behind Touch ID
+  hush age                      use a YubiKey / Secure Enclave / TPM via age
+  hush verify                   check the vault decrypts and has not been rolled back
   hush rotate                   new vault key, same values
+
+agents
+  hush install-mcp              register hush with your coding agent
+  hush install-skill            teach the agent the rules (--global for all projects)
+  hush approve                  answer a pending approval (non-macOS)
+
+other
+  hush init [name]               create a vault here (.hush/vault.json — commit it)
+  hush doctor                    check this machine's setup
+  hush hook <zsh|bash|fish>      auto-load on cd (least safe; unloads on leave)
+  hush export [--out .env]       write plaintext out (last resort)
+  hush get <KEY>                 reveal one value (asks first)
+  hush scan [dir]                what does this codebase need, and is it in the vault?
+  hush root                      the project root hush would act on
+
+flags
+  --use <set>     an extra set for this run only (repeatable; --env is an alias)
+  --json          machine-readable output where it makes sense
+
+Deprecated, still work — each prints a one-line notice: hush set, hush import,
+hush accounts, hush env ls / env / env use / env drop / env new, --with a:b, use a=b.
+
+Vault files hold only ciphertext and public keys. Your private key never leaves this machine.
 ```
 
 ## How the crypto works

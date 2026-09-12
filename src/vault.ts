@@ -29,7 +29,6 @@ import {
 } from "./crypto.ts";
 import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from "./age.ts";
 import { hushHome } from "./identity.ts";
-import { isAccountScope } from "./services.ts";
 
 export interface Recipient {
   name: string;
@@ -780,11 +779,6 @@ export class Vault {
 
   envNames(): string[] {
     return Object.keys(this.data.envs).sort();
-  }
-
-  /** Environments that are not service accounts: "default", "prod", … */
-  plainEnvs(): string[] {
-    return this.envNames().filter((e) => !isAccountScope(e));
   }
 
   /**

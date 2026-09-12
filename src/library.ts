@@ -221,11 +221,7 @@ export interface LibrarySet {
   keys: string[];
 }
 
-// `hushDir` is part of the call-site shape shared with usedSets()/composeSets()
-// (cli.ts, mcp.ts and ui.ts all pass it here without checking whether this
-// particular function still needs it) — kept unused rather than dropped, since
-// removing the parameter would break every one of those call sites.
-export function librarySets(_hushDir: string | null): LibrarySet[] {
+export function librarySets(): LibrarySet[] {
   const library = openGlobal();
   if (!library) return [];
   return library

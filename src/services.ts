@@ -64,12 +64,6 @@ export const SCOPE_SEP = "/";
 export const setNameFor = (service: string, account: string): string =>
   `${service}${SCOPE_SEP}${account}`;
 
-/**
- * Whether a set name is account-shaped — carries a "/" the way "fal/acme"
- * does. Used by Vault.plainEnvs() to keep those out of the plain environment
- * list; a "/" in a name is not otherwise special to the data model.
- */
-export const isAccountScope = (scope: string): boolean => scope.includes(SCOPE_SEP);
 
 export const knownVars = (service: string): string[] =>
   CATALOG[service.toLowerCase()]?.vars ?? [];

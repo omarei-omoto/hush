@@ -354,7 +354,7 @@ function listSets(ctx: Ctx): ListedSet[] {
     where: "project",
     used: used.has(s.name),
   }));
-  const library: ListedSet[] = librarySets(ctx.hushDir).map((s) => ({
+  const library: ListedSet[] = librarySets().map((s) => ({
     name: s.name,
     label: s.label,
     description: s.description,
@@ -666,7 +666,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
       const plain = (layer: string): string => (layer.startsWith(prefix) ? layer.slice(prefix.length) : layer);
       const keysOf = (layer: string): string[] => {
         if (layer.startsWith(prefix)) {
-          return librarySets(ctx.hushDir).find((s) => s.name === layer.slice(prefix.length))?.keys ?? [];
+          return librarySets().find((s) => s.name === layer.slice(prefix.length))?.keys ?? [];
         }
         return ctx.vault.sets().find((s) => s.name === layer)?.keys ?? [];
       };

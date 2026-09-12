@@ -425,7 +425,7 @@ describe("library: librarySets() lists sets with a '/' in the name", () => {
       library.set(owner, "fal/acme", "FAL_KEY", "x");
       library.save(); // librarySets() reopens the library fresh from disk
 
-      const names = librarySets(null).map((s) => s.name);
+      const names = librarySets().map((s) => s.name);
       assert.ok(names.includes("fal/acme"), `fal/acme missing from librarySets(): ${names.join(", ")}`);
     });
   });

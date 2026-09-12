@@ -373,13 +373,6 @@ describe("accounts", () => {
     return { dir, owner, vault };
   };
 
-  test("account-scoped sets are kept out of the plain environment list", () => {
-    const { owner, vault } = setup();
-    vault.set(owner, "fal/acme", "FAL_KEY", "x");
-    vault.set(owner, "prod", "DATABASE_URL", "y");
-    assert.deepEqual(vault.plainEnvs(), ["default", "prod"]);
-  });
-
   test("resolveSets layers the chosen set over the base environment", () => {
     const { owner, vault } = setup();
     vault.set(owner, "default", "PORT_URL", "http://base");

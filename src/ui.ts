@@ -202,7 +202,7 @@ function state(ctx: UiCtx) {
   let libraryError = "";
   let libraryVault: Vault | null = null;
   try {
-    library = librarySets(ctx.hushDir);
+    library = librarySets();
     libraryVault = openGlobal();
   } catch (e) {
     libraryError = (e as Error).message.split("\n")[0];

@@ -503,7 +503,9 @@ async function cmdSet(a: Args): Promise<void> {
   const key = a._[0];
   if (!key) die("Usage: hush set <KEY> [--env <env>] [--note <text>]");
   const to = str(a, "to") ?? str(a, "env") ?? "default";
-  return cmdAddKeyValue({ _: [key], rest: [], flags: { ...a.flags, to } });
+  // An alias keeps the old behaviour, and `hush set K --env prod` never made
+  // the project use "prod" — that was `hush run --env prod`, run by run.
+  return cmdAddKeyValue({ _: [key], rest: [], flags: { ...a.flags, to, "no-use": true } });
 }
 
 async function cmdGet(a: Args): Promise<void> {
@@ -568,7 +570,7 @@ async function cmdLs(a: Args): Promise<void> {
   }
 
   const used = new Set(hushDir ? usedSets(hushDir) : []);
-  const libSets = librarySets(hushDir);
+  const libSets = librarySets();
 
   if (bool(a, "json")) {
     return out(
@@ -1449,30 +1451,13 @@ async function cmdDoctor(_a: Args): Promise<void> {
   check(vault.canRead(id), "you are a recipient", vault.canRead(id) ? `as "${vault.memberName(id)}"` : "ask an admin to `hush team add` you");
   check(true, "members", String(vault.members().length));
 
-  // Accounts are not environments. Reporting "default, fal/personal" as envs
-  // invites treating an account like one, which is not how they work.
-  check(true, "environments", vault.plainEnvs().join(", "));
-  // Computed from sets() rather than the deprecated accounts()/loadUse(): same
-  // shape, built locally now that a "/" in a name is not a separate kind of
-  // thing, and "used" means the same as it does everywhere else — usedSets().
-  const accounts = vault.sets()
-    .filter((s) => s.name.includes("/"))
-    .map((s) => {
-      const i = s.name.indexOf("/");
-      return { service: s.name.slice(0, i), account: s.name.slice(i + 1), scope: s.name };
-    })
-    .sort((x, y) => (x.service === y.service ? x.account.localeCompare(y.account) : x.service.localeCompare(y.service)));
+  // One vocabulary here too: every set, marked the way `hush ls` marks it.
   const used = new Set(usedSets(loc.hushDir));
   check(
     true,
-    "service accounts",
-    accounts.length
-      ? `${accounts.length} — ${accounts.map((a) => a.scope + (used.has(a.scope) ? "*" : "")).join(", ")}`
-      : "none",
+    "sets",
+    vault.sets().map((s) => s.name + (used.has(s.name) ? " ●" : "")).join(", ") + dim("   ● = used by this project"),
   );
-  if (accounts.length && !accounts.some((a) => used.has(a.scope))) {
-    info(`    ${dim("none pinned — hush run will not inject any of them (hush use <name>)")}`);
-  }
 
   const root = loc.hushDir.replace(/[/\\]\.hush$/, "");
   const mcp = join(root, ".mcp.json");
@@ -1580,6 +1565,7 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
   }
   const slug = resolveSetName(to, [project, openGlobal()]);
   const { vault, where } = pickVault(project, a, slug);
+  const isNew = !vault.hasSet(slug);
   const policy = policyFor(hushDir);
 
   for (const spec of pairs) {
@@ -1613,6 +1599,7 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
     audit(hushDir, { actor: "cli", action: existed ? "update" : "create", env: slug, key, where });
     info(`${green("✓")} ${existed ? "updated" : "added"} ${bold(key)} in ${cyan(slug)}  ${dim(preview(value))}`);
   }
+  if (isNew) useHere(hushDir, slug, a);
   if (where === "library") info(dim(`  in your library (${globalVaultName()}) — never in the repo`));
   else info(dim(`  commit ${vaultPath} to share it with the team`));
   maybeNudge(project, hushDir, root);
@@ -1756,7 +1743,7 @@ async function cmdUse(a: Args): Promise<void> {
 
   if (!a._.length) {
     const used = usedSets(hushDir);
-    const library = librarySets(hushDir);
+    const library = librarySets();
     if (!used.length) {
       info(dim("This project uses nothing yet."));
       info(`  ${cyan("hush use <set> [<set>…]")}`);
@@ -1772,7 +1759,7 @@ async function cmdUse(a: Args): Promise<void> {
   }
 
   const names = a._.map(convertLegacyPin);
-  const library = librarySets(hushDir);
+  const library = librarySets();
   const unknown = names.filter((n) => !vault.hasSet(n) && !library.some((s) => s.name === n));
   if (unknown.length) {
     const known = [...new Set([...vault.envNames(), ...library.map((s) => s.name)])];

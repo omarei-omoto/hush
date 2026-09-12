@@ -200,28 +200,19 @@ describe("hush ls treats every set the same, slash or not", () => {
 });
 
 describe("hush doctor reports the whole setup", () => {
-  test("it separates environments from service accounts", () => {
-    // doctor used to print "envs: default, fal/personal", repeating the same
-    // confusion `hush ls` had: an account is not an environment.
+  test("it lists every set once, marking the ones this project uses", () => {
+    // doctor used to print environments and service accounts as two lists —
+    // the same two-vocabulary confusion `hush ls` had. A set is a set.
     const p = project();
-    p.run(["set", "PROD_KEY", "--env", "prod"], "v\n");
-    p.run(["add", "fal", "--account", "personal", "--vars", "FAL_KEY"], "v\n");
+    assert.equal(p.run(["add", "PROD_KEY=v", "--to", "prod"]).code, 0);
+    assert.equal(p.run(["add", "fal", "--as", "Personal fal", "--no-use"], "v\n").code, 0);
 
     const out = p.run(["doctor"]).out;
-    const envLine = out.match(/environments\s+(.*)/)?.[1] ?? "";
-    assert.ok(envLine.includes("prod"), `expected prod in "${envLine}"`);
-    assert.ok(!envLine.includes("/"), `an account was listed as an environment: ${envLine}`);
-    assert.match(out, /service accounts\s+1 — fal\/personal/);
-    p.cleanup();
-  });
-
-  test("it warns when accounts exist but none are pinned", () => {
-    // Otherwise `hush run` silently injects none of them.
-    const p = project();
-    p.run(["add", "fal", "--account", "personal", "--vars", "FAL_KEY"], "v\n");
-    assert.match(p.run(["doctor"]).out, /none pinned/);
-    p.run(["use", "fal=personal"]);
-    assert.ok(!/none pinned/.test(p.run(["doctor"]).out), "still warning after pinning");
+    const line = out.match(/sets\s+(.*)/)?.[1] ?? "";
+    assert.match(line, /default ●/, `default is the floor, so it is used: "${line}"`);
+    assert.match(line, /prod ●/, `a set made from inside the project is used: "${line}"`);
+    assert.match(line, /personal-fal(?! ●)/, `a --no-use set must not be marked: "${line}"`);
+    assert.ok(!/environments|service accounts/.test(out), "the old two-list vocabulary is back");
     p.cleanup();
   });
 
@@ -506,7 +497,9 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     const p = project();
     try {
       assert.equal(p.run(["add", "FAL_KEY=work_value", "PROJECT_MARKER=work", "--to", "work-fal"]).code, 0);
-      assert.equal(p.run(["add", "FAL_KEY=personal_value", "PERSONAL_MARKER=mine", "--to", "personal-fal"]).code, 0);
+      // --no-use: a set made from inside a project is used by it, and this
+      // one must stay unused so --use below is what brings it in.
+      assert.equal(p.run(["add", "FAL_KEY=personal_value", "PERSONAL_MARKER=mine", "--to", "personal-fal", "--no-use"]).code, 0);
       assert.equal(p.run(["use", "work-fal"]).code, 0);
 
       const first = JSON.parse(p.run(["export", "--format", "json"]).out) as Record<string, string>;
@@ -1544,6 +1537,31 @@ describe("a set made from inside a project is used by it", () => {
       assert.equal(p.run(["add", ".env.y", "--as", "Other", "--project"]).code, 0);
       assert.equal(p.run(["add", ".env.x", "--as", "Later", "--project", "--overwrite"]).code, 0);
       assert.deepEqual(links(p), ["later", "other"], "re-adding to a used set moved it");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: a KEY=value that creates a set has its own success path too.
+  test("add KEY=value --to <new set> does the same; adding to an existing set changes nothing", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "K=v", "--to", "fresh"]).code, 0);
+      assert.deepEqual(links(p), ["fresh"]);
+      assert.equal(p.run(["use", "--not", "fresh"]).code, 0);
+      assert.equal(p.run(["add", "K2=v", "--to", "fresh"]).code, 0);
+      assert.deepEqual(links(p), [], "adding to an existing set re-linked it");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: the alias forwarding to cmdAddKeyValue without "no-use" links prod.
+  test("the deprecated hush set --env keeps its old meaning: stored, not used", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["set", "PROD_KEY", "--env", "prod"], "v\n").code, 0);
+      assert.deepEqual(links(p), [], "hush set --env made the project use the env");
     } finally {
       p.cleanup();
     }

@@ -163,5 +163,5 @@ test("package.json is in the form npm will publish", () => {
 test("the package declares the platforms it supports, and the README says the same", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { os?: string[] };
   assert.deepEqual(pkg.os, ["darwin", "linux"]);
-  assert.match(readFileSync(join(root, "README.md"), "utf8"), /Windows is not\s+supported yet/);
+  assert.match(readFileSync(join(root, "README.md"), "utf8"), /\*\*Windows is not supported yet\*\*/);
 });

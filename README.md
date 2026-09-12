@@ -29,9 +29,9 @@ hush team rm sam                # re-keys the vault, re-seals every value
 > independent reimplementation — but that is not the same as someone qualified
 > having looked at it.
 >
-> Development happens on macOS. Linux is covered by CI. **Windows is not
-> supported yet** — the package declares it, so `npm install` refuses there
-> rather than half-working. [Tell me what broke](https://github.com/omarei-omoto/hush/issues)
+> Development happens on macOS; Linux is covered by CI.
+> **Windows is not supported yet** — the package declares it, so `npm install`
+> refuses there rather than half-working. [Tell me what broke](https://github.com/omarei-omoto/hush/issues)
 > if you try it somewhere unusual.
 >
 > Found a way to read a vault you should not? Please [report it

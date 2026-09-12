@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import {
   Vault,
   resolveVaultPath,
+  locateProject,
   namedVaultPath,
   audit,
   slugifyEnv,
@@ -23,11 +24,12 @@ import { scanRepo, reconcile, parseEnvFile } from "./scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "./run.ts";
 import { preview } from "./redact.ts";
 import { serveMcp, loadPolicy, DEFAULT_POLICY, type Policy } from "./mcp.ts";
-import { checkCommand, checkEnv, checkScopes, runScope, approvalCoverageLine, readPolicyFile, policyWeakenings } from "./policy.ts";
+import { checkCommand, checkScopes, runScope, approvalCoverageLine, readPolicyFile, policyWeakenings } from "./policy.ts";
 import { serveUi } from "./ui.ts";
 import {
   usedSets, composeSets, librarySets, loadLinks, saveLinks, openGlobal,
   globalVaultName, globalVaultExists, globalVaultPath, namedVaults, saveConfig,
+  ensureProjectVault, writeProjectDotfiles, suggestSets,
 } from "./library.ts";
 import { VERSION } from "./version.ts";
 import { assess } from "./posture.ts";
@@ -225,6 +227,32 @@ function promptLine(label: string): Promise<string> {
   );
 }
 
+/**
+ * A visible line of input, usable over a pipe as well as a real terminal —
+ * unlike `promptLine`, which every existing call site only ever reaches after
+ * checking `process.stdin.isTTY`. The setup dialogue (below) has to be
+ * answerable non-interactively too, for HUSH_INTERACTIVE=1 tests to drive it.
+ *
+ * A fresh `readline.Interface` per question — what `promptLine` does — only
+ * ever sees the first line piped in: a non-TTY stdin typically arrives as one
+ * buffered chunk, and a closed Interface does not hand the unread remainder to
+ * the next one. Reusing `promptSecret`'s `pipedLines` buffer sidesteps that by
+ * reading the whole pipe once and serving it back one line per call.
+ */
+async function askLine(label: string): Promise<string> {
+  if (process.stdin.isTTY) return promptLine(label);
+  // promptLine's `rl.question(label, …)` writes the label as part of asking;
+  // reading pipedLines directly bypasses readline entirely, so the question
+  // has to be written out here or a piped run of the dialogue would apply
+  // each answer to a question nobody — human or test assertion — ever saw.
+  process.stderr.write(label);
+  if (pipedLines === null) {
+    pipedLines = (await readAllStdin()).split(/\r?\n/);
+    if (pipedLines.at(-1) === "") pipedLines.pop();
+  }
+  return (pipedLines.shift() ?? "").trim();
+}
+
 // ------------------------------------------------------------------ programs
 
 /**
@@ -296,10 +324,26 @@ interface Ctx {
 }
 
 /**
+ * Like Ctx, but for a command that must work whether or not this folder has a
+ * vault of its own — a folder can be perfectly usable on library sets alone.
+ * `hasVault` is the file's actual presence; `exists` is whether a project was
+ * found here at all (a vault, a link, or just `.hush/envs.json`) — the two
+ * differ exactly for a folder that only uses library sets.
+ */
+interface LooseCtx {
+  vault: Vault | null;
+  hushDir: string;
+  vaultPath: string;
+  hasVault: boolean;
+  exists: boolean;
+  root: string;
+  env: string;
+}
+
+/**
  * Freshness, not just authenticity: a rolled-back vault decrypts perfectly.
- * Shared by ctx() and by cmdLs (which, unlike every other command, works
- * without a project — so it opens the vault itself rather than going
- * through ctx() and has to run this check on its own).
+ * Shared by ctx(), ctxLoose() and cmdLs's <set> lookup, so every path that
+ * opens a project vault runs this check once, in one place.
  */
 function checkRollback(vault: Vault): void {
   const rollback = checkAndRecord(vault);
@@ -313,9 +357,20 @@ function checkRollback(vault: Vault): void {
 }
 
 function ctx(a: Args): Ctx {
-  const loc = resolveVaultPath(process.cwd());
+  const loc = locateProject(process.cwd());
   if (!loc) {
     die("No hush vault found from this directory.", "Run `hush init` here, or `hush link <vault>`.");
+  }
+  // findHushDir() also matches a folder whose .hush/ holds only envs.json —
+  // library sets, no vault of its own — so a command that genuinely needs
+  // this project's own vault has to say so, rather than let Vault.open() fail
+  // with "No vault at .../vault.json. Run `hush init`.", which reads like the
+  // folder is not a hush project at all when it plainly is one.
+  if (!loc.hasVault) {
+    die(
+      "This folder uses library sets and has no vault of its own yet.",
+      "hush add <KEY>=<value> --project, or hush team add, makes one.",
+    );
   }
   const vault = Vault.open(loc.vaultPath);
   checkRollback(vault);
@@ -328,6 +383,29 @@ function ctx(a: Args): Ctx {
     env,
     root: loc.hushDir.replace(/[/\\]\.hush$/, ""),
   };
+}
+
+/**
+ * The loose counterpart: never dies. A folder with no `.hush` anywhere above
+ * it gets a hushDir as if it were about to become one (`<cwd>/.hush`), so a
+ * caller that goes on to write into it (saveLinks, writeProjectDotfiles) does
+ * not need its own fallback path — and `hasVault`/`exists` are both false,
+ * which is the whole signal a caller needs to tell "nothing here yet" apart
+ * from "a vault-less project that already picked its library sets".
+ */
+function ctxLoose(a: Args): LooseCtx {
+  const loc = locateProject(process.cwd());
+  const hushDir = loc?.hushDir ?? join(process.cwd(), ".hush");
+  const vaultPath = loc?.vaultPath ?? join(hushDir, "vault.json");
+  const hasVault = loc?.hasVault ?? false;
+  const root = loc ? loc.hushDir.replace(/[/\\]\.hush$/, "") : process.cwd();
+  const env = str(a, "env") || loc?.env || "default";
+  let vault: Vault | null = null;
+  if (hasVault) {
+    vault = Vault.open(vaultPath);
+    checkRollback(vault);
+  }
+  return { vault, hushDir, vaultPath, hasVault, exists: Boolean(loc), root, env };
 }
 
 /**
@@ -359,12 +437,45 @@ function dieOnApproval(ap: { decision: string; note?: string }, what: string): v
 }
 
 /**
+ * Make this folder's own vault the moment something first needs one: a
+ * project secret via `--project`, or `hush team add` on a folder that has
+ * only ever used library sets. Identity resolution mirrors cmdInit exactly
+ * (create one lazily if this machine has none), so the very first vault on a
+ * machine can be born this way instead of only through `hush init`.
+ */
+function makeProjectVault(hushDir: string, root: string): Vault {
+  const id = loadIdentity() ?? createIdentity();
+  const memberName = process.env.USER || "me";
+  const vaultName = basename(root);
+  const { vault, created } = ensureProjectVault(
+    hushDir,
+    id.pub ? { name: memberName, pub: id.pub } : { name: memberName, ageRecipient: id.age!.recipients[0] },
+    vaultName,
+  );
+  if (created) {
+    info(`${green("✓")} made this folder's own vault at ${cyan(".hush/vault.json")} — commit it`);
+  }
+  return vault;
+}
+
+/**
  * Which vault a named set lives in, or should be created in. An explicit
  * --library / --project wins; otherwise the set's existing home, project
  * first — so `hush add K=v --to work-fal` reaches a library set without a
  * flag, and a new name lands in the project unless asked otherwise.
+ *
+ * `loose.vault` may be null: a folder that only uses library sets, or one not
+ * set up at all. With no project vault, a *new* name defaults to the library
+ * instead — there is nowhere else to put it, and library-first is the model a
+ * vault-less folder is built around. `rm` reaches this same fallback without
+ * ever triggering vault creation, because a name nothing owns yet just falls
+ * through to "no such key" a few lines further down its own caller.
  */
-function pickVault(project: Vault, a: Args, name: string | null): { vault: Vault; where: "project" | "library" } {
+function pickVault(
+  loose: { vault: Vault | null; hushDir: string; root: string },
+  a: Args,
+  name: string | null,
+): { vault: Vault; where: "project" | "library" } {
   const wantLibrary = bool(a, "library");
   const wantProject = bool(a, "project");
   if (wantLibrary && wantProject) die("Pass only one of --library or --project.");
@@ -373,10 +484,17 @@ function pickVault(project: Vault, a: Args, name: string | null): { vault: Vault
     if (!library) die("You have no library yet.", "Make one: hush global --create");
     return { vault: library, where: "library" };
   }
-  if (!wantProject && name && !project.hasSet(name) && library?.hasSet(name)) {
-    return { vault: library, where: "library" };
+  if (wantProject) {
+    return { vault: loose.vault ?? makeProjectVault(loose.hushDir, loose.root), where: "project" };
   }
-  return { vault: project, where: "project" };
+  if (name && loose.vault?.hasSet(name)) return { vault: loose.vault, where: "project" };
+  if (name && library?.hasSet(name)) return { vault: library, where: "library" };
+  if (loose.vault) return { vault: loose.vault, where: "project" };
+  if (library) return { vault: library, where: "library" };
+  die(
+    "This folder has no vault of its own yet, and you have no library either.",
+    `hush add ${name ?? "<KEY>"}=<value> --project makes a vault here, or hush global --create makes a library.`,
+  );
 }
 
 /**
@@ -408,25 +526,205 @@ function resolveSetName(name: string, vaults: (Vault | null)[]): string {
 function useHere(hushDir: string, slug: string, a: Args): void {
   if (bool(a, "no-use")) return;
   if (usedSets(hushDir).includes(slug)) return;
+  // The folder may not have a `.hush` at all yet — a brand new set can be the
+  // very first thing that ever lands in it — so this has to lay down the same
+  // dotfiles `hush use` does, not just the links file.
+  writeProjectDotfiles(hushDir);
   saveLinks(hushDir, [...loadLinks(hushDir), slug]);
   info(`${green("✓")} this project now uses ${bold(slug)}  ${dim(`(hush use --not ${slug} to stop)`)}`);
 }
 
+/** @deprecated body moved to writeProjectDotfiles() in library.ts, which cmdInit/cmdLink also need without a circular import back into cli.ts. */
 function ensureGitignore(hushDir: string): void {
-  const p = join(hushDir, ".gitignore");
-  const body = ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n");
-  if (!existsSync(p)) writeFileSync(p, body);
+  writeProjectDotfiles(hushDir);
+}
 
-  // Stop git from line-merging the vault. A three-way merge of two independent
-  // edits produces a file that is valid JSON but has a data key wrapped for one
-  // branch and values sealed under another — unopenable, and it looks fine.
-  // Marking it unmergeable forces a whole-file choice instead.
-  const attrs = join(hushDir, ".gitattributes");
-  if (!existsSync(attrs)) {
-    // -merge only, never -diff: the diff is how a reviewer notices that a
-    // recipient was added, and key names are not secret.
-    writeFileSync(attrs, ["vault.json -merge", "use.json -merge", ""].join("\n"));
+// ------------------------------------------------------------ folder set-up
+//
+// "Set up" means `.hush/envs.json` exists — a vault alone counts too, since
+// that could only get there through `hush init`, which is itself an explicit
+// choice to use hush here. Below this line, `hush run` (and `dev` and
+// pass-through, which share it), and `hush use` with no arguments, run the
+// dialogue below instead of resolving nothing and running the command anyway
+// — silence here is the exact dead end this whole feature exists to close.
+
+function isSetUp(loose: { hushDir: string; hasVault: boolean }): boolean {
+  return loose.hasVault || existsSync(join(loose.hushDir, "envs.json"));
+}
+
+/**
+ * HUSH_INTERACTIVE=1 turns *prompting* on even when stdin is not a real TTY,
+ * so a test can drive the setup dialogue with piped answers. It cannot make
+ * the dialogue accept anything it would otherwise refuse — every check it
+ * runs (which sets exist, whether a typed name is one of them) is identical
+ * either way — it only decides whether a question gets asked at all instead
+ * of the command refusing outright.
+ */
+function interactiveSetup(): boolean {
+  return Boolean(process.stdin.isTTY) || process.env.HUSH_INTERACTIVE === "1";
+}
+
+/**
+ * The non-interactive refusal. Never runs the command with nothing injected —
+ * that silent no-op, not an error, is the dead end this whole feature exists
+ * to prevent — and never blocks waiting for an answer nobody can give.
+ */
+function dieNotSetUp(): never {
+  const names = librarySets().map((s) => s.name);
+  process.stderr.write(red("✗ This folder isn't set up for hush yet.") + "\n");
+  if (names.length) {
+    process.stderr.write(`  ${cyan("hush use <set> …")}        pick from your library: ${names.join(", ")}\n`);
   }
+  process.stderr.write(`  ${cyan("hush add .env --as Dev")}  start from a .env file\n`);
+  if (!names.length) {
+    process.stderr.write(`  ${cyan("hush global --create")}\n`);
+  }
+  process.exit(1);
+}
+
+/**
+ * "Which sets should this folder use?" — the fallback when nothing was
+ * suggested, either because the scan found no variable names at all or
+ * because none of them matched anything in the library. Replaces the whole
+ * list on every call, which is also what makes it double as the `edit` step:
+ * a typo is refused by name rather than silently dropped.
+ */
+async function manualPick(sets: ReturnType<typeof librarySets>): Promise<string[]> {
+  info(`Which sets should this folder use? ${dim("(space-separated, enter for none)")}`);
+  if (sets.length) info(dim(`  ${sets.map((s) => s.name).join(", ")}`));
+  const typed = (await askLine("> ")).split(/\s+/).filter(Boolean);
+  if (!typed.length) return [];
+  const unknown = typed.filter((n) => !sets.some((s) => s.name === n));
+  if (unknown.length) {
+    die(`No set called "${unknown[0]}".`, `you have: ${sets.map((s) => s.name).join(", ") || "none yet"}`);
+  }
+  return typed;
+}
+
+/**
+ * "Will an AI agent use secrets here?" — asked once, by `hush init` and by
+ * the setup dialogue, since both are the first moment a folder becomes
+ * usable and this is the only place hush ever asks about its threat model up
+ * front. `y` writes the same `requireApproval` policy.json `hush secure
+ * approval` would; `N` (or never asking, off a TTY with neither flag) writes
+ * nothing at all — an absent policy file is rung 1 of the ladder by design
+ * (see policy.ts), and writing an empty one here would look identical on
+ * disk while foreclosing "never asked" from "asked and declined".
+ */
+async function askAgentQuestion(hushDir: string, a: Args): Promise<void> {
+  const forced = bool(a, "agent") ? true : bool(a, "no-agent") ? false : null;
+  let wantsAgent: boolean;
+  if (forced !== null) {
+    wantsAgent = forced;
+  } else if (interactiveSetup()) {
+    const ans = (await askLine(`Will an AI agent use secrets here? ${dim("[y/N]")} `)).toLowerCase();
+    wantsAgent = ans === "y" || ans === "yes";
+  } else {
+    return;
+  }
+  if (!wantsAgent) return;
+  mkdirSync(hushDir, { recursive: true });
+  const policyPath = join(hushDir, "policy.json");
+  if (!existsSync(policyPath)) {
+    // DEFAULT_POLICY.requireApproval, not a retyped literal — the drift check
+    // "the default policy is not retyped anywhere" exists because a
+    // hand-written copy is exactly how `allowReveal` kept being written into
+    // every new project after it stopped meaning anything.
+    writeFileSync(
+      policyPath,
+      JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n",
+    );
+  }
+  info(`${green("✓")} approvals on  ${dim("— hush install-mcp when you're ready")}`);
+}
+
+/**
+ * The dialogue a folder that isn't set up runs once, interactively: what its
+ * code references, which library sets cover that, and — the one thing hush
+ * ever asks up front — whether an agent will be anywhere near the secrets.
+ * Only ever reached when interactiveSetup() is true; the non-interactive
+ * path (dieNotSetUp) never gets here at all, so this never has to guess at an
+ * answer nobody typed.
+ */
+async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Args): Promise<void> {
+  info(bold("This folder isn't set up for hush yet."));
+
+  const sets = librarySets();
+  const usages = scanRepo(loose.root);
+  const needed = usages.map((u) => u.name);
+
+  let picks: string[];
+
+  if (!needed.length) {
+    picks = await manualPick(sets);
+  } else {
+    const files = new Set(usages.flatMap((u) => u.sites)).size;
+    info(`Its code references: ${needed.join(", ")}   ${dim(`(${files} file${files === 1 ? "" : "s"})`)}`);
+
+    const suggestion = suggestSets(needed, sets);
+    const byName = new Map(sets.map((s) => [s.name, s]));
+    // Filled in with the ambiguous keys' choices below, so the final grouping
+    // (picks + what each covers) comes from one map either way.
+    const providerFor: Record<string, string> = { ...suggestion.provider };
+
+    for (const { key, options } of suggestion.ambiguous) {
+      const labels = options.map((n) => byName.get(n)?.label ?? n);
+      const raw = await askLine(
+        `${key} is in ${labels.join(" and ")} — which one? ${dim(`[${options.map((_, i) => i + 1).join("/")}]`)} `,
+      );
+      const idx = Number(raw) - 1;
+      providerFor[key] = options[idx] ?? options[0];
+    }
+
+    const chosenSets = new Map<string, string[]>();
+    for (const [key, name] of Object.entries(providerFor)) {
+      if (!chosenSets.has(name)) chosenSets.set(name, []);
+      chosenSets.get(name)!.push(key);
+    }
+    picks = [...chosenSets.keys()];
+
+    if (picks.length) {
+      info("Your library covers them:");
+      for (const name of picks) {
+        const label = byName.get(name)?.label;
+        const shown = label && label !== name ? `${label}  ${dim(`(${name})`)}` : name;
+        info(`  ${green("●")} ${bold(shown)}   ${chosenSets.get(name)!.join(", ")}`);
+      }
+    }
+    if (suggestion.uncovered.length) {
+      info(
+        dim(
+          `Not in your library: ${suggestion.uncovered.join(", ")}   ` +
+            `(hush add ${suggestion.uncovered[0]}=… --to <set> later)`,
+        ),
+      );
+    }
+
+    if (!picks.length) {
+      // Nothing the library offers matched what the scan found; fall back to
+      // asking outright rather than proposing an empty list as if it were a
+      // real suggestion.
+      picks = await manualPick(sets);
+    } else {
+      const ans = (await askLine(`Use these here? ${dim("[Y/n/edit]")} `)).trim().toLowerCase();
+      if (ans === "n" || ans === "no") {
+        die("Nothing set up.", "hush use <set> when you're ready.");
+      } else if (ans === "edit" || ans === "e") {
+        picks = await manualPick(sets);
+      }
+      // Blank or "y": keep the proposed `picks` as they stand.
+    }
+  }
+
+  saveLinks(loose.hushDir, picks);
+  writeProjectDotfiles(loose.hushDir);
+  info(
+    picks.length
+      ? `${green("✓")} this folder uses ${picks.join(", ")}   ${dim("(.hush/envs.json — commit it if the team should too)")}`
+      : `${green("✓")} .hush/envs.json created   ${dim("(commit it if the team should too)")}`,
+  );
+
+  await askAgentQuestion(loose.hushDir, a);
 }
 
 // ----------------------------------------------------------------- commands
@@ -472,6 +770,10 @@ async function cmdInit(a: Args): Promise<void> {
   info(`  ${cyan('hush add .env --as "Dev"')}  bring in what you already have, as a set`);
   info(`  ${cyan("hush add STRIPE_KEY")}      add one secret`);
   info(`  ${cyan("hush install-mcp")}         let your coding agent use them (blind)`);
+  // A global vault's directory is never what policyFor() looks at — policy.json
+  // lives beside a *project's* vault — so asking here would write a file
+  // nothing ever reads.
+  if (!global) await askAgentQuestion(hushDir, a);
 }
 
 function require_basename(): string {
@@ -513,20 +815,31 @@ async function cmdSet(a: Args): Promise<void> {
 }
 
 async function cmdGet(a: Args): Promise<void> {
-  const { vault, env, hushDir } = ctx(a);
+  const loose = ctxLoose(a);
   const id = requireIdentity();
   const key = a._[0];
   if (!key) die("Usage: hush get <KEY>");
-  if (!vault.has(env, key)) die(`No secret "${key}" in env "${env}".`);
 
-  const policy = policyFor(hushDir);
+  // Resolved through the same layering `hush run`/`hush export` use — a
+  // library link included — not a single literal env, so a key that only a
+  // used library set provides is findable at all in a vault-less folder.
+  const extra = collectExtraSets(a);
+  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
+  if (!Object.prototype.hasOwnProperty.call(secrets, key)) {
+    die(
+      `No secret "${key}" in any set this project uses.`,
+      missing.length ? `Your library is missing: ${missing.join(", ")}` : undefined,
+    );
+  }
+
+  const policy = policyFor(loose.hushDir);
   if (policy) {
-    checkEnv(policy, env);
+    checkScopes(policy, layers);
     if (policy.requireApproval.includes("reveal")) {
-      const ap = await requestApproval(hushDir, {
+      const ap = await requestApproval(loose.hushDir, {
         action: "reveal",
-        summary: `Reveal ${key} (${env})`,
-        scope: `reveal:${env}/${key}`,
+        summary: `Reveal ${key}`,
+        scope: `reveal:${layers.join("+")}/${key}`,
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
@@ -540,9 +853,8 @@ async function cmdGet(a: Args): Promise<void> {
     warn("This prints a live credential to your terminal, where it stays in scrollback.");
     if (!(await confirm(`Reveal ${bold(key)}?`))) return info(dim("aborted"));
   }
-  const value = vault.get(id, env, key);
-  audit(hushDir, { actor: "cli", action: "reveal", env, key });
-  out(value);
+  audit(loose.hushDir, { actor: "cli", action: "reveal", key, layers });
+  out(secrets[key]);
 }
 
 /**
@@ -553,10 +865,8 @@ async function cmdGet(a: Args): Promise<void> {
  */
 async function cmdLs(a: Args): Promise<void> {
   const setName = a._[0];
-  const loc = resolveVaultPath(process.cwd());
-  const hushDir = loc?.hushDir ?? null;
-  const project = loc ? Vault.open(loc.vaultPath) : null;
-  if (project) checkRollback(project);
+  const loose = ctxLoose(a);
+  const project = loose.vault;
   const library = openGlobal();
 
   if (setName) {
@@ -573,7 +883,8 @@ async function cmdLs(a: Args): Promise<void> {
     return;
   }
 
-  const used = new Set(hushDir ? usedSets(hushDir) : []);
+  const setUp = isSetUp(loose);
+  const used = new Set(setUp ? usedSets(loose.hushDir) : []);
   const libSets = librarySets();
 
   if (bool(a, "json")) {
@@ -582,6 +893,7 @@ async function cmdLs(a: Args): Promise<void> {
         {
           library: libSets.map((s) => ({ ...s, used: used.has(s.name) })),
           project: project ? project.sets().map((s) => ({ ...s, used: used.has(s.name) })) : [],
+          setUp,
         },
         null,
         2,
@@ -608,8 +920,16 @@ async function cmdLs(a: Args): Promise<void> {
 
   info("");
   info(bold("THIS PROJECT"));
-  if (!project) {
-    info(dim("  no project here.  hush init"));
+  if (!setUp) {
+    info(dim("  not set up yet."));
+    info(`  ${cyan("hush use <set>")}       pick one from your library`);
+    info(`  ${cyan("hush run -- <cmd>")}    or just run something — hush will ask`);
+  } else if (!project) {
+    info(dim("  no vault yet — this folder uses library sets only"));
+    for (const name of used) {
+      const s = libSets.find((x) => x.name === name);
+      if (s) line(s);
+    }
   } else {
     for (const s of project.sets()) line(s);
   }
@@ -624,7 +944,7 @@ async function cmdLs(a: Args): Promise<void> {
  * rather than guessing which was meant.
  */
 async function cmdRm(a: Args): Promise<void> {
-  const { vault: project, hushDir } = ctx(a);
+  const loose = ctxLoose(a);
   requireIdentity();
   const name = a._[0];
   if (!name) die("Usage: hush rm <KEY> [--from <set>]  |  hush rm <set> [--yes]");
@@ -632,7 +952,9 @@ async function cmdRm(a: Args): Promise<void> {
   const from0 = str(a, "from");
   // The vault the named set — or the set --from names — lives in, so a library
   // set can be removed, or trimmed, from the same command as a project one.
-  const { vault, where } = pickVault(project, a, from0 ?? name);
+  // With no project vault this targets the library, since that is the only
+  // place a set could be.
+  const { vault, where } = pickVault(loose, a, from0 ?? name);
   const isSet = vault.hasSet(name);
   const holders = vault.envNames().filter((e) => vault.has(e, name));
   const isKey = holders.length > 0;
@@ -657,7 +979,7 @@ async function cmdRm(a: Args): Promise<void> {
     if (vault.data.meta) delete vault.data.meta[name];
     vault.markStructural();
     vault.save();
-    audit(hushDir, { actor: "cli", action: "rm.set", set: name, where });
+    audit(loose.hushDir, { actor: "cli", action: "rm.set", set: name, where });
     info(`${green("✓")} removed set ${bold(name)}`);
     return;
   }
@@ -682,7 +1004,7 @@ async function cmdRm(a: Args): Promise<void> {
 
   vault.delete(from, name);
   vault.save();
-  audit(hushDir, { actor: "cli", action: "delete", env: from, key: name, where });
+  audit(loose.hushDir, { actor: "cli", action: "delete", env: from, key: name, where });
   info(`${green("✓")} removed ${bold(name)} from ${cyan(from)}`);
   warn("The old value is still in git history. Rotate it upstream if it was ever live.");
 }
@@ -730,7 +1052,8 @@ function importInto(
  * like one that did.
  */
 async function cmdAddFile(a: Args, file: string): Promise<void> {
-  const { vault: project, hushDir, root } = ctx(a);
+  const loose = ctxLoose(a);
+  let project = loose.vault;
   const id = requireIdentity();
   if (!existsSync(file)) die(`No such file: ${file}`);
 
@@ -756,6 +1079,18 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
   const wantLibrary = bool(a, "library");
   const wantProject = bool(a, "project");
   if (wantLibrary && wantProject) die("Pass only one of --library or --project.");
+  // Neither flag, no vault of this folder's own, and no library to fall back
+  // to: a script has nowhere sensible to land, so it fails the same way every
+  // other `add` form does with nothing to work with. A real terminal still
+  // gets the "Where?" prompt below, which for "project" makes the vault then
+  // and there — only a non-interactive caller with nothing to fall back on
+  // ever reaches this.
+  if (!wantLibrary && !wantProject && !isTTY && !project && !globalVaultExists()) {
+    die(
+      `Nothing was stored from ${file}: this folder has no vault yet, and you have no library either.`,
+      `hush add ${file} --as "${asLabel}" --project makes a vault here, or hush global --create makes a library.`,
+    );
+  }
   let toLibrary: boolean;
   if (wantLibrary) toLibrary = true;
   else if (wantProject) toLibrary = false;
@@ -775,16 +1110,17 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
     target = g;
     where = `your library (${globalVaultName()})`;
   } else {
-    target = project;
+    target = project ?? makeProjectVault(loose.hushDir, loose.root);
+    project = target;
     where = "this project";
   }
 
   const slug = slugifyEnv(asLabel);
   const overwrite = bool(a, "overwrite");
 
-  const policy = policyFor(hushDir);
+  const policy = policyFor(loose.hushDir);
   if (policy?.requireApproval.includes("add")) {
-    const ap = await requestApproval(hushDir, {
+    const ap = await requestApproval(loose.hushDir, {
       action: "add",
       summary: `Add set "${asLabel}" (${names.length} key(s)) to ${where}`,
       scope: `add:${slug}`,
@@ -807,14 +1143,14 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
   if (!added) target.ensureEnvExists(slug); // describeEnv requires the env to exist
   target.describeEnv(slug, meta);
   target.save();
-  audit(hushDir, { actor: "cli", action: "add", kind: "file", env: slug, as: asLabel, file, added, skipped, where: toLibrary ? "library" : "project" });
+  audit(loose.hushDir, { actor: "cli", action: "add", kind: "file", env: slug, as: asLabel, file, added, skipped, where: toLibrary ? "library" : "project" });
 
   info(`${green("✓")} stored ${bold(String(added))} secret(s) as ${bold(asLabel)} ${dim(`(${slug})`)} in ${where}`);
   if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
-  useHere(hushDir, slug, a);
+  useHere(loose.hushDir, slug, a);
   info("");
   info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
-  maybeNudge(project, hushDir, root);
+  maybeNudge(project, loose.hushDir, loose.root);
 }
 
 /**
@@ -883,24 +1219,33 @@ function parseColonPair(spec: string): { service: string; account: string } {
  * policy gate instead of each reimplementing it slightly differently.
  */
 async function runCommand(a: Args, argv: string[]): Promise<void> {
-  const { vault, hushDir } = ctx(a);
+  const loose = ctxLoose(a);
   const id = requireIdentity();
   if (!argv.length) die("Usage: hush run [--use <set>…] [--env <set>] -- <command> [args...]");
 
+  // A folder nobody has told hush anything about must never run the command
+  // anyway with nothing injected — that silent no-op is worse than refusing,
+  // because it looks like success. Off a TTY (and without HUSH_INTERACTIVE=1)
+  // there is nobody to ask, so this refuses outright instead of guessing.
+  if (!isSetUp(loose)) {
+    if (!interactiveSetup()) dieNotSetUp();
+    await runSetupDialogue(loose, a);
+  }
+
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing } = composeSets(vault, id, hushDir, extra);
+  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
 
   // Same checks the MCP server applies to hush_run, so a plain shell cannot
   // walk around a policy an agent's MCP tools would have been refused by.
   // checkEnv() is not needed here: "default" and every used/extra set already
   // appear in `layers`, so checkScopes() alone covers what a single base env
   // used to need a separate check for.
-  const policy = policyFor(hushDir);
+  const policy = policyFor(loose.hushDir);
   if (policy) {
     checkCommand(policy, argv[0]);
     checkScopes(policy, layers);
     if (policy.requireApproval.includes("run")) {
-      const ap = await requestApproval(hushDir, {
+      const ap = await requestApproval(loose.hushDir, {
         action: "run",
         summary: `Run:  ${argv.join(" ")}`.trim(),
         detail: [
@@ -917,7 +1262,7 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
       });
-      audit(hushDir, { actor: "cli", action: "approval", on: "run", decision: ap.decision, via: ap.via, code: ap.code });
+      audit(loose.hushDir, { actor: "cli", action: "approval", on: "run", decision: ap.decision, via: ap.via, code: ap.code });
       // Denied or timed out: exit before the child is ever spawned.
       dieOnApproval(ap, `running "${argv[0]}"`);
     }
@@ -930,7 +1275,7 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
   if (!bool(a, "quiet") && layers.length) {
     process.stderr.write(dim(`hush: using ${layers.join(", ")}\n`));
   }
-  audit(hushDir, { actor: "cli", action: "run", layers, command: argv[0], injected: Object.keys(secrets).length });
+  audit(loose.hushDir, { actor: "cli", action: "run", layers, command: argv[0], injected: Object.keys(secrets).length });
 
   const result = await runWithSecrets(argv[0], argv.slice(1), {
     cwd: process.cwd(),
@@ -977,14 +1322,27 @@ async function runPassThrough(argv: string[]): Promise<void> {
 }
 
 async function cmdScan(a: Args): Promise<void> {
-  const { vault, env, root } = ctx(a);
-  const target = a._[0] ? resolvePath(a._[0]) : root;
+  const loose = ctxLoose(a);
+  const target = a._[0] ? resolvePath(a._[0]) : loose.root;
   const usages = scanRepo(target);
-  const r = reconcile(usages, vault.list(env).map((i) => i.key));
+
+  // Reconciled against every set this project actually uses — a library link
+  // included, project winning over library on a shared name, same as
+  // composeSets() — not just the literal keys of one named env. Checking only
+  // `vault.list(env)` reported a key as missing even when a used library set
+  // already provided it.
+  const extra = collectExtraSets(a);
+  const names = [...new Set([...usedSets(loose.hushDir), ...extra])];
+  const keysOf = new Map<string, string[]>();
+  for (const s of librarySets()) keysOf.set(s.name, s.keys);
+  for (const s of loose.vault?.sets() ?? []) keysOf.set(s.name, s.keys);
+  const vaultKeys = [...new Set(names.flatMap((n) => keysOf.get(n) ?? []))];
+
+  const r = reconcile(usages, vaultKeys);
 
   if (bool(a, "json")) return out(JSON.stringify(r, null, 2));
 
-  info(`${bold("scan")} ${dim(target)}  ${dim("against")} ${cyan(env)}`);
+  info(`${bold("scan")} ${dim(target)}  ${dim("against")} ${cyan(names.join(", ") || "(nothing used)")}`);
   info("");
   info(`  ${green("✓")} ${r.satisfied.length} satisfied by the vault`);
   info(`  ${r.missing.length ? red("✗") : green("✓")} ${r.missing.length} missing`);
@@ -998,7 +1356,7 @@ async function cmdScan(a: Args): Promise<void> {
       info(`  ${red(m.name.padEnd(width))}  ${dim(m.sites.slice(0, 3).join(", "))}`);
     }
     info("");
-    info(dim(`  add them:  hush add <KEY>${env === "default" ? "" : ` --to ${env}`}`));
+    info(dim(`  add them:  hush add <KEY> --to <set>`));
   }
   if (r.unused.length && bool(a, "verbose")) {
     info("");
@@ -1007,7 +1365,7 @@ async function cmdScan(a: Args): Promise<void> {
 }
 
 async function cmdExport(a: Args): Promise<void> {
-  const { vault, hushDir } = ctx(a);
+  const loose = ctxLoose(a);
   const id = requireIdentity();
 
   // Must match `hush run` exactly, library links included — materialising only
@@ -1015,7 +1373,7 @@ async function cmdExport(a: Args): Promise<void> {
   // would have injected, so the shell hook and any generated .env disagreed
   // with what the app actually got at run time.
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing } = composeSets(vault, id, hushDir, extra);
+  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
   if (missing.length) warn(`Not exported: ${missing.join(", ")} — your library does not have them.`);
 
   // Used by the shell hook to know what to unset again on the way out. Reveals
@@ -1028,11 +1386,11 @@ async function cmdExport(a: Args): Promise<void> {
   // Everything past here writes values somewhere (stdout or --out), so it is
   // the "reveal" action regardless of format. checkEnv() is not needed: every
   // set in `layers` (including "default") is exactly what checkScopes() checks.
-  const policy = policyFor(hushDir);
+  const policy = policyFor(loose.hushDir);
   if (policy) {
     checkScopes(policy, layers);
     if (policy.requireApproval.includes("reveal")) {
-      const ap = await requestApproval(hushDir, {
+      const ap = await requestApproval(loose.hushDir, {
         action: "reveal",
         summary: `Export ${Object.keys(secrets).length} secret(s)`,
         detail: [`Using sets:  ${layers.join(", ") || "(none)"}`],
@@ -1048,14 +1406,15 @@ async function cmdExport(a: Args): Promise<void> {
   const format = str(a, "format") || (bool(a, "shell") ? "shell" : "env");
   const outFile = str(a, "out");
 
+  const source = loose.vault ? `vault "${loose.vault.data.name}"` : "your library";
   const body =
     format === "json"
       ? JSON.stringify(secrets, null, 2) + "\n"
       : format === "shell"
         ? toShellExports(secrets)
-        : toEnvFile(secrets, `generated by hush from vault "${vault.data.name}" (${layers.join(", ") || "nothing"}) — do not commit`);
+        : toEnvFile(secrets, `generated by hush from ${source} (${layers.join(", ") || "nothing"}) — do not commit`);
 
-  audit(hushDir, { actor: "cli", action: "export", layers, format, to: outFile ?? "stdout" });
+  audit(loose.hushDir, { actor: "cli", action: "export", layers, format, to: outFile ?? "stdout" });
 
   if (outFile) {
     writeFileSync(outFile, body, { mode: 0o600 });
@@ -1084,7 +1443,30 @@ async function cmdExport(a: Args): Promise<void> {
 
 async function cmdTeam(a: Args): Promise<void> {
   const sub = a._[0];
-  const { vault, hushDir, vaultPath } = ctx(a);
+
+  // `team add` is the other door into a vault, alongside `--project`: a
+  // folder that has only ever used library sets gets one the moment someone
+  // needs to share it, exactly like `hush add K=v --project` does. Every
+  // other subcommand needs a vault that already exists, so those stay on the
+  // strict ctx() below, unchanged.
+  if (sub === "add") {
+    const loose = ctxLoose(a);
+    const [name, pk] = [a._[1], a._[2]];
+    if (!name || !pk) die("Usage: hush team add <name> <hush_pk_… | age1…>");
+    if (isAgeRecipient(pk) && !ageAvailable()) {
+      die("That is an age recipient, but the age binary is not installed.", "brew install age");
+    }
+    const vault = loose.vault ?? makeProjectVault(loose.hushDir, loose.root);
+    const id = requireIdentity();
+    const fp = vault.addRecipient(id, name, pk, str(a, "role") === "admin" ? "admin" : "member");
+    vault.save();
+    audit(loose.hushDir, { actor: "cli", action: "team.add", name, fingerprint: fp });
+    info(`${green("✓")} ${bold(name)} can now decrypt this vault`);
+    info(dim(`  commit ${loose.vaultPath} and they are in — no server, no invite email`));
+    return;
+  }
+
+  const { vault, hushDir } = ctx(a);
 
   if (!sub || sub === "ls" || sub === "list") {
     const members = vault.members();
@@ -1100,20 +1482,6 @@ async function cmdTeam(a: Args): Promise<void> {
   }
 
   const id = requireIdentity();
-
-  if (sub === "add") {
-    const [name, pk] = [a._[1], a._[2]];
-    if (!name || !pk) die("Usage: hush team add <name> <hush_pk_… | age1…>");
-    if (isAgeRecipient(pk) && !ageAvailable()) {
-      die("That is an age recipient, but the age binary is not installed.", "brew install age");
-    }
-    const fp = vault.addRecipient(id, name, pk, str(a, "role") === "admin" ? "admin" : "member");
-    vault.save();
-    audit(hushDir, { actor: "cli", action: "team.add", name, fingerprint: fp });
-    info(`${green("✓")} ${bold(name)} can now decrypt this vault`);
-    info(dim(`  commit ${vaultPath} and they are in — no server, no invite email`));
-    return;
-  }
 
   if (sub === "rm" || sub === "remove") {
     const name = a._[1];
@@ -1185,8 +1553,10 @@ async function cmdEnv(a: Args): Promise<void> {
 
   const target = (): { vault: Vault; save: () => void; where: string } => {
     if (onProject) {
-      if (!loc) die("No project vault here.", "Run `hush init`, or drop --project to act on your library.");
-      const v = Vault.open(loc.vaultPath);
+      // ctx() carries the same "no vault of its own yet" distinction this
+      // needs: a folder with .hush/envs.json but no vault.json is a project
+      // that only ever used library sets, not one with nothing here at all.
+      const { vault: v } = ctx(a);
       return { vault: v, save: () => v.save(), where: "this project" };
     }
     const g = openGlobal();
@@ -1564,7 +1934,7 @@ async function cmdAdd(a: Args): Promise<void> {
 
 /** `hush add KEY=value [KEY=value…] [--to <set>]` — the direct-value form. */
 async function cmdAddKeyValue(a: Args): Promise<void> {
-  const { vault: project, hushDir, vaultPath, root } = ctx(a);
+  const loose = ctxLoose(a);
   const id = requireIdentity();
   const pairs = a._;
   if (!pairs.length) die("Usage: hush add <KEY>[=value] [<KEY>=value…] [--to <set>]");
@@ -1579,10 +1949,10 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
       info(dim(`  Tip: hush add ${pairs[0]} --to <set> keeps this out of "default".`));
     }
   }
-  const slug = resolveSetName(to, [project, openGlobal()]);
-  const { vault, where } = pickVault(project, a, slug);
+  const slug = resolveSetName(to, [loose.vault, openGlobal()]);
+  const { vault, where } = pickVault(loose, a, slug);
   const isNew = !vault.hasSet(slug);
-  const policy = policyFor(hushDir);
+  const policy = policyFor(loose.hushDir);
 
   for (const spec of pairs) {
     let key = spec;
@@ -1598,7 +1968,7 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
     if (!value) die("Empty value, nothing written.");
 
     if (policy?.requireApproval.includes("add")) {
-      const ap = await requestApproval(hushDir, {
+      const ap = await requestApproval(loose.hushDir, {
         action: "add",
         summary: `Set ${key} (${slug})`,
         scope: `add:${slug}/${key}`,
@@ -1612,13 +1982,13 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
     const existed = vault.has(slug, key);
     vault.set(id, slug, key, value, str(a, "note"));
     vault.save();
-    audit(hushDir, { actor: "cli", action: existed ? "update" : "create", env: slug, key, where });
+    audit(loose.hushDir, { actor: "cli", action: existed ? "update" : "create", env: slug, key, where });
     info(`${green("✓")} ${existed ? "updated" : "added"} ${bold(key)} in ${cyan(slug)}  ${dim(preview(value))}`);
   }
-  if (isNew) useHere(hushDir, slug, a);
+  if (isNew) useHere(loose.hushDir, slug, a);
   if (where === "library") info(dim(`  in your library (${globalVaultName()}) — never in the repo`));
-  else info(dim(`  commit ${vaultPath} to share it with the team`));
-  maybeNudge(project, hushDir, root);
+  else info(dim(`  commit ${loose.vaultPath} to share it with the team`));
+  maybeNudge(where === "project" ? vault : loose.vault, loose.hushDir, loose.root);
 }
 
 /**
@@ -1627,7 +1997,7 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
  * deprecated alias for `--as "<service>/<x>"`.
  */
 async function cmdAddService(a: Args, service: string): Promise<void> {
-  const { vault: project, hushDir, vaultPath } = ctx(a);
+  const loose = ctxLoose(a);
   const id = requireIdentity();
 
   const accountAlias = str(a, "account");
@@ -1652,7 +2022,7 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
     );
   }
 
-  const { vault, where } = pickVault(project, a, slug);
+  const { vault, where } = pickVault(loose, a, slug);
   const vars = list(a, "vars").length ? list(a, "vars") : knownVars(service);
   if (!vars.length) {
     die(
@@ -1661,9 +2031,9 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
     );
   }
 
-  const policy = policyFor(hushDir);
+  const policy = policyFor(loose.hushDir);
   if (policy?.requireApproval.includes("add")) {
-    const ap = await requestApproval(hushDir, {
+    const ap = await requestApproval(loose.hushDir, {
       action: "add",
       summary: `Add ${serviceLabel(service)} set "${asLabel}" (${vars.join(", ")})`,
       scope: `add:${slug}`,
@@ -1713,18 +2083,18 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
 
   if (!accountAlias) vault.describeEnv(slug, { label: asLabel });
   vault.save();
-  audit(hushDir, { actor: "cli", action: "add", kind: "service", service, env: slug, stored, where });
+  audit(loose.hushDir, { actor: "cli", action: "add", kind: "service", service, env: slug, stored, where });
   info("");
   info(`${green("✓")} stored ${stored} value(s) for ${bold(slug)}`);
   // The --account alias promises the old behaviour, and the old behaviour
   // was "stored, not pinned" — scripts then ran `hush use` themselves.
-  if (accountAlias === undefined) useHere(hushDir, slug, a);
+  if (accountAlias === undefined) useHere(loose.hushDir, slug, a);
   info("");
   info("Use it:");
   info(`  ${cyan("hush npm run dev")}  ${dim("← or any command; the set is injected")}`);
   info(`  ${cyan(`hush run --use ${slug} -- <cmd>`)}  ${dim("← from a project that does not use it")}`);
   if (where === "library") info(dim(`  in your library (${globalVaultName()}) — never in the repo`));
-  else info(dim(`  commit ${vaultPath} to share it`));
+  else info(dim(`  commit ${loose.vaultPath} to share it`));
 }
 
 /** `hush accounts` — pre-unification name for `hush ls`. */
@@ -1748,17 +2118,24 @@ function convertLegacyPin(spec: string): string {
  * order, with where each comes from. `hush use --not <set>` stops using it.
  */
 async function cmdUse(a: Args): Promise<void> {
-  const { vault, hushDir } = ctx(a);
+  const loose = ctxLoose(a);
 
   const notSpecs = list(a, "not").map(convertLegacyPin);
   if (notSpecs.length) {
-    saveLinks(hushDir, loadLinks(hushDir).filter((l) => !notSpecs.includes(l)));
+    saveLinks(loose.hushDir, loadLinks(loose.hushDir).filter((l) => !notSpecs.includes(l)));
     for (const n of notSpecs) info(`${green("✓")} this project no longer uses ${bold(n)}`);
     return;
   }
 
   if (!a._.length) {
-    const used = usedSets(hushDir);
+    // No arguments in a folder nobody has set up yet is exactly the moment
+    // the dialogue exists for — the same one `hush run` falls into, minus
+    // actually running anything afterward.
+    if (!isSetUp(loose)) {
+      if (!interactiveSetup()) dieNotSetUp();
+      return runSetupDialogue(loose, a);
+    }
+    const used = usedSets(loose.hushDir);
     const library = librarySets();
     if (!used.length) {
       info(dim("This project uses nothing yet."));
@@ -1768,7 +2145,7 @@ async function cmdUse(a: Args): Promise<void> {
     info(bold("This project uses:") + dim("  (in resolution order — later wins)"));
     const width = Math.max(...used.map((n) => n.length));
     for (const name of used) {
-      const source = vault.hasSet(name) ? "project" : library.some((s) => s.name === name) ? "library" : "missing";
+      const source = loose.vault?.hasSet(name) ? "project" : library.some((s) => s.name === name) ? "library" : "missing";
       info(`  ${name.padEnd(width)}  ${dim(source)}`);
     }
     return;
@@ -1776,13 +2153,16 @@ async function cmdUse(a: Args): Promise<void> {
 
   const names = a._.map(convertLegacyPin);
   const library = librarySets();
-  const unknown = names.filter((n) => !vault.hasSet(n) && !library.some((s) => s.name === n));
+  const unknown = names.filter((n) => !loose.vault?.hasSet(n) && !library.some((s) => s.name === n));
   if (unknown.length) {
-    const known = [...new Set([...vault.envNames(), ...library.map((s) => s.name)])];
+    const known = [...new Set([...(loose.vault ? loose.vault.envNames() : []), ...library.map((s) => s.name)])];
     die(`No set called "${unknown[0]}".`, `you have: ${known.length ? known.join(", ") : "none yet"}`);
   }
 
-  saveLinks(hushDir, [...loadLinks(hushDir), ...names]);
+  // A folder with no `.hush` at all yet gets one here — this is one of the
+  // two ways in, alongside the setup dialogue above.
+  writeProjectDotfiles(loose.hushDir);
+  saveLinks(loose.hushDir, [...loadLinks(loose.hushDir), ...names]);
   for (const n of names) info(`${green("✓")} this project now uses ${bold(n)}`);
   info(dim("\n  recorded in .hush/envs.json — commit it so the team resolves the same sets"));
 }
@@ -2048,6 +2428,7 @@ ${bold("daily")}
   hush use --not <set>                     stop using it here
   hush run [--use <set>…] -- <cmd>         run with them injected, output redacted
   ${dim("(pass-through: npm run dev, python app.py, … run the same way)")}
+  ${dim("(in a folder that isn't set up yet, hush asks which of your sets it should use)")}
   hush dev [script]                        find package.json, run it with them injected
   hush ls [<set>]                          library, project, what is used — or one set's keys
   hush rm <KEY> [--from <set>]             remove a key

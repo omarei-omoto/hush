@@ -55,18 +55,43 @@ export const CATALOG: Record<string, { vars: string[]; label: string }> = {
 
 export const SCOPE_SEP = "/";
 
+/** @deprecated Use setNameFor(service, account) — same string, the new name for it. */
 export const scopeOf = (service: string, account: string): string =>
   `${service}${SCOPE_SEP}${account}`;
 
+/**
+ * The name a set gets when someone creates one "for a service" — fal +
+ * account "acme" is the set named "fal/acme". This is the one function that
+ * needs to know the "/" convention, so the CLI and MCP surfaces that create
+ * such a set never have to encode it themselves.
+ */
+export const setNameFor = (service: string, account: string): string =>
+  `${service}${SCOPE_SEP}${account}`;
+
+/**
+ * @deprecated Every set is just a set now; a "/" in the name is not special
+ * to the data model any more. Kept for the account-scoped code still in
+ * vault.ts, cli.ts, mcp.ts and ui.ts until they move onto sets()/resolveSets().
+ */
 export const isAccountScope = (scope: string): boolean => scope.includes(SCOPE_SEP);
 
+/**
+ * @deprecated Use the set name directly — resolveSets() takes it as-is and
+ * has no need to split it back into a service and an account.
+ */
 export function parseScope(scope: string): { service: string; account: string } | null {
   const i = scope.indexOf(SCOPE_SEP);
   if (i < 1) return null;
   return { service: scope.slice(0, i), account: scope.slice(i + 1) };
 }
 
-/** Parse `fal:acme` / `fal=acme` from a --with flag. */
+/**
+ * @deprecated Parses a `--with service:account` flag into the old
+ * (service, account) shape. A future `--use <set-name>` flag needs no parsing
+ * at all, since the set name is typed directly.
+ *
+ * Parse `fal:acme` / `fal=acme` from a --with flag.
+ */
 export function parseWith(spec: string): { service: string; account: string } {
   const m = spec.match(/^([A-Za-z0-9_.-]+)[:=]([A-Za-z0-9_.-]+)$/);
   if (!m) {

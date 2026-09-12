@@ -3,7 +3,7 @@
  * hush — envelope-encrypted team secrets your agent can use but never read.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, chmodSync } from "node:fs";
-import { join, dirname, resolve as resolvePath } from "node:path";
+import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import {
   Vault,
@@ -202,6 +202,22 @@ function confirm(question: string): Promise<boolean> {
     rl.question(`${question} ${dim("[y/N]")} `, (a) => {
       rl.close();
       res(/^y(es)?$/i.test(a.trim()));
+    }),
+  );
+}
+
+/**
+ * A single visible line of input, echoed as typed — unlike `promptSecret`,
+ * which hides input and is for values that must never appear on screen. Only
+ * ever called once the caller has confirmed `process.stdin.isTTY`, so there is
+ * no non-TTY branch here to silently do the wrong thing.
+ */
+function promptLine(label: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((res) =>
+    rl.question(label, (a) => {
+      rl.close();
+      res(a.trim());
     }),
   );
 }
@@ -410,17 +426,29 @@ async function cmdRm(a: Args): Promise<void> {
   warn("The old value is still in git history. Rotate it upstream if it was ever live.");
 }
 
-async function cmdImport(a: Args): Promise<void> {
-  const { vault, env, hushDir } = ctx(a);
-  const id = requireIdentity();
-  const file = a._[0] || ".env";
-  if (!existsSync(file)) die(`No such file: ${file}`);
+/**
+ * Guess a set name from the filename, the same way the UI's "Save all of this
+ * as one named set" bar does (src/ui.ts, `stagingPanel`'s `guess`): strip the
+ * .env prefix and separators, then capitalize. `.env` alone has nothing left
+ * to name it from, so it yields no guess rather than an empty label.
+ */
+function guessSetName(file: string): string {
+  const guess = basename(file).replace(/^\.env\.?/, "").replace(/[-_.]+/g, " ").trim();
+  return guess ? guess.charAt(0).toUpperCase() + guess.slice(1) : "";
+}
 
-  const parsed = parseEnvFile(readFileSync(file, "utf8"));
-  const names = Object.keys(parsed);
-  if (!names.length) die(`No variables found in ${file}.`);
-
-  const overwrite = bool(a, "overwrite");
+/**
+ * Import every key from `file` into a single env, applying the same
+ * `--overwrite` rule the plain import path uses. Shared so a named set behaves
+ * identically whether it is brand new or already has keys in it.
+ */
+function importInto(
+  vault: Vault,
+  id: ReturnType<typeof requireIdentity>,
+  env: string,
+  parsed: Record<string, string>,
+  overwrite: boolean,
+): { added: number; skipped: number } {
   let added = 0;
   let skipped = 0;
   for (const [key, value] of Object.entries(parsed)) {
@@ -431,6 +459,61 @@ async function cmdImport(a: Args): Promise<void> {
     vault.set(id, env, key, value);
     added++;
   }
+  return { added, skipped };
+}
+
+async function cmdImport(a: Args): Promise<void> {
+  const { vault, env, hushDir, root } = ctx(a);
+  const id = requireIdentity();
+  const file = a._[0] || ".env";
+  if (!existsSync(file)) die(`No such file: ${file}`);
+
+  const parsed = parseEnvFile(readFileSync(file, "utf8"));
+  const names = Object.keys(parsed);
+  if (!names.length) die(`No variables found in ${file}.`);
+
+  const overwrite = bool(a, "overwrite");
+  // `hush import` is the command the quick-start tells people to run, so it is
+  // the one place most piles of unrelated keys under "default" get born. Ask
+  // once, but only when there is a human here to ask — a script, CI run or
+  // agent gets no prompt and no change in behaviour, ever (never block).
+  const envGiven = a.flags.env !== undefined;
+  let asLabel = str(a, "as");
+  if (!asLabel && !envGiven && process.stdin.isTTY) {
+    const guess = guessSetName(file);
+    const answer = await promptLine(
+      `Name this set? (enter to keep in ${env}${guess ? `, e.g. "${guess}"` : ""}) `,
+    );
+    if (answer) asLabel = answer;
+  }
+
+  if (asLabel) {
+    const slug = slugifyEnv(asLabel);
+    const { added, skipped } = importInto(vault, id, slug, parsed, overwrite);
+    // A second import into the same named set is someone adding to the set
+    // they already named, not re-describing it — leaving out --description
+    // here must not blank out the description the first import set.
+    const meta: Parameters<typeof vault.describeEnv>[1] = { label: asLabel, source: file };
+    const description = str(a, "description");
+    const when = str(a, "when");
+    if (description !== undefined) meta.description = description;
+    if (when !== undefined) meta.whenToUse = when;
+    if (!added) vault.ensureEnvExists(slug); // describeEnv requires the env to exist
+    vault.describeEnv(slug, meta);
+    vault.save();
+    audit(hushDir, { actor: "cli", action: "import", env: slug, as: asLabel, file, added, skipped });
+    info(`${green("✓")} imported ${bold(String(added))} secret(s) into ${bold(asLabel)} ${dim(`(${slug})`)} from ${file}`);
+    if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
+    info("");
+    info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
+    if (globalVaultExists()) {
+      info(dim(`  hush env new --from puts a set in your library instead, so every project can use it.`));
+    }
+    maybeNudge(vault, hushDir, root);
+    return;
+  }
+
+  const { added, skipped } = importInto(vault, id, env, parsed, overwrite);
   vault.save();
   audit(hushDir, { actor: "cli", action: "import", env, file, added, skipped });
   info(`${green("✓")} imported ${bold(String(added))} secret(s) into ${cyan(env)} from ${file}`);
@@ -438,7 +521,12 @@ async function cmdImport(a: Args): Promise<void> {
   info("");
   info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
   info(dim(`  From here on: hush run -- <your command>`));
-  maybeNudge(vault, hushDir, ctx(a).root);
+  // Only when nothing was said either way: --env asked for exactly today's
+  // behaviour, and a declined prompt already gave the human the chance.
+  if (!envGiven && !process.stdin.isTTY) {
+    info(dim(`  Tip: hush import ${file} --as "Name" keeps these together as a named set.`));
+  }
+  maybeNudge(vault, hushDir, root);
 }
 
 /**
@@ -1513,7 +1601,7 @@ ${bold("secrets")}
   hush get <KEY>                reveal one value (asks first)
   hush ls [--env e]             list names — never values
   hush rm <KEY>
-  hush import [file]            pull in an existing .env
+  hush import [file] [--as <name>]  pull in an existing .env, optionally as a named set
   hush export [--out .env]      write plaintext out (last resort)
   hush export --names           just the variable names this project resolves
 

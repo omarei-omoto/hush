@@ -345,6 +345,120 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     }
   });
 
+  test("`hush import --as` creates a named set in the project vault, not default", () => {
+    // The quick-start command is `hush import`, and without a name every key
+    // lands in one unnamed pile under "default" — the exact thing the named
+    // env-set feature exists to prevent. `--as` is the way `import` gets there.
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.in"), "ACME_API_KEY=key1\nACME_DB_URL=db1\n");
+      const r = p.run(["import", ".env.in", "--as", "Acme Production", "--description", "live keys"]);
+      assert.equal(r.code, 0, r.out);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const sets = vault.envSets();
+      const set = sets.find((s) => s.name === "acme-production");
+      assert.ok(set, `no set named acme-production among: ${sets.map((s) => s.name).join(", ")}`);
+      assert.equal(set!.label, "Acme Production");
+      assert.equal(set!.description, "live keys");
+      assert.deepEqual(set!.keys.sort(), ["ACME_API_KEY", "ACME_DB_URL"]);
+
+      const def = sets.find((s) => s.name === "default")!;
+      assert.ok(
+        !def.keys.includes("ACME_API_KEY") && !def.keys.includes("ACME_DB_URL"),
+        `default gained the imported keys: ${def.keys.join(", ")}`,
+      );
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush import` with no flags keeps today's behaviour, non-interactively, and hints at --as", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.in"), "PLAIN_ONE=v1\nPLAIN_TWO=v2\n");
+      const r = p.run(["import", ".env.in"]);
+      assert.equal(r.code, 0, r.out);
+      // project()'s spawnSync runs with stdin ignored, i.e. non-TTY — the case
+      // that must never prompt and never fail, only nudge.
+      assert.match(r.out, /--as "Name"/, `no --as tip in:\n${r.out}`);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const def = vault.envSets().find((s) => s.name === "default")!;
+      assert.ok(def.keys.includes("PLAIN_ONE") && def.keys.includes("PLAIN_TWO"), "keys did not land in default");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush import --env` is unchanged: no prompt, no --as tip", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.in"), "PROD_ONE=v1\n");
+      const r = p.run(["import", ".env.in", "--env", "prod"]);
+      assert.equal(r.code, 0, r.out);
+      assert.ok(!r.out.includes("--as"), `--env still printed the --as tip:\n${r.out}`);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const set = vault.envSets().find((s) => s.name === "prod");
+      assert.ok(set && set.keys.includes("PROD_ONE"), "key did not land in the named --env");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush import --as` into an existing set adds to it, respecting --overwrite", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.a"), "SHARED_KEY=first_value\nONLY_IN_A=a_value\n");
+      writeFileSync(join(p.root, ".env.b"), "SHARED_KEY=second_value\nONLY_IN_B=b_value\n");
+
+      const first = p.run(["import", ".env.a", "--as", "Acme Production"]);
+      assert.equal(first.code, 0, first.out);
+
+      // The user is adding to the set they already named — this must not fail.
+      const second = p.run(["import", ".env.b", "--as", "Acme Production"]);
+      assert.equal(second.code, 0, second.out);
+      assert.match(second.out, /1 already present/, second.out);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const set = vault.envSets().find((s) => s.name === "acme-production");
+      assert.ok(set, "set missing after second import");
+      assert.deepEqual(set!.keys.sort(), ["ONLY_IN_A", "ONLY_IN_B", "SHARED_KEY"]);
+
+      assert.match(
+        p.run(["get", "SHARED_KEY", "--env", "acme-production", "--yes"]).out,
+        /first_value/,
+        "the existing value in the named set was replaced without --overwrite",
+      );
+
+      const third = p.run(["import", ".env.b", "--as", "Acme Production", "--overwrite"]);
+      assert.equal(third.code, 0, third.out);
+      assert.match(
+        p.run(["get", "SHARED_KEY", "--env", "acme-production", "--yes"]).out,
+        /second_value/,
+        "--overwrite did nothing for a named set",
+      );
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush import --as` records the source file in the set's metadata", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.prod"), "SRC_KEY=v\n");
+      const r = p.run(["import", ".env.prod", "--as", "Acme Production"]);
+      assert.equal(r.code, 0, r.out);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const set = vault.envSets().find((s) => s.name === "acme-production");
+      assert.ok(set && set.source && set.source.endsWith(".env.prod"), `source not recorded: ${JSON.stringify(set)}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("`hush run` injects the pinned account, and --with overrides the pin", () => {
     const p = project();
     try {

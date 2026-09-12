@@ -16,13 +16,14 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { generateIdentity } from "../src/crypto.ts";
-import { Vault, ValidationError } from "../src/vault.ts";
+import { Vault, ValidationError, findHushDir, locateProject } from "../src/vault.ts";
 import {
   usedSets,
   composeSets,
   librarySets,
   saveLinks,
   globalVaultName,
+  suggestSets,
 } from "../src/library.ts";
 import { setNameFor } from "../src/services.ts";
 
@@ -428,5 +429,65 @@ describe("library: librarySets() lists sets with a '/' in the name", () => {
       const names = librarySets().map((s) => s.name);
       assert.ok(names.includes("fal/acme"), `fal/acme missing from librarySets(): ${names.join(", ")}`);
     });
+  });
+});
+
+describe("a project without a vault", () => {
+  // Bites: a findHushDir() that only knows vault.json/link.json returns null
+  // for a folder that uses library sets, and every command says "no vault".
+  test("envs.json alone makes a folder a project; hasVault says whether it has one", () => {
+    const dir = scratch();
+    const hushDir = join(dir, ".hush");
+    mkdirSync(hushDir, { recursive: true });
+    saveLinks(hushDir, ["work-fal"]);
+    mkdirSync(join(dir, "src", "deep"), { recursive: true });
+    assert.equal(findHushDir(join(dir, "src", "deep")), hushDir, "envs.json alone did not mark the project");
+    const loc = locateProject(dir)!;
+    assert.equal(loc.hushDir, hushDir);
+    assert.equal(loc.hasVault, false);
+
+    const owner = generateIdentity();
+    Vault.create(join(hushDir, "vault.json"), "p", { name: "owner", pub: owner.pub });
+    assert.equal(locateProject(dir)!.hasVault, true);
+  });
+});
+
+describe("suggestSets()", () => {
+  const lib = [
+    { name: "acme-production", keys: ["DATABASE_URL", "STRIPE_SECRET_KEY", "FAL_KEY"] },
+    { name: "work-fal", keys: ["FAL_KEY"] },
+    { name: "personal-fal", keys: ["FAL_KEY"] },
+    { name: "gemini-team", keys: ["GEMINI_API_KEY"] },
+  ];
+
+  // Bites: a first-match or alphabetical picker takes acme-production for
+  // DATABASE_URL and then still lists work-fal/personal-fal for FAL_KEY.
+  test("the set covering the most needed keys wins the keys it shares with smaller ones", () => {
+    const s = suggestSets(["DATABASE_URL", "FAL_KEY"], lib);
+    assert.deepEqual(s.picks, ["acme-production"]);
+    assert.deepEqual(s.provider, { DATABASE_URL: "acme-production", FAL_KEY: "acme-production" });
+    assert.deepEqual(s.ambiguous, []);
+    assert.deepEqual(s.uncovered, []);
+  });
+
+  // Bites: a picker that breaks ties by name silently chooses personal-fal.
+  test("a tie is reported, not guessed: the person picks between equally good sets", () => {
+    const s = suggestSets(["FAL_KEY", "GEMINI_API_KEY"], lib.filter((x) => x.name !== "acme-production"));
+    assert.deepEqual(s.picks, ["gemini-team"]);
+    assert.deepEqual(s.ambiguous, [{ key: "FAL_KEY", options: ["personal-fal", "work-fal"] }]);
+    assert.deepEqual(s.uncovered, []);
+  });
+
+  test("keys no set provides are reported as uncovered; nothing needed means nothing picked", () => {
+    const s = suggestSets(["DATABASE_URL", "NOBODY_HAS_THIS"], lib);
+    assert.deepEqual(s.picks, ["acme-production"]);
+    assert.deepEqual(s.uncovered, ["NOBODY_HAS_THIS"]);
+    assert.deepEqual(suggestSets([], lib), { picks: [], ambiguous: [], uncovered: [], provider: {} });
+  });
+
+  // Bites: a picker that stops at the first tie never gets to gemini-team.
+  test("after a tie, the remaining keys are still resolved", () => {
+    const s = suggestSets(["FAL_KEY", "GEMINI_API_KEY"], lib.filter((x) => x.name !== "acme-production"));
+    assert.ok(s.picks.includes("gemini-team"), "the unambiguous key was abandoned after the tie");
   });
 });

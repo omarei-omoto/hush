@@ -211,6 +211,67 @@ export function composeSets(
   return { secrets, layers, missing };
 }
 
+// ------------------------------------------------------------- suggestions
+
+export interface Suggestion {
+  /** Sets to use, in the order to add them — later wins, so the order matters. */
+  picks: string[];
+  /** Keys with more than one equally good candidate: the person decides. */
+  ambiguous: { key: string; options: string[] }[];
+  /** Keys no set provides. */
+  uncovered: string[];
+  /** key → the picked set that will provide it. */
+  provider: Record<string, string>;
+}
+
+/**
+ * Which sets a folder should use, given the variable names its code
+ * references and the sets on offer (usually the library). Greedy by coverage:
+ * the set covering the most still-needed keys is picked first, so "Acme
+ * Production" (three of the keys) beats "Work fal" (one of them) for the key
+ * they share. A tie at the top — "Personal fal" and "Work fal" both offering
+ * only FAL_KEY — is not guessed at: those keys are reported as ambiguous and
+ * the person picks, which is the whole point of naming sets.
+ */
+export function suggestSets(needed: string[], sets: { name: string; keys: string[] }[]): Suggestion {
+  const remaining = new Set(needed);
+  const picks: string[] = [];
+  const provider: Record<string, string> = {};
+  const ambiguous: Suggestion["ambiguous"] = [];
+  const candidates = [...sets].sort((a, b) => a.name.localeCompare(b.name));
+
+  for (;;) {
+    const scored = candidates
+      .filter((s) => !picks.includes(s.name))
+      .map((s) => ({ s, covers: s.keys.filter((k) => remaining.has(k)) }))
+      .filter((x) => x.covers.length);
+    if (!scored.length) break;
+    const best = Math.max(...scored.map((x) => x.covers.length));
+    const top = scored.filter((x) => x.covers.length === best);
+    if (top.length > 1) {
+      for (const key of [...remaining]) {
+        const options = top.filter((x) => x.covers.includes(key)).map((x) => x.s.name);
+        if (options.length > 1) {
+          ambiguous.push({ key, options });
+          remaining.delete(key);
+        }
+      }
+      // Keys only one of the tied sets offers are still decidable by coverage
+      // on the next pass, once the contested keys are out of the count.
+      if (!ambiguous.length) break;
+      continue;
+    }
+    const pick = top[0];
+    picks.push(pick.s.name);
+    for (const key of pick.covers) {
+      provider[key] = pick.s.name;
+      remaining.delete(key);
+    }
+  }
+
+  return { picks, ambiguous, uncovered: [...remaining], provider };
+}
+
 /** One line per set, for `hush env` and the UI. */
 export interface LibrarySet {
   name: string;

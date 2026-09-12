@@ -244,7 +244,13 @@ export function findHushDir(start = process.cwd()): string | null {
   let dir = resolve(start);
   for (;;) {
     const candidate = join(dir, ".hush");
-    if (existsSync(join(candidate, "vault.json")) || existsSync(join(candidate, "link.json"))) {
+    // envs.json alone marks a project that only uses library sets — it gets a
+    // vault of its own the first time it needs one, not before.
+    if (
+      existsSync(join(candidate, "vault.json")) ||
+      existsSync(join(candidate, "link.json")) ||
+      existsSync(join(candidate, "envs.json"))
+    ) {
       return candidate;
     }
     const parent = dirname(dir);
@@ -295,6 +301,19 @@ function assertReadableVaultFile(path: string, why: string): void {
   if (!stat.isFile()) {
     throw new Error(`${path} is not a vault file.\n  ${why}`);
   }
+}
+
+/**
+ * Where the project is and whether it has a vault yet. A folder whose .hush/
+ * holds only envs.json is a project — it uses library sets — but `vaultPath`
+ * points at a file that does not exist, and a caller that needs one has to
+ * say so rather than let Vault.open() fail with a path error.
+ */
+export function locateProject(
+  start = process.cwd(),
+): { vaultPath: string; hushDir: string; hasVault: boolean; env?: string } | null {
+  const loc = resolveVaultPath(start);
+  return loc && { ...loc, hasVault: existsSync(loc.vaultPath) };
 }
 
 export function resolveVaultPath(start = process.cwd()): { vaultPath: string; hushDir: string; env?: string } | null {

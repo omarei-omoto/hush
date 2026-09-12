@@ -64,11 +64,18 @@ after(() => {
 });
 
 /** Shape of what /api/state returns, so the tests can read it without casts. */
+interface UiSet {
+  where: "library" | "project";
+  name: string;
+  used: boolean;
+  position: number | null;
+  secrets: { key: string; preview: string; note: string }[];
+}
 interface UiState {
   vault: string;
-  use: Record<string, string>;
-  accounts: { service: string; account: string; secrets: { key: string; preview: string }[] }[];
-  envs: { name: string; secrets: { key: string; preview: string; note: string }[] }[];
+  library: UiSet[];
+  project: UiSet[];
+  used: string[];
   members: { name: string; role: string }[];
 }
 
@@ -168,7 +175,9 @@ describe("ui server — never leaks values", () => {
     // But it must still be useful.
     assert.equal(state.vault, "uitest");
     assert.ok(raw.includes("API_KEY"));
-    assert.ok(state.accounts.some((a) => a.account === "personal"));
+    // "fal/personal" used to be a separate "account" vocabulary; it is now
+    // just a set like any other, listed with the rest of the project's sets.
+    assert.ok(state.project.some((e) => e.name === "fal/personal"));
   });
 
   test("reveal returns the value only on an explicit call", async () => {
@@ -224,16 +233,101 @@ describe("ui server — writes reach the vault", () => {
     const r = await api("/api/secret", { scope: "default", key: "ADDED_VIA_UI", value: "ui-value" });
     assert.equal(r.status, 200);
     const state = (await r.json()) as UiState;
-    assert.ok(state.envs.some((e) => e.secrets.some((s) => s.key === "ADDED_VIA_UI")));
+    assert.ok(state.project.some((e) => e.secrets.some((s) => s.key === "ADDED_VIA_UI")));
 
     const reveal = (await (await api("/api/reveal", { scope: "default", key: "ADDED_VIA_UI" })).json()) as { value: string };
     assert.equal(reveal.value, "ui-value");
   });
 
-  test("pinning a default account persists", async () => {
+  test("/api/use is gone — it points at /api/link instead", async () => {
     const r = await api("/api/use", { service: "fal", account: "personal" });
-    assert.equal(r.status, 200);
-    assert.equal(((await r.json()) as UiState).use.fal, "personal");
+    assert.equal(r.status, 410, "the old pinning endpoint still answers");
+    assert.match(((await r.json()) as { error: string }).error, /\/api\/link/);
+  });
+
+  test("/api/account is gone — a service account is now just a named set", async () => {
+    const r = await api("/api/account", { service: "twilio", account: "prod", values: { TWILIO_ACCOUNT_SID: "x" } });
+    assert.ok(r.status === 404 || r.status === 400, `expected the router's unknown-endpoint response, got ${r.status}`);
+    assert.equal((await api("/api/state")).status, 200, "server died on the removed endpoint");
+  });
+});
+
+describe("ui server — one list of sets, at two levels", () => {
+  test("/api/state has library and project arrays shaped alike, and no trace of the old vocabulary", async () => {
+    const raw = (await (await api("/api/state")).json()) as Record<string, unknown>;
+    assert.ok(Array.isArray(raw.library), "no library array");
+    assert.ok(Array.isArray(raw.project), "no project array");
+    assert.ok(!("accounts" in raw), "the old service-accounts vocabulary is still in state");
+    assert.ok(!("use" in raw), "the old use.json pin is still in state");
+    for (const entry of [...(raw.library as UiSet[]), ...(raw.project as UiSet[])]) {
+      assert.ok(entry.where === "library" || entry.where === "project", `entry has no where: ${JSON.stringify(entry)}`);
+      assert.equal(typeof entry.used, "boolean", `entry.used is not a boolean: ${JSON.stringify(entry)}`);
+      assert.ok(Array.isArray(entry.secrets), `entry has no secrets array: ${JSON.stringify(entry)}`);
+    }
+  });
+
+  test("/api/link toggles a project set, not just a library one, and {order} sets the whole list", async () => {
+    let state = (await (await api("/api/state")).json()) as UiState;
+    const before = state.project.find((e) => e.name === "fal/personal")!;
+    assert.equal(before.used, false, "a project set neither is default nor was ever linked started out used");
+
+    const linked = await api("/api/link", { name: "fal/personal", use: true });
+    assert.equal(linked.status, 200);
+    state = (await linked.json()) as UiState;
+    assert.equal(state.project.find((e) => e.name === "fal/personal")!.used, true, "linking a project set did nothing");
+    assert.deepEqual(state.used, ["default", "fal/personal"], "the resolution order does not reflect the new link");
+
+    const reordered = await api("/api/link", { order: ["fal/personal", "default"] });
+    state = (await reordered.json()) as UiState;
+    assert.deepEqual(state.used, ["fal/personal", "default"], "{order} did not replace the whole list");
+
+    // Leave envs.json empty again for the tests that follow.
+    await api("/api/link", { order: [] });
+    state = (await (await api("/api/state")).json()) as UiState;
+    assert.deepEqual(state.used, ["default"]);
+  });
+
+  test("/api/env create with a known service returns its variable names", async () => {
+    const r = await api("/api/env", { action: "create", where: "project", label: "Twilio prod", service: "twilio" });
+    const body = (await r.json()) as { created: string; vars: string[] };
+    assert.equal(r.status, 200, JSON.stringify(body));
+    assert.equal(body.created, "twilio-prod");
+    assert.deepEqual(body.vars, ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"]);
+  });
+
+  test("/api/env create with an unknown service still creates the set, with no variables suggested", async () => {
+    const r = await api("/api/env", { action: "create", where: "project", label: "Mystery Inc", service: "not-a-real-service" });
+    const body = (await r.json()) as { created: string; vars: string[] };
+    assert.equal(r.status, 200, JSON.stringify(body));
+    assert.equal(body.created, "mystery-inc");
+    assert.deepEqual(body.vars, []);
+  });
+
+  test("/api/secret writes into a library set when where is library, and into the project otherwise", async () => {
+    await api("/api/global", { create: true });
+    const created = (await (await api("/api/env", { action: "create", where: "library", label: "Lib Secrets" })).json()) as { created: string };
+
+    const r = await api("/api/secret", { where: "library", scope: created.created, key: "LIB_KEY", value: "lib_value_abc" });
+    const state = (await r.json()) as UiState;
+    assert.equal(r.status, 200, JSON.stringify(state));
+    const lib = state.library.find((s) => s.name === created.created)!;
+    assert.ok(lib.secrets.some((s) => s.key === "LIB_KEY"), "the key did not land in the library");
+    assert.ok(!state.project.some((s) => s.secrets.some((k) => k.key === "LIB_KEY")), "the key leaked into the project");
+
+    // Reveal has to look in the vault the key was written to — a library
+    // card's reveal used to read the project vault and find nothing.
+    const shown = (await (await api("/api/reveal", { where: "library", scope: created.created, key: "LIB_KEY" })).json()) as { value?: string };
+    assert.equal(shown.value, "lib_value_abc", "reveal did not read the library vault");
+    const wrong = await api("/api/reveal", { scope: created.created, key: "LIB_KEY" });
+    assert.notEqual(wrong.status, 200, "reveal without where claimed to find a library key in the project vault");
+
+    // Without `where`, /api/secret still writes into the project, as before.
+    const r2 = await api("/api/secret", { scope: "default", key: "PROJECT_KEY_PLAIN", value: "project_value_abc" });
+    const state2 = (await r2.json()) as UiState;
+    assert.ok(
+      state2.project.find((s) => s.name === "default")!.secrets.some((s) => s.key === "PROJECT_KEY_PLAIN"),
+      "an unqualified write did not land in the project",
+    );
   });
 });
 
@@ -293,7 +387,7 @@ describe("ui dropzone — staging a dropped .env", () => {
     assert.deepEqual(res.imported.sort(), ["default/REDIS_URL", "default/SENDGRID_API_KEY"]);
     assert.deepEqual(res.skipped, []);
 
-    const def = res.envs.find((e) => e.name === "default")!;
+    const def = res.project.find((e) => e.name === "default")!;
     assert.equal(def.secrets.find((s) => s.key === "SENDGRID_API_KEY")!.note, "email");
     assert.equal(def.secrets.find((s) => s.key === "REDIS_URL")!.note, "infra");
 
@@ -359,7 +453,7 @@ describe("ui tagging", () => {
   test("a tag can be changed without the browser holding the value", async () => {
     const before = (await (await api("/api/reveal", { scope: "default", key: "API_KEY" })).json()) as { value: string };
     const res = (await (await api("/api/tag", { scope: "default", key: "API_KEY", note: "billing · rotate Q1" })).json()) as UiState;
-    const tagged = res.envs.find((e) => e.name === "default")!.secrets.find((s) => s.key === "API_KEY")!;
+    const tagged = res.project.find((e) => e.name === "default")!.secrets.find((s) => s.key === "API_KEY")!;
     assert.equal(tagged.note, "billing · rotate Q1");
 
     const after = (await (await api("/api/reveal", { scope: "default", key: "API_KEY" })).json()) as { value: string };
@@ -368,7 +462,7 @@ describe("ui tagging", () => {
 
   test("clearing a tag works, and tagging a missing key 404s", async () => {
     const cleared = (await (await api("/api/tag", { scope: "default", key: "API_KEY", note: "" })).json()) as UiState;
-    assert.equal(cleared.envs.find((e) => e.name === "default")!.secrets.find((s) => s.key === "API_KEY")!.note, "");
+    assert.equal(cleared.project.find((e) => e.name === "default")!.secrets.find((s) => s.key === "API_KEY")!.note, "");
     assert.equal((await api("/api/tag", { scope: "default", key: "NO_SUCH_KEY", note: "x" })).status, 404);
   });
 });
@@ -523,6 +617,39 @@ describe("the page script itself", () => {
     assert.ok(!/<link[^>]+href=/.test(html), "the page loads an external stylesheet");
     assert.ok(!/@import/.test(html), "the CSS imports something");
   });
+
+  test("the page shows one list of sets at two levels, not the old two vocabularies", async () => {
+    const { html } = await pageSource();
+    assert.ok(html.includes("Your library"), "the library section heading is missing");
+    // "This project" alone also names the (unrelated) standalone empty-state
+    // heading, so pin the one used by the actual set-listing section instead.
+    assert.ok(html.includes("committed with the repo"), "the project section heading is missing");
+    assert.ok(!html.includes("Service accounts"), "the old Service accounts section is still there");
+  });
+
+  // The project's default set is the floor of every run and cannot be switched
+  // off; the card must say so rather than offer a toggle whose "drop" is a no-op.
+  test("the project's default card says it is always used instead of offering a toggle", async () => {
+    const { js } = await pageSource();
+    assert.ok(js.includes("● always used"), "the default set's card does not say it is the floor");
+  });
+
+  test("the namer bar's default destination is the library when one exists", async () => {
+    const { js } = await pageSource();
+    // Scoped to stagingPanel() itself — the new-set form lower on the page has
+    // its own, separate destination select, and must not be able to satisfy
+    // this assertion on the namer bar's behalf.
+    const start = js.indexOf("function stagingPanel(");
+    assert.ok(start > -1, "stagingPanel() is missing");
+    const end = js.indexOf("\nfunction ", start + 1);
+    const panel = js.slice(start, end > -1 ? end : undefined);
+
+    const libAt = panel.indexOf('option value="library"');
+    const projAt = panel.indexOf('option value="project"');
+    assert.ok(libAt > -1 && projAt > -1, "the namer bar is missing a destination option");
+    assert.ok(libAt < projAt, "the namer bar does not offer the library first");
+    assert.match(panel, /if\(!S\.global\.exists\)dest\.value="project"/, "no fallback to project when there is no library");
+  });
 });
 
 describe("ui dropzone — imports that would not reach the app", () => {
@@ -540,8 +667,8 @@ describe("ui dropzone — imports that would not reach the app", () => {
     assert.deepEqual(res.unpinned[0], { service: "fal", account: "unused-account", scope: "fal/unused-account", keys: 1 });
   });
 
-  test("no warning when the account is already the project's default", async () => {
-    await api("/api/use", { service: "fal", account: "personal" });
+  test("no warning when the project already uses that set", async () => {
+    await api("/api/link", { name: "fal/personal", use: true });
     const st = (await (await api("/api/stage", { text: "FAL_KEY=fal_pinned_value" })).json()) as { stageId: string };
     const res = (await (await api("/api/import", {
       stages: [{ stageId: st.stageId, assignments: { FAL_KEY: { scope: "fal/personal" } } }],
@@ -572,41 +699,7 @@ describe("ui dropzone — imports that would not reach the app", () => {
   });
 });
 
-describe("ui account and team endpoints", () => {
-  test("creating a service account through the API stores every variable", async () => {
-    const r = await api("/api/account", {
-      service: "twilio",
-      account: "prod",
-      values: { TWILIO_ACCOUNT_SID: "ACxxxxxxxxxxxx", TWILIO_AUTH_TOKEN: "tok_abcdefghijkl" },
-    });
-    assert.equal(r.status, 200);
-    const state = (await r.json()) as UiState;
-    const acct = state.accounts.find((a) => a.service === "twilio" && a.account === "prod");
-    assert.ok(acct, "the account was not created");
-    assert.deepEqual(acct.secrets.map((s) => s.key).sort(), ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"]);
-    assert.ok(!JSON.stringify(state).includes("tok_abcdefghijkl"), "a value came back to the browser");
-  });
-
-  test("service and account names are validated", async () => {
-    for (const body of [
-      { service: "", account: "prod", values: { K: "v" } },
-      { service: "twilio", account: "", values: { K: "v" } },
-      { service: "../evil", account: "prod", values: { K: "v" } },
-      { service: "twilio", account: "a b", values: { K: "v" } },
-      { service: "twilio", account: "prod", values: {} },
-    ]) {
-      const r = await api("/api/account", body);
-      assert.equal(r.status, 400, `bad input should be 400, not ${r.status}: ${JSON.stringify(body)}`);
-    }
-    assert.equal((await api("/api/state")).status, 200, "server died on bad input");
-  });
-
-  test("an unusable variable name inside an account is refused", async () => {
-    const r = await api("/api/account", { service: "twilio", account: "dev", values: { "BAD; echo": "v" } });
-    assert.equal(r.status, 400, "stored a name that can inject into a shell");
-    assert.match(((await r.json()) as { error: string }).error, /not a valid variable name/);
-  });
-
+describe("ui team endpoints", () => {
   test("adding a member grants access and shows up in the roster", async () => {
     const { generateIdentity, encodePub } = await import("../src/crypto.ts");
     const mate = generateIdentity();
@@ -826,9 +919,9 @@ describe("ui server — staged plaintext expires", () => {
     // And the value really is gone rather than merely unreachable by that id:
     // nothing about it survived into the vault.
     const state = (await (await ttlApi("/api/state")).json()) as {
-      envs: { name: string; secrets: { key: string }[] }[];
+      project: { name: string; secrets: { key: string }[] }[];
     };
-    const keys = state.envs.flatMap((e) => e.secrets.map((s) => s.key));
+    const keys = state.project.flatMap((e) => e.secrets.map((s) => s.key));
     assert.ok(!keys.includes("FORGOTTEN_KEY"), "an expired stage was written to the vault");
   });
 
@@ -984,16 +1077,41 @@ describe("ui server — named env sets", () => {
 
   test("/api/link decides which sets this project uses", async () => {
     let s = (await libApi("/api/state")).body;
-    assert.ok(s.library.every((x: any) => !x.linked), "something was linked before anything asked for it");
+    assert.ok(s.library.every((x: any) => !x.used), "something was used before anything asked for it");
 
     s = (await libApi("/api/link", { name: "acme-production", use: true })).body;
-    assert.equal(s.library.find((x: any) => x.name === "acme-production").linked, true);
-    assert.equal(s.library.find((x: any) => x.name === "scratch").linked, false, "linking one linked them all");
+    assert.equal(s.library.find((x: any) => x.name === "acme-production").used, true);
+    // "default" is the floor and always sits first; the set just linked is
+    // added after it, so it lands second in resolution order.
+    assert.equal(s.library.find((x: any) => x.name === "acme-production").position, 1);
+    assert.equal(s.library.find((x: any) => x.name === "scratch").used, false, "linking one used them all");
+    assert.equal(s.library.find((x: any) => x.name === "scratch").position, null);
+    assert.deepEqual(s.used, ["default", "acme-production"]);
 
     s = (await libApi("/api/link", { name: "acme-production", use: false })).body;
-    assert.equal(s.library.find((x: any) => x.name === "acme-production").linked, false, "it could not be dropped");
+    assert.equal(s.library.find((x: any) => x.name === "acme-production").used, false, "it could not be dropped");
+    assert.equal(s.library.find((x: any) => x.name === "acme-production").position, null);
 
     await libApi("/api/link", { name: "acme-production", use: true });
+  });
+
+  test("/api/link accepts {order} to set the whole resolution order at once", async () => {
+    // A drag-to-reorder writes the full list back in one call rather than one
+    // toggle at a time. Position is precedence, so naming "default" explicitly
+    // and putting it last is how a set is made to beat it — the floor moved.
+    const before = (await libApi("/api/state")).body;
+    assert.deepEqual(before.used, ["default", "acme-production"]);
+
+    const r = await libApi("/api/link", { order: ["acme-production", "default"] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.used, ["acme-production", "default"], "the order given was not preserved");
+    assert.equal(r.body.library.find((x: any) => x.name === "acme-production").position, 0);
+
+    // Restore the order the rest of the suite expects: "default" implicit
+    // and first, "acme-production" linked after it.
+    await libApi("/api/link", { order: ["acme-production"] });
+    const restored = (await libApi("/api/state")).body;
+    assert.deepEqual(restored.used, ["default", "acme-production"]);
   });
 
   test("a dropped file becomes one named set, and its keys reach a run", async () => {
@@ -1031,14 +1149,14 @@ describe("ui server — named env sets", () => {
     assert.ok(set, "the renamed set is missing");
     assert.equal(set.label, "Acme Prod EU");
     assert.deepEqual(set.keys.sort(), ["CONVEX_DEPLOYMENT", "STRIPE_SECRET_KEY"], "the keys did not come with it");
-    assert.equal(set.linked, true, "the project's link did not follow the rename");
+    assert.equal(set.used, true, "the project's link did not follow the rename");
     assert.ok(!r.body.library.some((x: any) => x.name === "acme-production"), "the old name is still there");
   });
 
   test("the library and the project are kept apart", async () => {
     const s = (await libApi("/api/state")).body;
     // The project's own set is listed separately and is not in the library.
-    assert.ok(s.envs.some((e: any) => e.name === "default"), "the project's own env vanished");
+    assert.ok(s.project.some((e: any) => e.name === "default"), "the project's own env vanished");
     assert.ok(!s.library.some((x: any) => x.name === "default"), "the project's env leaked into the library");
     assert.ok(!JSON.stringify(s).includes("project_only_value_1234"), "a project value came back");
   });

@@ -17,15 +17,15 @@ import { parseEnvFile } from "./scan.ts";
 import { loadPolicy } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import {
-  Vault, resolveVaultPath, namedVaultPath, audit, loadUse, saveUse,
+  Vault, resolveVaultPath, namedVaultPath, audit,
   isValidationError, ValidationError, slugifyEnv,
 } from "./vault.ts";
 import {
-  librarySets, loadLinks, saveLinks, openGlobal,
+  librarySets, loadLinks, saveLinks, openGlobal, usedSets,
   globalVaultName, globalVaultExists, globalVaultPath, namedVaults, saveConfig,
 } from "./library.ts";
 import { requireIdentity, publicKeyOf } from "./identity.ts";
-import { CATALOG, scopeOf, serviceLabel, serviceForVar, parseScope } from "./services.ts";
+import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 
 const TOKEN = randomBytes(24).toString("base64url");
@@ -162,16 +162,38 @@ function dropStages(ids: unknown): number {
 function state(ctx: UiCtx) {
   const vault = Vault.open(ctx.vaultPath);
   const id = requireIdentity();
-  const use = loadUse(ctx.hushDir);
 
-  const describe = (scope: string) =>
-    vault.list(scope).map((i) => ({
+  // "default" is the floor, then linked sets in the order they were added —
+  // this is the one order the whole page agrees on: which sets a run actually
+  // gets, and in what precedence. A card's position in it is what "used ·
+  // 2nd" means; a set not in the list at all gets no position.
+  const used = usedSets(ctx.hushDir);
+  const positionOf = (name: string): number | null => {
+    const i = used.indexOf(name);
+    return i === -1 ? null : i;
+  };
+
+  const describe = (v: Vault, scope: string) =>
+    v.list(scope).map((i) => ({
       key: i.key,
-      preview: preview(vault.get(id, scope, i.key)),
+      preview: preview(v.get(id, scope, i.key)),
       updatedBy: i.updatedBy,
       updatedAt: i.updatedAt,
       note: i.note ?? "",
     }));
+
+  const projectSets = vault.sets().map((s) => ({
+    where: "project" as const,
+    name: s.name,
+    label: s.label,
+    description: s.description ?? "",
+    whenToUse: s.whenToUse ?? "",
+    source: s.source ?? "",
+    keys: s.keys,
+    secrets: describe(vault, s.name),
+    used: used.includes(s.name),
+    position: positionOf(s.name),
+  }));
 
   // The library is a second vault, and it may not exist yet or may not be
   // readable by this identity. Neither is a reason for the whole page to fail,
@@ -186,35 +208,24 @@ function state(ctx: UiCtx) {
     libraryError = (e as Error).message.split("\n")[0];
   }
 
-  const describeLibrary = (scope: string) => {
-    if (!libraryVault) return [];
-    return libraryVault.list(scope).map((i) => ({
-      key: i.key,
-      preview: preview(libraryVault!.get(id, scope, i.key)),
-      updatedBy: i.updatedBy,
-      updatedAt: i.updatedAt,
-      note: i.note ?? "",
-    }));
-  };
-
-  const projectSets = vault
-    .envSets()
-    .filter((s) => !s.isAccount)
-    .map((s) => ({
-      name: s.name,
-      label: s.label,
-      description: s.description ?? "",
-      whenToUse: s.whenToUse ?? "",
-      source: s.source ?? "",
-      secrets: describe(s.name),
-    }));
+  const librarySetsOut = library.map((s) => ({
+    where: "library" as const,
+    name: s.name,
+    label: s.label,
+    description: s.description ?? "",
+    whenToUse: s.whenToUse ?? "",
+    source: s.source ?? "",
+    keys: s.keys,
+    secrets: libraryVault ? describe(libraryVault, s.name) : [],
+    used: used.includes(s.name),
+    position: positionOf(s.name),
+  }));
 
   return {
     vault: vault.data.name,
     me: { name: vault.memberName(id), pk: publicKeyOf(id) },
     defaultEnv: ctx.defaultEnv,
     standalone: Boolean(ctx.standalone),
-    use,
     global: {
       name: globalVaultName(),
       exists: globalVaultExists(),
@@ -225,26 +236,12 @@ function state(ctx: UiCtx) {
     // masked previews come too: without them you could see a library set but
     // not work on the keys inside it, and the state everyone starts in is one
     // big unnamed pile that needs carving up.
-    library: library.map((s) => ({
-      name: s.name,
-      label: s.label,
-      description: s.description ?? "",
-      whenToUse: s.whenToUse ?? "",
-      source: s.source ?? "",
-      keys: s.keys,
-      secrets: describeLibrary(s.name),
-      linked: s.linked,
-    })),
+    library: librarySetsOut,
+    // Fed to the "for a service…" hint on the new-set form, so naming a set
+    // for a known service (e.g. twilio) can prefill its variable names.
     catalog: Object.entries(CATALOG).map(([id2, d]) => ({ id: id2, label: d.label, vars: d.vars })),
-    accounts: vault.accounts().map((a) => ({
-      service: a.service,
-      label: serviceLabel(a.service),
-      account: a.account,
-      scope: a.scope,
-      isDefault: use[a.service] === a.account,
-      secrets: describe(a.scope),
-    })),
-    envs: projectSets,
+    project: projectSets,
+    used,
     members: vault.members().map((m) => ({
       name: m.name,
       role: m.role,
@@ -266,16 +263,24 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
 
   switch (path) {
     case "/api/secret": {
-      const { scope, key, value, note } = body;
+      const { scope, key, value, note, where } = body;
       if (!scope || !key) return json(res, 400, { error: "scope and key are required" });
-      const v = vault();
+      const inLibrary = where === "library";
+      let v: Vault;
+      if (inLibrary) {
+        const g = openGlobal();
+        if (!g) return json(res, 400, { error: "you have no library vault yet" });
+        v = g;
+      } else {
+        v = vault();
+      }
       if (value === null) {
         v.delete(scope, key);
-        audit(ctx.hushDir, { actor: "ui", action: "delete", scope, key });
+        audit(ctx.hushDir, { actor: "ui", action: "delete", scope, key, where });
       } else {
         if (typeof value !== "string" || !value) return json(res, 400, { error: "empty value" });
         v.set(id, scope, key, value, typeof note === "string" && note ? note : undefined);
-        audit(ctx.hushDir, { actor: "ui", action: "set", scope, key });
+        audit(ctx.hushDir, { actor: "ui", action: "set", scope, key, where });
       }
       v.save();
       return json(res, 200, state(ctx));
@@ -295,7 +300,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
      * set's name is bound into every value's AAD, so the values are re-sealed.
      */
     case "/api/env": {
-      const { action, where, name, label, description, whenToUse } = body;
+      const { action, where, name, label, description, whenToUse, service } = body;
       const inLibrary = where !== "project";
       const id = requireIdentity();
 
@@ -320,7 +325,11 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         });
         v.save();
         audit(ctx.hushDir, { actor: "ui", action: "env.create", where, name: slug });
-        return json(res, 200, { ...state(ctx), created: slug });
+        // "for a service…" only hints at which variables to prompt for — it
+        // never stores a value itself, so a known service still goes through
+        // /api/secret per row like any other key.
+        const vars = typeof service === "string" ? (CATALOG[service.toLowerCase()]?.vars ?? []) : [];
+        return json(res, 200, { ...state(ctx), created: slug, vars });
       }
 
       if (!name) return json(res, 400, { error: "name is required" });
@@ -373,9 +382,19 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       return json(res, 400, { error: "unknown action" });
     }
 
-    /** Whether this project uses a set from your library. */
+    /**
+     * Whether this project uses a set — library or project, either can be
+     * switched on or off the same way. `order` replaces the whole list at
+     * once, which is what a drag-to-reorder does; position in that list is
+     * precedence, so this is also how resolution order changes.
+     */
     case "/api/link": {
-      const { name, use } = body;
+      const { name, use, order } = body;
+      if (Array.isArray(order)) {
+        saveLinks(ctx.hushDir, order.map(String));
+        audit(ctx.hushDir, { actor: "ui", action: "env.order", order });
+        return json(res, 200, state(ctx));
+      }
       if (!name) return json(res, 400, { error: "name is required" });
       const links = loadLinks(ctx.hushDir);
       const next = use === false
@@ -466,7 +485,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
 
       const parsed = parseEnvFile(text);
       const v = vault();
-      const use = loadUse(ctx.hushDir);
+      const used = usedSets(ctx.hushDir);
 
       // Names the parser refused. Derived from its own output, so the two can
       // never disagree about what counts as a usable variable name.
@@ -480,12 +499,14 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         if (!(name in parsed) && !rejected.includes(name)) rejected.push(name);
       }
 
-      const scopes = [...v.plainEnvs(), ...v.accounts().map((a) => a.scope)];
+      const scopes = v.envNames();
       const entries = Object.entries(parsed).map(([key, value]) => {
         const service = serviceForVar(key);
-        // Prefer an account this project already uses for that service.
-        const pinned = service && use[service] ? scopeOf(service, use[service]) : null;
-        const anyForService = service ? v.accountsFor(service).map((a) => scopeOf(service, a)) : [];
+        // Prefer a set this project already uses that is named for the
+        // service ("fal/acme"); otherwise any existing set named for it —
+        // the "/" is just a naming convention here, not a special lookup.
+        const pinned = service ? used.find((n) => n.startsWith(service + "/")) : undefined;
+        const anyForService = service ? scopes.filter((s) => s.startsWith(service + "/")) : [];
         return {
           key,
           preview: preview(value),
@@ -580,54 +601,38 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         skipped: skipped.length,
       });
 
-      // Filing a key into a service account this project does not use means
+      // Filing a key into a service-named set this project does not use means
       // `hush run` will not hand it to the app — and nothing else would say so.
-      const use = loadUse(ctx.hushDir);
+      const used = usedSets(ctx.hushDir);
       const unpinned: { service: string; account: string; scope: string; keys: number }[] = [];
       for (const entry of imported) {
         const scope = entry.slice(0, entry.lastIndexOf("/"));
-        const parsed = parseScope(scope);
-        if (!parsed || use[parsed.service] === parsed.account) continue;
+        const sep = scope.indexOf("/");
+        if (sep < 1) continue; // not shaped like "<service>/<account>" — nothing to warn about
+        if (used.includes(scope)) continue; // already used by this project
+        const service = scope.slice(0, sep);
+        const account = scope.slice(sep + 1);
         const seen = unpinned.find((u) => u.scope === scope);
         if (seen) seen.keys++;
-        else unpinned.push({ ...parsed, scope, keys: 1 });
+        else unpinned.push({ service, account, scope, keys: 1 });
       }
 
       return json(res, 200, { ...state(ctx), imported, skipped, unpinned });
     }
 
-    case "/api/account": {
-      const { service, account, values } = body;
-      if (!service || !account) return json(res, 400, { error: "service and account are required" });
-      if (!/^[a-z0-9_.-]+$/i.test(service) || !/^[a-z0-9_.-]+$/i.test(account)) {
-        return json(res, 400, { error: "service and account may use letters, digits, . _ - only" });
-      }
-      const v = vault();
-      const scope = scopeOf(String(service).toLowerCase(), String(account));
-      let n = 0;
-      for (const [k, val] of Object.entries(values ?? {})) {
-        if (typeof val !== "string" || !val) continue;
-        v.set(id, scope, k, val);
-        n++;
-      }
-      if (!n) return json(res, 400, { error: "no values provided" });
-      v.save();
-      audit(ctx.hushDir, { actor: "ui", action: "account.add", service, account, stored: n });
-      return json(res, 200, state(ctx));
-    }
-
-    case "/api/use": {
-      const { service, account } = body;
-      const use = loadUse(ctx.hushDir);
-      if (!account) delete use[service];
-      else use[service] = account;
-      saveUse(ctx.hushDir, use);
-      audit(ctx.hushDir, { actor: "ui", action: "use", service, account: account ?? null });
-      return json(res, 200, state(ctx));
-    }
+    /**
+     * The old "service accounts" vocabulary. An account was always just a set
+     * named "service/account"; naming one is now /api/env `create` with an
+     * optional `service` hint, so this endpoint is gone rather than kept as a
+     * second way to make the same thing.
+     */
+    case "/api/use":
+      return json(res, 410, {
+        error: "/api/use is gone — use /api/link to choose which sets this project uses.",
+      });
 
     case "/api/reveal": {
-      const { scope, key } = body;
+      const { scope, key, where } = body;
       if (!scope || !key) return json(res, 400, { error: "scope and key are required" });
 
       // Handing back plaintext is the most dangerous thing this server does, so
@@ -650,8 +655,13 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         }
       }
 
-      const value = vault().get(id, scope, key);
-      audit(ctx.hushDir, { actor: "ui", action: "reveal", scope, key });
+      // Same vault the key was written to: a library card's reveal used to
+      // look in the project vault, and either 404 or show a same-named
+      // project key as if it were the library one.
+      const source = where === "library" ? openGlobal() : vault();
+      if (!source) return json(res, 400, { error: "you have no library vault yet" });
+      const value = source.get(id, scope, key);
+      audit(ctx.hushDir, { actor: "ui", action: "reveal", scope, key, where });
       return json(res, 200, { value });
     }
 
@@ -912,9 +922,9 @@ async function retag(scope,key,note){
   await refresh(await api("/api/tag",{scope,key,note}));
   toast(note?"tagged "+key:"tag cleared");
 }
-async function setSecret(scope,key,value){await refresh(await api("/api/secret",{scope,key,value}));toast(value===null?"deleted":"saved")}
-async function reveal(scope,key,el){
-  const {value}=await api("/api/reveal",{scope,key});
+async function setSecret(scope,key,value,where){await refresh(await api("/api/secret",{scope,key,value,where}));toast(value===null?"deleted":"saved")}
+async function reveal(scope,key,el,where){
+  const {value}=await api("/api/reveal",{scope,key,where});
   el.textContent=value; el.style.color="var(--ink)";
   setTimeout(()=>{el.textContent="•••••••• (hidden again)";el.style.color="";},15000);
 }
@@ -934,7 +944,7 @@ function secretRow(scope,s,where){
   // belongs on the row rather than behind a separate screen.
   const here=where||"project";
   const dests=(here==="library"?S.library.map(function(x){return {name:x.name,label:x.label}}):
-                                S.envs.map(function(x){return {name:x.name,label:x.label}}))
+                                S.project.map(function(x){return {name:x.name,label:x.label}}))
               .filter(function(x){return x.name!==scope});
   if(dests.length){
     const mv=document.createElement("select");
@@ -953,79 +963,13 @@ function secretRow(scope,s,where){
   }
 
   const rv=$('<button class="link">reveal</button>');
-  rv.onclick=()=>reveal(scope,s.key,v).catch(()=>{});
+  rv.onclick=()=>reveal(scope,s.key,v,where).catch(()=>{});
   const ed=$('<button class="link">replace</button>');
-  ed.onclick=()=>{const nv=prompt("New value for "+s.key);if(nv)setSecret(scope,s.key,nv)};
+  ed.onclick=()=>{const nv=prompt("New value for "+s.key);if(nv)setSecret(scope,s.key,nv,where)};
   const rm=$('<button class="link danger">delete</button>');
-  rm.onclick=()=>{if(confirm("Delete "+s.key+"?"))setSecret(scope,s.key,null)};
+  rm.onclick=()=>{if(confirm("Delete "+s.key+"?"))setSecret(scope,s.key,null,where)};
   row.append(rv,ed,rm);
   return row;
-}
-
-function accountCard(a){
-  const c=$('<div class="card"></div>');
-  const head=$('<div class="svc"></div>');
-  head.append($('<b>'+esc(a.label)+' · '+esc(a.account)+'</b>'));
-  if(a.isDefault)head.append($('<span class="tag">project default</span>'));
-  head.append($('<div class="spacer"></div>'));
-  const btn=$('<button>'+(a.isDefault?"unset default":"use by default")+'</button>');
-  btn.onclick=async()=>{await refresh(await api("/api/use",{service:a.service,account:a.isDefault?null:a.account}));
-    toast(a.isDefault?"unpinned":"this project now uses "+a.account)};
-  head.append(btn);
-  c.append(head);
-  a.secrets.forEach(s=>c.append(secretRow(a.scope,s)));
-  const cmd=$('<details><summary>how to use it</summary><div class="muted" style="padding:6px 0">'+
-    'CLI: <code>hush run --with '+esc(a.service)+':'+esc(a.account)+' -- your-command</code><br>'+
-    'Agent: ask it to run with the <b>'+esc(a.account)+'</b> '+esc(a.service)+' account.</div></details>');
-  c.append(cmd);
-  return c;
-}
-
-function addAccountForm(){
-  const c=$('<div class="card"></div>');
-  c.append($('<div class="svc"><b>Add an account</b></div>'));
-  const f=document.createElement("form");f.className="add";
-  const g=$('<div class="grid2"></div>');
-  const sel=document.createElement("select");
-  sel.append($('<option value="">— pick a service —</option>'));
-  S.catalog.forEach(s=>sel.append($('<option value="'+esc(s.id)+'">'+esc(s.label)+'</option>')));
-  sel.append($('<option value="__custom">Something else…</option>'));
-  const acct=document.createElement("input");acct.placeholder="account name, e.g. acme";
-  g.append(sel,acct);f.append(g);
-  const varsBox=document.createElement("div");varsBox.className="add";f.append(varsBox);
-
-  let customName=null;
-  sel.onchange=()=>{
-    varsBox.innerHTML="";customName=null;
-    if(sel.value==="__custom"){
-      const n=document.createElement("input");n.placeholder="service name, e.g. myapi";
-      const vn=document.createElement("input");vn.placeholder="variable names, comma separated, e.g. MYAPI_KEY";
-      varsBox.append(n,vn);customName={n,vn};return;
-    }
-    const svc=S.catalog.find(x=>x.id===sel.value);if(!svc)return;
-    svc.vars.forEach(v=>{const i=document.createElement("input");i.placeholder=v;i.dataset.k=v;
-      i.type="password";i.autocomplete="new-password";varsBox.append(i)});
-  };
-  const submit=$('<button class="primary" type="submit">Save account</button>');
-  f.append(submit);
-  f.onsubmit=async(e)=>{
-    e.preventDefault();
-    let service=sel.value,values={};
-    if(service==="__custom"){
-      service=(customName.n.value||"").trim().toLowerCase();
-      const names=(customName.vn.value||"").split(",").map(s=>s.trim()).filter(Boolean);
-      if(!service||!names.length)return toast("service name and at least one variable");
-      for(const n of names){const val=prompt("Value for "+n);if(val)values[n]=val}
-    }else{
-      varsBox.querySelectorAll("input[data-k]").forEach(i=>{if(i.value)values[i.dataset.k]=i.value});
-    }
-    if(!service||!acct.value.trim())return toast("pick a service and name the account");
-    if(!Object.keys(values).length)return toast("enter at least one value");
-    await refresh(await api("/api/account",{service,account:acct.value.trim(),values}));
-    toast("added "+service+"/"+acct.value.trim());
-    f.reset();varsBox.innerHTML="";
-  };
-  c.append(f);return c;
 }
 
 /* ---------------- dropzone: bring a .env in, then say where each key goes -------- */
@@ -1041,8 +985,8 @@ function ck(stageId,key){return stageId+"|"+key}
 
 function allScopes(){
   const out=[];
-  (S.envs||[]).forEach(e=>out.push(e.name));
-  (S.accounts||[]).forEach(a=>out.push(a.scope));
+  (S.project||[]).forEach(e=>out.push(e.name));
+  (S.library||[]).forEach(s=>{if(out.indexOf(s.name)<0)out.push(s.name)});
   EXTRA.forEach(x=>{if(out.indexOf(x)<0)out.push(x)});
   return out;
 }
@@ -1273,7 +1217,7 @@ async function runImport(){
       row.append($('<div class="k">'+esc(u.scope)+'</div>'));
       row.append($('<div class="v">'+u.keys+' key(s) — this project does not use this account, so hush run will not inject them</div>'));
       const b=$('<button class="primary">Use it here</button>');
-      b.onclick=async()=>{await refresh(await api("/api/use",{service:u.service,account:u.account}));toast("using "+u.scope+" here")};
+      b.onclick=async()=>{await refresh(await api("/api/link",{name:u.scope,use:true}));toast("using "+u.scope+" here")};
       row.append(b);
       box.append(row);
     });
@@ -1303,13 +1247,23 @@ document.getElementById("picker").addEventListener("change",ev=>{
   ev.target.value="";
 });
 
+/** 1st, 2nd, 3rd, 4th, … — how a set's place in the resolution order is shown. */
+function ordinal(n){
+  if(n%10===1&&n%100!==11)return n+"st";
+  if(n%10===2&&n%100!==12)return n+"nd";
+  if(n%10===3&&n%100!==13)return n+"rd";
+  return n+"th";
+}
+
 /**
  * One named set, as an editable row.
  *
  * The name, the description and the note about when to use it are all edited in
  * place: an env set is a thing you name and explain, not a bare map key, and
  * asking someone to go to a different screen to rename it defeats the point.
- * Every field is optional, including the description.
+ * Every field is optional, including the description. A library set and a
+ * project set are the same card with the same toggle — the only difference is
+ * which vault "where" points the writes at.
  */
 function envSetCard(set,where){
   const c=$('<div class="card set"></div>');
@@ -1331,16 +1285,26 @@ function envSetCard(set,where){
   };
   nm.onkeydown=(ev)=>{if(ev.key==="Enter")nm.blur();if(ev.key==="Escape"){nm.value=lastName;nm.blur()}};
   nameWrap.append(nm);
-  nameWrap.append($('<div class="slug">'+esc(set.name)+' · '+set.keys.length+' key'+(set.keys.length===1?'':'s')+'</div>'));
+  nameWrap.append($('<div class="slug" title="hush use '+esc(set.name)+'">'+esc(set.name)+' · '+set.keys.length+' key'+(set.keys.length===1?'':'s')+'</div>'));
   head.append(nameWrap);
 
+  // A library set and a project set are both just sets a run can use, so both
+  // get the same toggle — "used" shows where it lands in resolution order,
+  // since that is the number that decides which value wins a clash.
   const actions=$('<div class="setactions"></div>');
-  if(where==="library"){
-    const use=$('<button class="'+(set.linked?"link on":"link")+'">'+(set.linked?"● used here":"use in this project")+'</button>');
-    use.title=set.linked?"Stop using it in this project":"Use it in this project";
+  if(where==="project"&&set.name==="default"){
+    // The project's own default set is the floor of every run and cannot be
+    // switched off, so a toggle here would promise something a click cannot
+    // do. Say what it is instead.
+    const floor=$('<button class="link on" disabled title="The default set of this project is always used, underneath everything else">● always used · '+ordinal((set.position||0)+1)+'</button>');
+    actions.append(floor);
+  }else{
+    const useLabel=set.used?("● used · "+ordinal(set.position+1)):"use in this project";
+    const use=$('<button class="'+(set.used?"link on":"link")+'">'+useLabel+'</button>');
+    use.title=set.used?"Stop using it in this project":"Use it in this project";
     use.onclick=async()=>{
-      const r=await api("/api/link",{name:set.name,use:!set.linked});
-      await refresh(r);toast(set.linked?"dropped "+set.name:"this project now uses "+set.name);
+      const r=await api("/api/link",{name:set.name,use:!set.used});
+      await refresh(r);toast(set.used?"dropped "+set.name:"this project now uses "+set.name);
     };
     actions.append(use);
   }
@@ -1383,6 +1347,21 @@ function envSetCard(set,where){
     c.append($('<div class="muted">no keys in it yet</div>'));
   }
   if(set.source)c.append($('<div class="muted">from '+esc(set.source)+'</div>'));
+
+  // Every card can grow, not just project ones — a library set used to need
+  // the CLI for this, which defeats naming it here in the first place.
+  const addRow=document.createElement("form");addRow.className="add";
+  const ag=$('<div class="grid2"></div>');
+  const ak=document.createElement("input");ak.placeholder="KEY";
+  const av=document.createElement("input");av.placeholder="value";av.type="password";av.autocomplete="new-password";
+  ag.append(ak,av);addRow.append(ag);
+  addRow.append($('<button type="submit">Add</button>'));
+  addRow.onsubmit=async(ev)=>{
+    ev.preventDefault();
+    if(!ak.value||!av.value)return;
+    await setSecret(set.name,ak.value.trim(),av.value,where);
+  };
+  c.append(addRow);
   return c;
 }
 
@@ -1404,23 +1383,84 @@ function librarySetup(){
   return c;
 }
 
-/** "Name this set" — the way a new one is made by hand. */
-function newSetForm(where){
+/**
+ * "Name this set" — the one way a new one is made by hand, at either level.
+ * This replaces the old per-service account form: picking a service here is
+ * just a hint that pre-fills the variable names it needs, one plain row each,
+ * so they can be filled in like any other key rather than through a second
+ * flow.
+ */
+function newSetForm(){
+  const c=$('<div class="card"></div>');
   const f=document.createElement("form");f.className="add";
   const g=$('<div class="grid2"></div>');
   const nm=document.createElement("input");nm.placeholder="name a new set — e.g. Acme Production";
   const ds=document.createElement("input");ds.placeholder="what is it for? (optional)";
   g.append(nm,ds);f.append(g);
+
+  const g2=$('<div class="grid2"></div>');
+  const dest=document.createElement("select");
+  dest.append($('<option value="library">in my library</option>'));
+  if(!S.standalone)dest.append($('<option value="project">in this project</option>'));
+  if(!S.global.exists)dest.value="project";
+  const svc=document.createElement("select");
+  svc.append($('<option value="">for a service… (optional)</option>'));
+  S.catalog.forEach(function(s){svc.append($('<option value="'+esc(s.id)+'">'+esc(s.label)+'</option>'))});
+  g2.append(dest,svc);f.append(g2);
   f.append($('<button type="submit">Add set</button>'));
+
   f.onsubmit=async(ev)=>{
     ev.preventDefault();
     if(!nm.value.trim())return;
+    const where=dest.value;
+    const serviceLabel=svc.options[svc.selectedIndex].text;
     try{
-      await refresh(await api("/api/env",{action:"create",where:where,label:nm.value.trim(),description:ds.value}));
-      toast("created "+nm.value.trim());f.reset();
+      if(where==="library"&&!S.global.exists)await api("/api/global",{create:true});
+      const r=await api("/api/env",{
+        action:"create",where:where,label:nm.value.trim(),description:ds.value,
+        service:svc.value||undefined,
+      });
+      const created=r.created;
+      await refresh(r);
+      toast("created "+nm.value.trim());
+      f.reset();
+      if(created&&r.vars&&r.vars.length)promptForVars(where,created,serviceLabel,r.vars);
     }catch(e){toast(e.message)}
   };
-  return f;
+  c.append(f);
+  return c;
+}
+
+/**
+ * The empty rows a "for a service…" pick offers: the set already exists with
+ * nothing in it, so this is only ever a convenience, never the only way in —
+ * the card's own add-key row reaches the same values.
+ */
+function promptForVars(where,scope,serviceLabel,vars){
+  const app=document.getElementById("app");
+  const box=$('<div class="card"></div>');
+  box.append($('<div class="svc"><b>Fill in '+esc(serviceLabel)+'</b></div>'));
+  const inputs=vars.map(function(name){
+    const row=$('<div class="row"></div>');
+    row.append($('<div class="k">'+esc(name)+'</div>'));
+    const vi=document.createElement("input");vi.type="password";vi.placeholder="value";vi.autocomplete="new-password";
+    row.append(vi);
+    box.append(row);
+    return {key:name,input:vi};
+  });
+  const save=$('<button class="primary">Save these values</button>');
+  save.onclick=async()=>{
+    let n=0;
+    for(const it of inputs){
+      if(!it.input.value)continue;
+      await api("/api/secret",{where:where,scope:scope,key:it.key,value:it.input.value});
+      n++;
+    }
+    await refresh(await api("/api/state"));
+    toast("saved "+n+" value(s)");
+  };
+  box.append(save);
+  app.insertBefore(box,app.firstChild);
 }
 
 function render(){
@@ -1430,46 +1470,30 @@ function render(){
 
   app.append(STAGES.length?stagingPanel():dropCard());
 
-  // The named sets are the point of the screen, so they come first.
+  // One list of sets, at two levels — the point of the screen, so it comes
+  // first. Library and project cards are the same shape with the same toggle;
+  // only the vault the writes land in differs.
   app.append($('<h2>Your library <span class="h2note">every project can use these · they stay in '+esc(S.global.name)+', never in the repo</span></h2>'));
   if(S.global.error){
     app.append($('<div class="empty">'+esc(S.global.error)+'</div>'));
   }else if(!S.global.exists){
     app.append(librarySetup());
   }else{
-    if(!S.library.length)app.append($('<div class="empty">Nothing in your library yet. Name one below, or drop a .env above.</div>'));
+    if(!S.library.length)app.append($('<div class="empty">Drop a .env above, or make a set below.</div>'));
     S.library.forEach(set=>app.append(envSetCard(set,"library")));
-    app.append(newSetForm("library"));
   }
 
   if(S.standalone){
     app.append($('<h2>This project</h2>'));
     app.append($('<div class="empty">You opened hush outside a project, so there is nothing here.<br>Run <b>hush init</b> in a repo, then <b>hush ui</b> there, to use a set in it.</div>'));
   }else{
-  app.append($('<h2>This project <span class="h2note">committed with the repo · your team gets these</span></h2>'));
-  if(!S.envs.length)app.append($('<div class="empty">Nothing yet.</div>'));
-  S.envs.forEach(e=>{
-    const c=envSetCard({name:e.name,label:e.label,description:e.description,whenToUse:e.whenToUse,source:e.source,keys:e.secrets.map(s=>s.key),secrets:e.secrets,linked:false},"project");
-    const detail=$('<div class="addhere"></div>');
-    const f=document.createElement("form");f.className="add";
-    const g=$('<div class="grid2"></div>');
-    const k=document.createElement("input");k.placeholder="VARIABLE_NAME";
-    const v=document.createElement("input");v.placeholder="value";v.type="password";v.autocomplete="new-password";
-    g.append(k,v);f.append(g);
-    f.append($('<button type="submit">Add to '+esc(e.label)+'</button>'));
-    f.onsubmit=async(ev)=>{ev.preventDefault();if(!k.value||!v.value)return;
-      await setSecret(e.name,k.value.trim(),v.value);f.reset()};
-    detail.append(f);
-    c.append(detail);
-    app.append(c);
-  });
-  app.append(newSetForm("project"));
+    app.append($('<h2>This project <span class="h2note">committed with the repo · your team gets these</span></h2>'));
+    if(!S.project.length)app.append($('<div class="empty">Drop a .env above, or make a set below.</div>'));
+    S.project.forEach(set=>app.append(envSetCard(set,"project")));
   }
 
-  app.append($('<h2>Service accounts <span class="h2note">several keys for one service</span></h2>'));
-  if(!S.accounts.length)app.append($('<div class="empty">No accounts yet. Add one below — e.g. fal / personal.</div>'));
-  S.accounts.forEach(a=>app.append(accountCard(a)));
-  app.append(addAccountForm());
+  app.append($('<h2>New set</h2>'));
+  app.append(newSetForm());
 
   app.append($('<h2>Team</h2>'));
   const tc=$('<div class="card"></div>');

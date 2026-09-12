@@ -83,6 +83,9 @@ Rungs 3 and 4 are *presence* controls: they stop silent and remote use, not a
 determined local attacker who bypasses hush entirely. **Rung 5 is the only one
 that changes what is cryptographically possible.**
 
+For which of this matters in your situation — alone, with an agent, or as a
+team — and what to turn on for each, see [docs/SAFETY.md](./docs/SAFETY.md).
+
 ### What it does not protect
 
 **A software identity is usable by anything running as you.** This is the big

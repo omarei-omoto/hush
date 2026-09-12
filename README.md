@@ -693,8 +693,9 @@ The vault file holds ciphertext, public keys, and metadata. That is all:
 
 ## What hush does not do
 
-**Read [SECURITY.md](./SECURITY.md) before trusting it with anything real.** The
-most important line in it: with a *software* identity, anything running as your
+**Read [SECURITY.md](./SECURITY.md) before trusting it with anything real**, and
+[docs/SAFETY.md](./docs/SAFETY.md) for which of it matters in *your* situation —
+alone, with an agent, or as a team. The most important line in both: with a *software* identity, anything running as your
 user can invoke hush and read the vault — including a shell command from an
 agent. The policy gates hush's own tools and CLI; it cannot gate a process that
 goes around hush, and `policy.json` is a file in your repo that an agent with

@@ -901,9 +901,11 @@ async function cmdLs(a: Args): Promise<void> {
     );
   }
 
-  const line = (s: { name: string; label: string; description?: string; whenToUse?: string; keys: string[] }) => {
+  const line = (s: { name: string; label: string; description?: string; whenToUse?: string; keys: string[] }, where: "library" | "project") => {
+    // The library's default is the one set with a meaning beyond its name.
+    const role = where === "library" && s.name === "default" ? dim("  — your global environment, under everything") : "";
     info(
-      `  ${used.has(s.name) ? green("●") : " "} ${bold(s.label)} ${dim(`(${s.name})`)}  ${dim(`${s.keys.length} key(s)`)}`,
+      `  ${used.has(s.name) ? green("●") : " "} ${bold(s.label)} ${dim(`(${s.name})`)}  ${dim(`${s.keys.length} key(s)`)}${role}`,
     );
     if (s.description) info(`      ${dim(s.description)}`);
     if (s.whenToUse) info(`      ${dim("when: " + s.whenToUse)}`);
@@ -915,7 +917,7 @@ async function cmdLs(a: Args): Promise<void> {
   } else if (!libSets.length) {
     info(dim(`  empty.  hush add <file> --as "Name" --library`));
   } else {
-    for (const s of libSets) line(s);
+    for (const s of libSets) line(s, "library");
   }
 
   info("");
@@ -928,10 +930,10 @@ async function cmdLs(a: Args): Promise<void> {
     info(dim("  no vault yet — this folder uses library sets only"));
     for (const name of used) {
       const s = libSets.find((x) => x.name === name);
-      if (s) line(s);
+      if (s) line(s, "project");
     }
   } else {
-    for (const s of project.sets()) line(s);
+    for (const s of project.sets()) line(s, "project");
   }
 
   info("");
@@ -1816,25 +1818,40 @@ async function cmdDoctor(_a: Args): Promise<void> {
   check(Boolean(id), "identity", id ? id.source : "run `hush id --create`");
   if (id) info(`    ${dim(publicKeyOf(id))}`);
 
-  const loc = resolveVaultPath(process.cwd());
-  check(Boolean(loc), "vault", loc ? loc.vaultPath : "run `hush init`");
+  const loc = locateProject(process.cwd());
+  check(
+    Boolean(loc),
+    "project",
+    !loc
+      ? "not set up — run something with hush here, or `hush use <set>`"
+      : loc.hasVault
+        ? loc.vaultPath
+        : `${loc.hushDir}  (no vault yet — uses library sets only)`,
+  );
   if (!loc || !id) return;
 
-  let vault: Vault;
-  try {
-    vault = Vault.open(loc.vaultPath);
-  } catch (e) {
-    return check(false, "vault readable", (e as Error).message);
+  // A folder that only uses library sets has nothing to be a recipient *of*;
+  // the checks below that read the vault simply do not apply to it.
+  let vault: Vault | null = null;
+  if (loc.hasVault) {
+    try {
+      vault = Vault.open(loc.vaultPath);
+    } catch (e) {
+      return check(false, "vault readable", (e as Error).message);
+    }
+    check(vault.canRead(id), "you are a recipient", vault.canRead(id) ? `as "${vault.memberName(id)}"` : "ask an admin to `hush team add` you");
+    check(true, "members", String(vault.members().length));
   }
-  check(vault.canRead(id), "you are a recipient", vault.canRead(id) ? `as "${vault.memberName(id)}"` : "ask an admin to `hush team add` you");
-  check(true, "members", String(vault.members().length));
 
-  // One vocabulary here too: every set, marked the way `hush ls` marks it.
+  // One vocabulary here too: every set, project and library, marked the way
+  // `hush ls` marks it.
   const used = new Set(usedSets(loc.hushDir));
+  const projectNames = vault ? vault.sets().map((s) => s.name) : [];
+  const libraryNames = librarySets().map((s) => s.name).filter((n) => !projectNames.includes(n));
   check(
     true,
     "sets",
-    vault.sets().map((s) => s.name + (used.has(s.name) ? " ●" : "")).join(", ") + dim("   ● = used by this project"),
+    [...projectNames, ...libraryNames].map((s) => s + (used.has(s) ? " ●" : "")).join(", ") + dim("   ● = used by this project"),
   );
 
   const root = loc.hushDir.replace(/[/\\]\.hush$/, "");
@@ -1887,7 +1904,7 @@ async function cmdDoctor(_a: Args): Promise<void> {
   check(stray.length === 0, "no plaintext .env in repo", stray.length ? `found ${stray.join(", ")}` : "");
 
   // Freshness, and where this machine sits on the ladder.
-  const stale = inspect(vault);
+  const stale = vault ? inspect(vault) : null;
   if (stale) check(false, "vault freshness", `rolled back to generation ${stale.nowGeneration} — hush verify`);
 
   const posture = assess(vault, loc.hushDir, root);

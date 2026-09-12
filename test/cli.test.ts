@@ -2078,3 +2078,22 @@ describe("agent registration in a folder that only uses library sets", () => {
     }
   });
 });
+
+describe("hush doctor in a folder that only uses library sets", () => {
+  // Bites: a doctor that opens the vault unconditionally reports
+  // "vault readable ✗ ENOENT" and stops before the policy checks.
+  test("reports the missing vault as a state, not a failure, and still checks the policy", () => {
+    const p = project();
+    try {
+      rmSync(join(p.hushDir, "vault.json"));
+      writeFileSync(join(p.hushDir, "envs.json"), JSON.stringify({ use: [] }));
+      const r = p.run(["doctor"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /no vault yet/, r.out);
+      assert.match(r.out, /policy floor/, "the checks after the vault were skipped");
+      assert.doesNotMatch(r.out, /ENOENT|vault readable/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});

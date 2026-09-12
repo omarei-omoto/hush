@@ -254,7 +254,7 @@ Don't want to type commands? Don't.
 hush ui
 ```
 
-A local app in your browser: add keys, name and describe env sets, choose which
+A local app in your browser: add keys, name and describe sets, choose which
 ones a project uses, manage the team. It binds to `127.0.0.1` only, needs a
 one-time token in the URL, refuses non-loopback `Host` headers, and sends the
 browser **masked previews** — never the real values, unless you click *reveal*
@@ -271,7 +271,7 @@ Save all of this as one named set
 Review 4 variable(s)                          [ move all to… ▾ ]
 
 .ENV.PRODUCTION
- ☑ FAL_KEY            fal…le (25 chars)   already in fal/personal   [fal/personal ▾]
+ ☑ FAL_KEY            fal…le (25 chars)   already in personal-fal   [personal-fal ▾]
  ☑ STRIPE_SECRET_KEY  sk_…op (24 chars)   stripe                    [default ▾]
  ☑ DATABASE_URL       pos…db (23 chars)   postgres                  [prod ▾]
  ☑ PEM_KEY            ---…-- · multi-line                           [default ▾]
@@ -385,7 +385,7 @@ hush install-skill --global   # every project
 ```
 
 Installs a skill telling your agent never to ask for a pasted key, to use
-`hush_run` rather than reading values, and how to pick an account when you name
+`hush_run` rather than reading values, and how to pick a set when you name
 one. Without it the tools still work — you just have to say so each time.
 
 `.hush/policy.json` controls what it may run — through the MCP tools *and*

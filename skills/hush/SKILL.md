@@ -19,17 +19,21 @@ back a confirmation and nothing else.
 If you catch yourself typing "please paste your API key" — stop, and call
 `hush_add_secret` instead.
 
-## Accounts
+## Sets
 
-One service usually has several accounts: a personal fal key, a company one, a
-client's. When the user names one ("use my client fal account", "the team gemini
-key"), that is an account name.
+Everything hush stores lives in a named **set**: a name, optionally a label and
+a description, and some keys. One service can have several — a personal fal
+key, a work one, a client's — each its own set ("Personal fal", "Work fal").
+When the user names one ("use my client fal key", "the work-fal account"), that
+is a set name.
 
-1. `hush_list_accounts` — see what exists (`fal → personal, acme, client`).
-2. Pass the one they meant to `hush_run` as `accounts: {"fal": "client"}`.
+1. `hush_list_sets` — see what exists, in the user's own library and in this
+   project's vault, and which of them this project already uses.
+2. Pass the one they meant to `hush_run` as `sets: ["work-fal"]`.
 
-If they don't name an account, the project's pinned default is used. Don't ask
-which account unless there are several and no default.
+If they don't name one, this project's usual sets are used — its own `default`
+plus whatever it links. Don't ask which set unless there are several and no
+obvious default.
 
 ## Running something that needs credentials
 
@@ -38,27 +42,28 @@ suggest `export FAL_KEY=...`.
 
 ```
 hush_run { command: "npx", args: ["vercel", "deploy", "--prod"],
-           accounts: { "vercel": "personal" } }
+           sets: ["work-vercel"] }
 ```
 
 The command receives real credentials. You receive its output with every secret
 value masked as `[redacted:NAME]`. If you see `[redacted:...]` in output, that is
 working correctly — do not try to recover the value or work around it.
 
-**The user gets an approval dialog** naming the command, the accounts and the
+**The user gets an approval dialog** naming the command, the sets and the
 variables, with a 4-digit code. The tool result tells you the code and the
 decision. If it comes back denied or timed out, tell the user plainly and stop —
 do not retry in a loop or look for another route to the same credential.
 
 ## Setting a tool up from scratch
 
-When the user says "set up the fal CLI with my personal account":
+When the user says "set up the fal CLI with my personal set":
 
-1. `hush_provision { tool: "fal", account: "personal" }` — it works out which
-   service that tool authenticates with, and checks the vault.
+1. `hush_provision { tool: "fal", set: "personal-fal" }` — it works out which
+   service that tool authenticates with, and checks which of this project's
+   sets already provide it.
 2. If it reports something missing, `hush_add_secret { service: "fal",
-   account: "personal", why: "..." }` — the user fills it in on screen.
-3. `hush_run` with that account.
+   set: "personal-fal", why: "..." }` — the user fills it in on screen.
+3. `hush_run` with that set.
 
 Set `why` to a short, honest sentence. The user reads it in the dialog and it is
 the only context they have for deciding.
@@ -67,20 +72,25 @@ the only context they have for deciding.
 
 - `hush_check_repo` — scans the code for the env vars it references and reports
   which are missing from the vault. Use it before a build or a first run.
-- `hush_describe_secret` — confirms one key is set (length, masked preview, who
-  set it) without revealing it. Use it to check configuration, not to read.
+- `hush_describe_secret` — confirms one key is set in a given set (length,
+  masked preview, who set it) without revealing it. Use it to check
+  configuration, not to read.
 
 ## Tools
 
 | Tool | Use it for |
 |---|---|
-| `hush_list_accounts` | Which accounts exist per service |
-| `hush_list_secrets` | Which secret names exist |
+| `hush_list_sets` | Which named sets exist — library and project — and which this project uses |
+| `hush_list_secrets` | Which secret names exist in one set |
 | `hush_describe_secret` | Confirm one is set, without reading it |
 | `hush_check_repo` | What this codebase needs vs. what's in the vault |
-| `hush_provision` | Prepare a CLI to run with the right account |
+| `hush_provision` | Prepare a CLI to run with the right set |
 | `hush_add_secret` | Have the user enter a new key, off-transcript |
 | `hush_run` | Actually run something with credentials injected |
+
+`hush_list_accounts` still answers — it is a deprecated alias for
+`hush_list_sets` that returns exactly the same thing, kept so a skill file
+written before sets replaced accounts does not break. Prefer `hush_list_sets`.
 
 There is no tool that returns a secret value. If a task seems to need one, it
 needs `hush_run` instead.
@@ -99,11 +109,9 @@ If the user explicitly asks you to reveal a value, tell them to run `hush get
 
 ```bash
 hush ui                              # manage everything in a local browser app
-hush env                             # their named env sets, library and project
-hush env use <name>                  # this project uses a set from their library
-hush add fal --account acme          # add an account from the terminal
-hush accounts                        # what's stored, and for whom
-hush use fal=acme gemini=team        # pin this project's defaults
-hush run --with fal:client -- <cmd>  # override for one run
-hush doctor                          # check setup
+hush ls                              # this project's sets — library and project
+hush add fal --account acme          # add a set from the terminal (fal/acme)
+hush use work-fal                    # this project uses a set by name
+hush run --use work-fal -- <cmd>     # add one extra set for a single run
+hush dev                             # check setup, then get to work locally
 ```

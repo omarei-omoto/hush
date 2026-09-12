@@ -302,7 +302,7 @@ hush install-mcp
 | Tool | What the agent can do |
 |---|---|
 | `hush_list_secrets` | See which secrets **exist**. Names only. |
-| `hush_list_accounts` | See which accounts exist per service. |
+| `hush_list_sets` | See which named sets exist — library and project, and whether this project uses each. (`hush_list_accounts` is a deprecated alias for this.) |
 | `hush_describe_secret` | Confirm one is set — length, masked preview, who set it. |
 | `hush_check_repo` | Scan the code, report which env vars are missing from the vault. |
 | `hush_provision` | Prepare a CLI to run with the right account. |

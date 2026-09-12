@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { Vault } from "../src/vault.ts";
 import { generateIdentity, encodeSecret } from "../src/crypto.ts";
+import { saveLinks } from "../src/library.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
 
@@ -44,13 +45,15 @@ function project(policy: Record<string, unknown> = {}) {
   vault.set(id, "fal/dev", "FAL_KEY", "fal_dev_key");
   // An account that exists but is only half filled in — aws needs three vars.
   vault.set(id, "aws/partial", "AWS_ACCESS_KEY_ID", "AKIAPARTIALONLY");
+  // A plain set — no "/" — so sets are exercised without the old account shape.
+  vault.set(id, "work-fal", "FAL_KEY", "work-fal-key-value");
   vault.save();
 
   writeFileSync(
     join(hushDir, "policy.json"),
     JSON.stringify({ requireApproval: [], biometry: "off", ...policy }),
   );
-  return { home, root, secret: encodeSecret(id), cleanup: () => {
+  return { home, root, id, secret: encodeSecret(id), cleanup: () => {
     for (const d of [home, root]) rmSync(d, { recursive: true, force: true });
   } };
 }
@@ -298,7 +301,10 @@ describe("mcp policy — allowEnvs covers service accounts", () => {
     const p = project({ allowEnvs: ["default"] });
     const s = await talk(p, [init, call(1, "hush_add_secret", { service: "fal", account: "prod" })]);
     const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
-    assert.match(text, /Policy forbids|not available/, `unexpected: ${text.slice(0, 120)}`);
+    // Bites: a version that checked policy against "prod" (the bare account)
+    // rather than the derived set name would still say "Policy forbids", so
+    // the exact set name is what proves service+account really became "fal/prod".
+    assert.match(text, /Policy forbids agent access to "fal\/prod"/, `unexpected: ${text.slice(0, 120)}`);
     p.cleanup();
   });
 });
@@ -346,31 +352,53 @@ describe("policy has no dead knobs", () => {
   });
 });
 
-describe("mcp discovery tools", () => {
-  test("hush_list_accounts names the accounts and never their values", async () => {
+describe("mcp discovery — sets replace accounts", () => {
+  test("hush_list_sets returns library and project sets, tagged where/used, never a value", async () => {
     const p = project();
-    const s = await talk(p, [init, call(1, "hush_list_accounts")]);
+    // A library set, so both "where" values actually appear in one listing.
+    const libPath = join(p.home, "vaults", "global", "vault.json");
+    mkdirSync(dirname(libPath), { recursive: true });
+    const lib = Vault.create(libPath, "global", { name: "tester", pub: p.id.pub });
+    lib.set(p.id, "acme-production", "FAL_KEY", "acme-library-key");
+    lib.save();
+
+    const s = await talk(p, [init, call(1, "hush_list_sets")]);
     const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
 
     // This is how "use my acme fal key" gets resolved, so the names must be there.
-    assert.match(text, /fal/);
-    assert.match(text, /prod/);
-    assert.match(text, /dev/);
-    assert.ok(!text.includes("fal_production_key"), "an account listing leaked a value");
-    assert.ok(!text.includes("fal_dev_key"));
+    assert.match(text, /\bdefault\b/);
+    assert.match(text, /fal\/prod/);
+    assert.match(text, /fal\/dev/);
+    assert.match(text, /work-fal/);
+    assert.match(text, /acme-production/, "a library-only set is missing from the listing");
+    assert.match(text, /project/, "does not say which sets are the project's own");
+    assert.match(text, /library/, "does not say which sets come from the library");
+    assert.match(text, /used by this project/, "the project's own default should be marked used");
     assert.match(text, /hush_run/, "does not tell the agent what to do with them");
+    for (const value of ["super-secret-value-here", "fal_production_key", "fal_dev_key", "work-fal-key-value", "acme-library-key"]) {
+      assert.ok(!text.includes(value), `hush_list_sets leaked ${value}`);
+    }
     p.cleanup();
   });
 
-  test("hush_list_accounts can be filtered, and says so when there is nothing", async () => {
+  test("hush_list_accounts still answers, and its description says deprecated", async () => {
     const p = project();
     const s = await talk(p, [
       init,
-      call(1, "hush_list_accounts", { service: "fal" }),
-      call(2, "hush_list_accounts", { service: "nonexistent" }),
+      { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      call(2, "hush_list_accounts"),
     ]);
-    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /fal/);
-    assert.match(s.replies.find((r) => r.id === 2)!.result!.content![0].text!, /No accounts for "nonexistent"/);
+
+    const list = s.replies.find((r) => r.id === 1)!.result as unknown as {
+      tools: { name: string; description: string }[];
+    };
+    const accountsTool = list.tools.find((t) => t.name === "hush_list_accounts");
+    assert.ok(accountsTool, "hush_list_accounts is no longer registered");
+    assert.match(accountsTool!.description, /deprecated/i);
+    assert.match(accountsTool!.description, /hush_list_sets/);
+
+    const text = s.replies.find((r) => r.id === 2)!.result!.content![0].text!;
+    assert.match(text, /fal\/prod/, "hush_list_accounts no longer answers with real data");
     p.cleanup();
   });
 
@@ -394,25 +422,26 @@ describe("mcp discovery tools", () => {
     p.cleanup();
   });
 
-  test("hush_provision resolves a CLI to a service and an account", async () => {
+  test("hush_provision resolves a CLI to a service and a set", async () => {
     const p = project();
     // A tool name maps to a service; the agent should not need to know which.
     const s = await talk(p, [
       init,
-      call(1, "hush_provision", { tool: "genmedia", account: "prod" }), // a real hint-table entry
-      call(2, "hush_provision", { tool: "genmedia", account: "no-such-account" }),
+      call(1, "hush_provision", { tool: "genmedia", set: "fal/prod" }), // a real hint-table entry
+      call(2, "hush_provision", { tool: "genmedia", set: "nope" }),
       call(3, "hush_provision", { tool: "totally-unknown-binary" }),
     ]);
 
     const ready = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
     assert.match(ready, /Ready/);
     assert.match(ready, /FAL_KEY/);
-    assert.match(ready, /"fal": "prod"/, "does not hand back the call to make");
+    assert.match(ready, /sets: \["fal\/prod"\]/, "does not hand back the call to make");
     assert.ok(!ready.includes("fal_production_key"), "provisioning leaked a value");
 
     const wrong = s.replies.find((r) => r.id === 2)!.result!;
     assert.equal(wrong.isError, true);
-    assert.match(wrong.content![0].text!, /Available: dev, prod|Available: prod, dev/);
+    assert.match(wrong.content![0].text!, /No set called "nope"/);
+    assert.match(wrong.content![0].text!, /work-fal/, "does not list the sets that do exist");
 
     const unknown = s.replies.find((r) => r.id === 3)!.result!.content![0].text!;
     assert.match(unknown, /Don't know which service/);
@@ -423,19 +452,32 @@ describe("mcp discovery tools", () => {
     const p = project();
     const s = await talk(p, [init, call(1, "hush_provision", { tool: "stripe" })]);
     const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
-    assert.match(text, /no stripe accounts in the vault yet/);
+    assert.match(text, /none of this project's used sets have it yet/);
     assert.match(text, /hush_add_secret/, "does not point at the way to fix it");
+    p.cleanup();
+  });
+
+  // Bites: a version that only checked an explicitly-named `set` (never the
+  // sets the project already uses) would answer this with "missing" instead.
+  test("hush_provision, with no set given, checks the sets this project already uses", async () => {
+    const p = project();
+    saveLinks(join(p.root, ".hush"), ["work-fal"]);
+    const s = await talk(p, [init, call(1, "hush_provision", { tool: "genmedia" })]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.match(text, /^Ready/);
+    assert.match(text, /\bset work-fal\b|\bsets\b.*work-fal/, "does not say which used set satisfies it");
+    assert.ok(!text.includes("work-fal-key-value"), "leaked the value");
     p.cleanup();
   });
 });
 
 describe("mcp provisioning does not overstate readiness", () => {
-  test("an account missing some of the service's variables is reported, not called ready", async () => {
-    // aws needs AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_REGION. An
-    // account holding only the first must not come back as "Ready" — the agent
-    // would run a deploy that fails halfway with a confusing auth error.
+  test("a set missing some of the service's variables is reported, not called ready", async () => {
+    // aws needs AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_REGION. A set
+    // holding only the first must not come back as "Ready" — the agent would
+    // run a deploy that fails halfway with a confusing auth error.
     const p = project();
-    const s = await talk(p, [init, call(1, "hush_provision", { tool: "aws", account: "partial" })]);
+    const s = await talk(p, [init, call(1, "hush_provision", { tool: "aws", set: "aws/partial" })]);
     const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
 
     assert.ok(!/^Ready/.test(text), `claimed ready while incomplete: ${text.slice(0, 120)}`);
@@ -447,10 +489,150 @@ describe("mcp provisioning does not overstate readiness", () => {
     p.cleanup();
   });
 
-  test("a fully populated account is ready", async () => {
+  test("a fully populated set is ready", async () => {
     const p = project();
-    const s = await talk(p, [init, call(1, "hush_provision", { tool: "fal", account: "prod" })]);
+    const s = await talk(p, [init, call(1, "hush_provision", { tool: "fal", set: "fal/prod" })]);
     assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /^Ready/);
+    p.cleanup();
+  });
+});
+
+describe("mcp discovery — set/env aliasing on hush_list_secrets and hush_describe_secret", () => {
+  // Bites: a version that only read args.env (never args.set) would resolve
+  // "default" instead of "fal/dev" for the `set` call, so it would see
+  // API_KEY rather than FAL_KEY.
+  test("hush_list_secrets accepts `set`, and `env` still works as a deprecated alias", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_list_secrets", { set: "fal/dev" }),
+      call(2, "hush_list_secrets", { env: "fal/dev" }),
+    ]);
+    for (const id of [1, 2]) {
+      const text = s.replies.find((r) => r.id === id)!.result!.content![0].text!;
+      assert.match(text, /FAL_KEY/, `id ${id}: "set"/"env" did not select fal/dev`);
+      assert.ok(!text.includes("fal_dev_key"), "leaked a value");
+    }
+    p.cleanup();
+  });
+
+  test("hush_describe_secret accepts `set`, and `env` still works as a deprecated alias", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_describe_secret", { key: "FAL_KEY", set: "fal/dev" }),
+      call(2, "hush_describe_secret", { key: "FAL_KEY", env: "fal/dev" }),
+    ]);
+    for (const id of [1, 2]) {
+      const text = s.replies.find((r) => r.id === id)!.result!.content![0].text!;
+      assert.match(text, /is set in set "fal\/dev"/, `id ${id}: "set"/"env" did not select fal/dev`);
+    }
+    p.cleanup();
+  });
+});
+
+describe("mcp run — sets replace accounts", () => {
+  test("hush_run injects a named set's key, redacted in output", async () => {
+    const p = project();
+    const script = join(p.root, "echofal.sh");
+    writeFileSync(script, '#!/bin/sh\necho "$FAL_KEY"\n', { mode: 0o755 });
+
+    const s = await talk(p, [init, call(1, "hush_run", { command: "./echofal.sh", sets: ["work-fal"] })]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+
+    assert.match(text, /work-fal/, "the tool result does not say which set it used");
+    assert.match(text, /redacted/, "nothing was masked, so nothing was injected");
+    assert.ok(!text.includes("work-fal-key-value"), "the set's value leaked verbatim");
+    p.cleanup();
+  });
+
+  test("hush_run refuses an unknown set, naming it and listing what exists", async () => {
+    const p = project();
+    const s = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"], sets: ["nope"] })]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "an unknown set was silently accepted");
+    assert.match(reply.result!.content![0].text!, /No set called "nope"/);
+    assert.match(reply.result!.content![0].text!, /work-fal/, "does not list the sets that do exist");
+    p.cleanup();
+  });
+
+  test("hush_run still accepts accounts as a deprecated alias for sets", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npm", args: ["--version"], accounts: { fal: "prod" } }),
+    ]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.match(text, /exit 0/);
+    assert.match(text, /fal\/prod/, "the accounts alias did not resolve to the fal/prod set");
+    p.cleanup();
+  });
+
+  // Bites: a version that merged layers with a plain object spread in whatever
+  // order Object.assign happened to run — rather than iterating `sets` in the
+  // given order — would leave this at the mercy of key insertion order instead
+  // of proving the later NAME actually wins.
+  test("a later set wins: sets: [a, b] resolves with b's value, not a's", async () => {
+    const p = project();
+    const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+    vault.set(p.id, "set-a", "SHARED_LEN", "short"); // length 5
+    vault.set(p.id, "set-b", "SHARED_LEN", "much-longer-value"); // length 17
+    vault.save();
+
+    const script = join(p.root, "len.sh");
+    writeFileSync(script, '#!/bin/sh\necho ${#SHARED_LEN}\n', { mode: 0o755 });
+
+    const forward = await talk(p, [init, call(1, "hush_run", { command: "./len.sh", sets: ["set-a", "set-b"] })]);
+    const forwardOut = forward.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    const forwardLen = forwardOut.match(/--- stdout ---\n(\d+)/)?.[1];
+    assert.equal(forwardLen, "17", `expected set-b (length 17) to win:\n${forwardOut}`);
+
+    const backward = await talk(p, [init, call(1, "hush_run", { command: "./len.sh", sets: ["set-b", "set-a"] })]);
+    const backwardOut = backward.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    const backwardLen = backwardOut.match(/--- stdout ---\n(\d+)/)?.[1];
+    assert.equal(backwardLen, "5", `reversing the order should flip the winner:\n${backwardOut}`);
+    p.cleanup();
+  });
+
+  test("allowEnvs refuses an extra set outside it, and still allows a run with none", async () => {
+    const p = project({ allowEnvs: ["default"] });
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npm", args: ["--version"], sets: ["work-fal"] }),
+      call(2, "hush_run", { command: "npm", args: ["--version"] }),
+    ]);
+    const refused = s.replies.find((r) => r.id === 1)!;
+    assert.equal(refused.result?.isError, true, "a forbidden extra set was injected");
+    assert.match(refused.result!.content![0].text!, /Policy forbids agent access to "work-fal"/);
+    assert.match(
+      s.replies.find((r) => r.id === 2)!.result!.content![0].text!,
+      /exit 0/,
+      "a plain run without extra sets was blocked",
+    );
+    p.cleanup();
+  });
+});
+
+describe("mcp add_secret — sets replace accounts", () => {
+  test("hush_add_secret with an explicit set is refused by policy before any dialog", async () => {
+    const p = project({ allowEnvs: ["default"] });
+    const s = await talk(p, [init, call(1, "hush_add_secret", { set: "work-fal", key: "FAL_KEY" })]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "a forbidden set was reachable");
+    assert.match(reply.result!.content![0].text!, /Policy forbids agent access to "work-fal"/);
+    p.cleanup();
+  });
+
+  // Bites: a version that used the bare account ("acme") as the scope, rather
+  // than setNameFor(service, account), would still be refused by this same
+  // policy but would name "acme" instead of "fal/acme" — this pins the exact
+  // derived name.
+  test("hush_add_secret derives service/account into a set name", async () => {
+    const p = project({ allowEnvs: ["work-fal"] });
+    const s = await talk(p, [init, call(1, "hush_add_secret", { service: "fal", account: "acme" })]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "a forbidden set was reachable");
+    assert.match(reply.result!.content![0].text!, /Policy forbids agent access to "fal\/acme"/);
     p.cleanup();
   });
 });
@@ -526,6 +708,64 @@ describe("mcp policy — a refusal is a refusal", () => {
     const reply = s.replies.find((r) => r.id === 1)!;
     assert.equal(reply.result?.isError, true, "a denied run went ahead");
     assert.match(reply.result!.content![0].text!, /requires biometry|denied/i);
+    p.cleanup();
+  });
+});
+
+describe("mcp — the pre-sets argument names still mean what they meant", () => {
+  // Bites: a hush_run that ignored `env` would inject nothing from fal/dev
+  // and print 0, instead of erroring or honouring the old base-env meaning.
+  test("hush_run: env is a deprecated alias for the base set, and sets still go on top of it", async () => {
+    const p = project();
+    const script = join(p.root, "len.sh");
+    writeFileSync(script, '#!/bin/sh\necho ${#FAL_KEY}\n', { mode: 0o755 });
+
+    const base = await talk(p, [init, call(1, "hush_run", { command: "./len.sh", env: "fal/dev" })]);
+    const baseOut = base.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.equal(baseOut.match(/--- stdout ---\n(\d+)/)?.[1], String("fal_dev_key".length), `env was ignored:\n${baseOut}`);
+
+    const layered = await talk(p, [init, call(1, "hush_run", { command: "./len.sh", env: "fal/dev", sets: ["fal/prod"] })]);
+    const layeredOut = layered.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.equal(
+      layeredOut.match(/--- stdout ---\n(\d+)/)?.[1],
+      String("fal_production_key".length),
+      `sets should win over env:\n${layeredOut}`,
+    );
+    p.cleanup();
+  });
+
+  // Bites: without the alias the bare key lands in "default", which this
+  // policy allows, so the refusal never happens.
+  test("hush_add_secret: env is a deprecated alias for set, so the policy sees the set it names", async () => {
+    const p = project({ allowEnvs: ["default"] });
+    const s = await talk(p, [init, call(1, "hush_add_secret", { key: "FAL_KEY", env: "fal/dev" })]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "a forbidden set named via env was accepted");
+    assert.match(reply.result!.content![0].text!, /Policy forbids agent access to "fal\/dev"/);
+    p.cleanup();
+  });
+
+  // Bites: with layer names in the suggestion, the agent gets
+  // sets: ["global:acme-production"] — which hush_run rejects as unknown.
+  test("hush_provision names a library set the way hush_run and hush use accept it", async () => {
+    const p = project();
+    const libPath = join(p.home, "vaults", "global", "vault.json");
+    mkdirSync(dirname(libPath), { recursive: true });
+    const lib = Vault.create(libPath, "global", { name: "tester", pub: p.id.pub });
+    lib.set(p.id, "acme-production", "FAL_KEY", "acme-library-key");
+    lib.save();
+    saveLinks(join(p.root, ".hush"), ["acme-production"]);
+
+    const s = await talk(p, [init, call(1, "hush_provision", { tool: "genmedia" })]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.match(text, /^Ready/, text);
+    assert.match(text, /sets: \["acme-production"\]/, "the hush_run call handed back is not one that works");
+    assert.match(text, /hush use acme-production/, "the hush use hint is not a name the user can type");
+    assert.doesNotMatch(text, /:acme-production/, "a layer name leaked into the suggestion");
+
+    // And the suggestion actually works when fed straight back.
+    const run = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"], sets: ["acme-production"] })]);
+    assert.match(run.replies.find((r) => r.id === 1)!.result!.content![0].text!, /exit 0/);
     p.cleanup();
   });
 });

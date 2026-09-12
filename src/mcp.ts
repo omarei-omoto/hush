@@ -11,8 +11,9 @@
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveVaultPath, Vault, audit, loadUse } from "./vault.ts";
-import { serviceLabel, knownVars, scopeOf, serviceForTool } from "./services.ts";
+import { resolveVaultPath, Vault, audit } from "./vault.ts";
+import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
+import { composeSets, usedSets, librarySets, globalVaultName, openGlobal } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import { checkEnv, checkScopes, checkCommand } from "./policy.ts";
 import { requireIdentity } from "./identity.ts";
@@ -152,27 +153,34 @@ const TOOLS = [
   {
     name: "hush_list_secrets",
     description:
-      "List the NAMES of secrets available in the current project's vault. " +
-      "Returns names, which environment they live in, and when they were last changed. " +
+      "List the NAMES of secrets available in one named set of the current project's vault. " +
+      "Returns names, which set they live in, and when they were last changed. " +
       "Never returns secret values — use hush_run to actually use a secret.",
     inputSchema: {
       type: "object",
       properties: {
-        env: { type: "string", description: "Environment to list (default: the project's linked env)." },
+        set: { type: "string", description: "Which set to list (default: the project's default set)." },
+        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
       },
     },
   },
   {
+    name: "hush_list_sets",
+    description:
+      "List every named set the agent could use with this project: sets in the user's own " +
+      "library (global, e.g. 'Personal fal', 'Work fal') and sets in the project's own vault. " +
+      "Each entry says where it lives (library or project), whether this project already uses " +
+      "it, and its key names. Call this when the user names a set loosely (\"use my acme fal " +
+      "key\", \"the work fal account\") so you can pass the right name to hush_run. Returns " +
+      "names only, never values.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "hush_list_accounts",
     description:
-      "List the service accounts in this vault — e.g. fal has 'personal', 'acme' and 'client'; " +
-      "gemini has 'team'. Also shows which account this project uses by default. " +
-      "Call this when the user names an account ('use my acme fal key') so you can pass the " +
-      "right one to hush_run. Returns account names only, never key values.",
-    inputSchema: {
-      type: "object",
-      properties: { service: { type: "string", description: "Filter to one service, e.g. 'fal'." } },
-    },
+      "Deprecated, use hush_list_sets — this returns exactly the same thing. Kept registered " +
+      "so a skill file written before sets replaced accounts still works.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "hush_check_repo",
@@ -202,14 +210,21 @@ const TOOLS = [
         command: { type: "string", description: "Executable to run, e.g. 'npm'." },
         args: { type: "array", items: { type: "string" }, description: "Arguments, e.g. ['run','build']." },
         cwd: { type: "string" },
-        env: { type: "string", description: "Which environment's secrets to inject." },
+        sets: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Extra named sets to layer on top of this project's usual ones, for this run only, " +
+            "e.g. [\"work-fal\"]. Later entries win over earlier ones on a shared key name. " +
+            "Use hush_list_sets to see the options. Omit to use this project's usual sets.",
+        },
         accounts: {
           type: "object",
           additionalProperties: { type: "string" },
           description:
-            "Which account to use per service, e.g. {\"fal\":\"acme\",\"gemini\":\"team\"}. " +
-            "Omit to use this project's pinned defaults. Use hush_list_accounts to see the options.",
+            "Deprecated alias for sets: {\"fal\":\"acme\"} means the set named \"fal/acme\". Prefer sets.",
         },
+        env: { type: "string", description: "Deprecated: the base set for this run, layered under sets. Prefer sets." },
       },
       required: ["command"],
     },
@@ -221,14 +236,24 @@ const TOOLS = [
       "A secure input box opens on the user's screen; they paste the value there and it is " +
       "encrypted straight into the vault. You get back only a confirmation. " +
       "ALWAYS use this instead of asking the user to paste a key into the chat. " +
-      "Give either (service + account) — e.g. service 'fal', account 'personal' — or (key + env).",
+      "Give a set name (created if it doesn't already exist) and either a known service " +
+      "(hush knows which variables it needs, e.g. 'fal') or a bare key.",
     inputSchema: {
       type: "object",
       properties: {
-        service: { type: "string", description: "e.g. 'fal'. hush knows which variables it needs." },
-        account: { type: "string", description: "e.g. 'personal', 'acme'. Required with service." },
+        set: {
+          type: "string",
+          description: "The set to add this to, e.g. 'work-fal'. Created if absent. Default: the project's default set.",
+        },
+        where: {
+          type: "string",
+          enum: ["project", "library"],
+          description: "Where to create a new set: this project's vault (default) or the user's own library.",
+        },
+        service: { type: "string", description: "Deprecated alias: e.g. 'fal'. hush knows which variables it needs." },
+        account: { type: "string", description: "Deprecated, used with service — together they mean set \"service/account\"." },
         key: { type: "string", description: "A single variable name, if this isn't a known service." },
-        env: { type: "string", description: "Environment for a bare key. Default: the project's." },
+        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
         why: { type: "string", description: "Shown to the user so they know what they are approving." },
       },
     },
@@ -237,16 +262,16 @@ const TOOLS = [
     name: "hush_provision",
     description:
       "Prepare a CLI or codebase to run with the right credentials. Give it a tool name " +
-      "(e.g. 'wrangler') and optionally which account to use. It works out which service the " +
-      "tool authenticates with, checks the vault has it, prompts the user to add it if missing, " +
-      "and tells you the exact hush_run call to make. Use this when the user says something " +
-      "like 'set up wrangler with my personal Cloudflare account'.",
+      "(e.g. 'wrangler') and optionally which set to use. It works out which service the tool " +
+      "authenticates with, checks which of this project's used sets already provide it, prompts " +
+      "the user to add it if missing, and tells you the exact hush_run call to make. Use this " +
+      "when the user says something like 'set up wrangler with my personal Cloudflare set'.",
     inputSchema: {
       type: "object",
       properties: {
         tool: { type: "string", description: "The command that needs credentials, e.g. 'wrangler'." },
         service: { type: "string", description: "Override the detected service." },
-        account: { type: "string", description: "Which account to use, e.g. 'personal'." },
+        set: { type: "string", description: "Which set to check, e.g. 'work-fal'. Default: whichever of this project's used sets already provide it." },
       },
       required: ["tool"],
     },
@@ -260,7 +285,8 @@ const TOOLS = [
       type: "object",
       properties: {
         key: { type: "string" },
-        env: { type: "string" },
+        set: { type: "string" },
+        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
       },
       required: ["key"],
     },
@@ -298,36 +324,79 @@ function loadCtx(): Ctx {
   };
 }
 
+interface ListedSet {
+  name: string;
+  label: string;
+  description?: string;
+  whenToUse?: string;
+  keys: string[];
+  where: "library" | "project";
+  used: boolean;
+}
+
+/**
+ * Every set the agent could use, library and project side by side.
+ *
+ * Listed separately rather than merged: a name can exist in both places at
+ * once (the project one wins when a run actually resolves it — see
+ * composeSets() — but an agent deciding which to ask for needs to see both).
+ * Neither sets() nor librarySets() decrypts anything; both read plaintext
+ * metadata, so this never touches a data key.
+ */
+function listSets(ctx: Ctx): ListedSet[] {
+  const used = new Set(usedSets(ctx.hushDir));
+  const project: ListedSet[] = ctx.vault.sets().map((s) => ({
+    name: s.name,
+    label: s.label,
+    description: s.description,
+    whenToUse: s.whenToUse,
+    keys: s.keys,
+    where: "project",
+    used: used.has(s.name),
+  }));
+  const library: ListedSet[] = librarySets(ctx.hushDir).map((s) => ({
+    name: s.name,
+    label: s.label,
+    description: s.description,
+    whenToUse: s.whenToUse,
+    keys: s.keys,
+    where: "library",
+    used: used.has(s.name),
+  }));
+  return [...project, ...library].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 async function callTool(name: string, args: any): Promise<unknown> {
   const ctx = loadCtx();
-  const env = args?.env || ctx.defaultEnv;
 
   switch (name) {
     case "hush_list_secrets": {
-      checkEnv(ctx.policy, env);
-      const items = ctx.vault.list(env);
-      audit(ctx.hushDir, { actor: "mcp", action: "list", env, count: items.length });
-      if (!items.length) return text(`No secrets in env "${env}".`);
+      const set = String(args?.set || args?.env || ctx.defaultEnv);
+      checkEnv(ctx.policy, set);
+      const items = ctx.vault.list(set);
+      audit(ctx.hushDir, { actor: "mcp", action: "list", set, count: items.length });
+      if (!items.length) return text(`No secrets in set "${set}".`);
       const body = items
         .map((i) => `  ${i.key}${i.note ? `  — ${i.note}` : ""}   (set by ${i.updatedBy}, ${i.updatedAt.slice(0, 10)})`)
         .join("\n");
       return text(
-        `${items.length} secret(s) in env "${env}" of vault "${ctx.vault.data.name}":\n${body}\n\n` +
+        `${items.length} secret(s) in set "${set}" of vault "${ctx.vault.data.name}":\n${body}\n\n` +
           `Values are not available to you. Use hush_run to execute a command with these injected.`,
       );
     }
 
     case "hush_describe_secret": {
-      checkEnv(ctx.policy, env);
+      const set = String(args?.set || args?.env || ctx.defaultEnv);
+      checkEnv(ctx.policy, set);
       const key = requireArg(args, "key", "hush_describe_secret");
-      if (!ctx.vault.has(env, key)) {
-        return text(`"${key}" is NOT set in env "${env}". Use hush_request_secret to ask for it.`);
+      if (!ctx.vault.has(set, key)) {
+        return text(`"${key}" is NOT set in set "${set}". Use hush_request_secret to ask for it.`);
       }
-      const value = ctx.vault.get(ctx.identity, env, key);
-      const meta = ctx.vault.list(env).find((i) => i.key === key)!;
-      audit(ctx.hushDir, { actor: "mcp", action: "describe", env, key });
+      const value = ctx.vault.get(ctx.identity, set, key);
+      const meta = ctx.vault.list(set).find((i) => i.key === key)!;
+      audit(ctx.hushDir, { actor: "mcp", action: "describe", set, key });
       return text(
-        `${key} is set in env "${env}".\n` +
+        `${key} is set in set "${set}".\n` +
           `  preview:   ${preview(value)}\n` +
           `  length:    ${value.length}\n` +
           `  last set:  ${meta.updatedBy} on ${meta.updatedAt.slice(0, 10)}\n` +
@@ -335,28 +404,31 @@ async function callTool(name: string, args: any): Promise<unknown> {
       );
     }
 
+    case "hush_list_sets":
     case "hush_list_accounts": {
-      const filter = args?.service ? String(args.service).toLowerCase() : "";
-      const all = ctx.vault.accounts().filter((x) => !filter || x.service === filter);
-      const pinned = loadUse(ctx.hushDir);
-      if (!all.length) {
-        return text(filter ? `No accounts for "${filter}".` : "No service accounts in this vault yet.");
-      }
-      const lines: string[] = [];
-      let cur = "";
-      for (const a of all) {
-        if (a.service !== cur) {
-          cur = a.service;
-          lines.push(`${serviceLabel(a.service)} (${a.service}):`);
-        }
-        const isDefault = pinned[a.service] === a.account;
-        lines.push(`  ${a.account}${isDefault ? "  [project default]" : ""}   sets: ${a.vars.join(", ")}`);
-      }
-      lines.push("", 'Pass one to hush_run as accounts, e.g. {"fal":"acme"}.');
-      return text(lines.join("\n"));
+      const all = listSets(ctx);
+      if (!all.length) return text("No sets in this vault or library yet.");
+      const lines = all.map((s) => {
+        const flags = [s.where, s.used ? "used by this project" : null].filter(Boolean).join(", ");
+        const label = s.label === s.name ? s.name : `${s.label} (${s.name})`;
+        const notes = [s.description, s.whenToUse ? `when: ${s.whenToUse}` : null].filter(Boolean).join("  —  ");
+        return (
+          `  ${label}   [${flags}]   keys: ${s.keys.join(", ") || "(none)"}` + (notes ? `\n      ${notes}` : "")
+        );
+      });
+      const footer =
+        name === "hush_list_accounts"
+          ? "\n\n(hush_list_accounts is deprecated, use hush_list_sets — this is the same list.)"
+          : "";
+      return text(
+        `${all.length} set(s) available:\n${lines.join("\n")}\n\n` +
+          `Pass one to hush_run as sets: ["<name>"].` +
+          footer,
+      );
     }
 
     case "hush_check_repo": {
+      const env = args?.env || ctx.defaultEnv;
       checkEnv(ctx.policy, env);
       const root = args?.path || ctx.root;
       const usages = scanRepo(root);
@@ -382,32 +454,44 @@ async function callTool(name: string, args: any): Promise<unknown> {
     }
 
     case "hush_run": {
-      checkEnv(ctx.policy, env);
       const command = requireArg(args, "command", "hush_run");
       checkCommand(ctx.policy, command);
       const cmdArgs: string[] = Array.isArray(args.args) ? args.args.map(String) : [];
 
-      // Project defaults first, then whatever the caller explicitly asked for.
-      const chosen = new Map<string, string>(Object.entries(loadUse(ctx.hushDir)));
+      // `sets` is the surface; `accounts` folds each pair into the set name
+      // setNameFor() would have built, so a skill file written before sets
+      // existed keeps working unmodified.
+      // `env` was the base environment before sets existed. As an alias it is
+      // the first extra set, so it still sits under `sets` and `accounts` —
+      // the order it always had — rather than being ignored without a word.
+      const extraSets: string[] = [
+        ...(args.env ? [String(args.env)] : []),
+        ...(Array.isArray(args.sets) ? args.sets.map(String) : []),
+      ];
       for (const [service, account] of Object.entries(args.accounts ?? {})) {
-        chosen.set(String(service).toLowerCase(), String(account));
+        extraSets.push(setNameFor(String(service).toLowerCase(), String(account)));
       }
-      const choices = [...chosen].map(([service, account]) => ({ service, account }));
-      const resolved = ctx.vault.resolve(ctx.identity, env, choices);
+
+      // The project's usual sets (its "default" floor, then whatever it links)
+      // with the extras layered last — later wins. Any name in `extraSets`
+      // that resolves nowhere throws, naming it and every set that does exist.
+      const resolved = composeSets(ctx.vault, ctx.identity, ctx.hushDir, extraSets);
       checkScopes(ctx.policy, resolved.layers);
       const secrets = resolved.secrets;
       for (const k of ctx.policy.denyKeys) delete secrets[k];
 
       if (ctx.policy.requireApproval.includes("run")) {
-        const using = choices.length ? choices.map((c) => `${c.service}:${c.account}`).join(", ") : env;
         const ap = await requestApproval(ctx.hushDir, {
           action: "run",
           summary: `Run:  ${command} ${cmdArgs.join(" ")}`.trim(),
           detail: [
-            `Using accounts:  ${using}`,
+            `Using sets:  ${resolved.layers.join(", ") || "(none)"}`,
             `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
             `Directory:  ${args.cwd || ctx.root}`,
           ],
+          // Exactly the layers composeSets() resolved, joined with "+" — the
+          // same shape resolve() used to build, so a "session" grant cached
+          // under the old scope string still matches under the new one.
           scope: `run:${resolved.layers.join("+")}`,
           ttlSeconds: ctx.policy.approvalTtlSeconds,
           timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
@@ -436,7 +520,6 @@ async function callTool(name: string, args: any): Promise<unknown> {
       audit(ctx.hushDir, {
         actor: "mcp",
         action: "run",
-        env,
         command,
         args: cmdArgs,
         exit: result.code,
@@ -446,35 +529,44 @@ async function callTool(name: string, args: any): Promise<unknown> {
 
       const parts = [
         `exit ${result.code}${result.timedOut ? " (timed out)" : ""}  ` +
-          `· using ${choices.length ? choices.map((c) => `${c.service}:${c.account}`).join(", ") : env} ` +
+          `· using ${resolved.layers.join(", ") || "(none)"} ` +
           `· injected ${Object.keys(secrets).length} secret(s) · ${result.redactions} value(s) masked in output`,
       ];
+      if (resolved.missing.length) {
+        parts.push(`Note:  this project uses ${resolved.missing.join(", ")}, which your library does not have.`);
+      }
       if (result.stdout.trim()) parts.push(`--- stdout ---\n${result.stdout.trimEnd()}`);
       if (result.stderr.trim()) parts.push(`--- stderr ---\n${result.stderr.trimEnd()}`);
       return result.code === 0 ? text(parts.join("\n\n")) : errText(parts.join("\n\n"));
     }
 
     case "hush_add_secret": {
-      checkEnv(ctx.policy, env);
-
       const service = args.service ? String(args.service).toLowerCase() : null;
       const account = args.account ? String(args.account) : null;
       if (service && !account) return errText(`Which account for "${service}"? Pass account, e.g. "personal".`);
 
-      const scope = service && account ? scopeOf(service, account) : env;
+      const where: "library" | "project" = args.where === "library" ? "library" : "project";
+      const set = args.set
+        ? String(args.set)
+        : service && account
+          ? setNameFor(service, account)
+          : args.env
+            ? String(args.env) // the pre-sets name for the same argument
+            : ctx.defaultEnv;
+
       // Policy first, capability second. The other order meant that on any host
       // without native dialogs — every Linux box, and macOS with
-      // HUSH_APPROVAL_MODE=file — a scope the policy forbids was never refused.
+      // HUSH_APPROVAL_MODE=file — a set the policy forbids was never refused.
       // Worse, the fallback message handed the agent the exact command to run in
-      // the terminal to get the forbidden account anyway.
-      checkScopes(ctx.policy, [scope]);
+      // the terminal to get the forbidden set anyway.
+      checkScopes(ctx.policy, [set]);
 
       if (!nativeDialogsAvailable()) {
         return text(
           "Secure on-screen entry isn't available on this platform. Ask the user to run:\n\n" +
             (service && account
               ? `    hush add ${service} --account ${account}`
-              : `    hush set ${args.key ?? "<KEY>"} --env ${env}`),
+              : `    hush set ${args.key ?? "<KEY>"} --env ${set}`),
         );
       }
 
@@ -489,6 +581,20 @@ async function callTool(name: string, args: any): Promise<unknown> {
         );
       }
 
+      let target: { vault: Vault; save: () => void; label: string };
+      if (where === "library") {
+        const lib = openGlobal();
+        if (!lib) {
+          return errText(
+            `There is no library vault yet (looked for "${globalVaultName()}"). ` +
+              `Ask the user to run:  hush global --create`,
+          );
+        }
+        target = { vault: lib, save: () => lib.save(), label: `your library (${globalVaultName()})` };
+      } else {
+        target = { vault: ctx.vault, save: () => ctx.vault.save(), label: "this project" };
+      }
+
       const why = args.why ? String(args.why) : "requested by your coding agent";
       const stored: string[] = [];
       const skipped: string[] = [];
@@ -496,12 +602,12 @@ async function callTool(name: string, args: any): Promise<unknown> {
         const res = await promptForSecretNatively(v, [
           why,
           "",
-          service ? `Service:  ${serviceLabel(service)}` : `Environment:  ${env}`,
+          service ? `Service:  ${serviceLabel(service)}` : `Set:  ${set}`,
           ...(account ? [`Account:  ${account}`] : []),
-          ctx.vault.has(scope, v) ? "This will REPLACE the existing value." : "",
+          target.vault.has(set, v) ? "This will REPLACE the existing value." : "",
         ].filter(Boolean));
         if (res.value) {
-          ctx.vault.set(ctx.identity, scope, v, res.value);
+          target.vault.set(ctx.identity, set, v, res.value);
           stored.push(v);
         } else {
           skipped.push(v);
@@ -509,18 +615,16 @@ async function callTool(name: string, args: any): Promise<unknown> {
       }
 
       if (!stored.length) {
-        audit(ctx.hushDir, { actor: "mcp", action: "add.cancelled", scope, vars });
+        audit(ctx.hushDir, { actor: "mcp", action: "add.cancelled", set, vars });
         return errText("The user cancelled — nothing was stored.");
       }
-      ctx.vault.save();
-      audit(ctx.hushDir, { actor: "mcp", action: "add", scope, stored });
+      target.save();
+      audit(ctx.hushDir, { actor: "mcp", action: "add", set, where, stored });
 
       return text(
-        `Stored ${stored.join(", ")} in ${scope}. The value never entered this conversation.` +
+        `Stored ${stored.join(", ")} in "${set}" (${target.label}). The value never entered this conversation.` +
           (skipped.length ? `\nSkipped (left blank): ${skipped.join(", ")}` : "") +
-          (service && account
-            ? `\n\nUse it:  hush_run with accounts { "${service}": "${account}" }`
-            : ""),
+          `\n\nUse it:  hush_run with sets: ["${set}"]`,
       );
     }
 
@@ -534,40 +638,66 @@ async function callTool(name: string, args: any): Promise<unknown> {
         );
       }
 
-      const available = ctx.vault.accountsFor(service);
-      const account = args.account ? String(args.account) : (loadUse(ctx.hushDir)[service] ?? available[0]);
-
-      if (!account) {
+      const need = knownVars(service);
+      if (!need.length) {
         return text(
-          `"${tool}" needs ${serviceLabel(service)} (${knownVars(service).join(", ") || "unknown vars"}), ` +
-            `but there are no ${service} accounts in the vault yet.\n\n` +
-            `Call hush_add_secret with service "${service}" and an account name ` +
-            `(ask the user what to call it — e.g. "personal").`,
-        );
-      }
-      if (!available.includes(account)) {
-        return errText(
-          `No "${account}" account for ${service}. Available: ${available.join(", ") || "none"}.`,
+          `Don't know which variables ${serviceLabel(service)} needs.\n` +
+            `Call hush_check_repo to see what the code actually references.`,
         );
       }
 
-      const scope = scopeOf(service, account);
-      const need = knownVars(service).length ? knownVars(service) : Object.keys(ctx.vault.data.envs[scope] ?? {});
-      const missing = need.filter((v) => !ctx.vault.has(scope, v));
+      // No explicit `set`: check this project's own used sets (its "default"
+      // floor plus whatever it links) — exactly what hush_run would resolve
+      // with no extra sets. An explicit `set` is layered on top of those, same
+      // as `sets` would be for a real run, so the answer matches what running
+      // it for real would actually inject.
+      const requestedSet = args.set ? String(args.set) : null;
+      const resolved = composeSets(ctx.vault, ctx.identity, ctx.hushDir, requestedSet ? [requestedSet] : []);
 
+      // Which set actually supplies each needed variable, later layer wins —
+      // read from sets()/librarySets()'s plaintext key-name metadata, so this
+      // never decrypts anything to answer "is it configured".
+      // Layers say where a value came from ("main:work-fal" for the library);
+      // what the agent passes back to hush_run, and what the user types after
+      // `hush use`, is the plain set name.
+      const prefix = `${globalVaultName()}:`;
+      const plain = (layer: string): string => (layer.startsWith(prefix) ? layer.slice(prefix.length) : layer);
+      const keysOf = (layer: string): string[] => {
+        if (layer.startsWith(prefix)) {
+          return librarySets(ctx.hushDir).find((s) => s.name === layer.slice(prefix.length))?.keys ?? [];
+        }
+        return ctx.vault.sets().find((s) => s.name === layer)?.keys ?? [];
+      };
+      const providerOf = new Map<string, string>();
+      for (const layer of resolved.layers) {
+        const keys = keysOf(layer);
+        for (const v of need) if (keys.includes(v)) providerOf.set(v, layer);
+      }
+      const missing = need.filter((v) => !providerOf.has(v));
+
+      if (missing.length === need.length) {
+        return text(
+          `"${tool}" needs ${serviceLabel(service)} (${need.join(", ")}), but none of this project's ` +
+            `used sets have ${need.length > 1 ? "them" : "it"} yet.\n\n` +
+            `Call hush_add_secret with service "${service}"${requestedSet ? `, set "${requestedSet}"` : ""} ` +
+            `to have the user fill it in (ask what to call the set — e.g. "personal", "work-${service}").`,
+        );
+      }
       if (missing.length) {
         return text(
-          `${serviceLabel(service)} account "${account}" is missing: ${missing.join(", ")}.\n` +
-            `Call hush_add_secret with service "${service}", account "${account}" to have the user fill it in.`,
+          `${serviceLabel(service)} is missing: ${missing.join(", ")}.\n` +
+            `Call hush_add_secret with service "${service}"${requestedSet ? `, set "${requestedSet}"` : ""} ` +
+            `to have the user fill it in.`,
         );
       }
 
-      audit(ctx.hushDir, { actor: "mcp", action: "provision", tool, service, account });
+      const usingSets = [...new Set(need.map((v) => plain(providerOf.get(v)!)))];
+      audit(ctx.hushDir, { actor: "mcp", action: "provision", tool, service, sets: usingSets });
       return text(
-        `Ready. "${tool}" will get ${need.join(", ")} from the ${serviceLabel(service)} "${account}" account.\n\n` +
+        `Ready. "${tool}" will get ${need.join(", ")} from ${usingSets.length > 1 ? "sets" : "set"} ${usingSets.join(", ")}.\n\n` +
           `Run it with hush_run:\n` +
-          `  command: "${tool}", accounts: { "${service}": "${account}" }\n\n` +
-          `The user can make this the project default with:  hush use ${service}=${account}`,
+          `  command: "${tool}", sets: [${usingSets.map((s) => `"${s}"`).join(", ")}]\n\n` +
+          `The user can make this permanent with:  hush use ${usingSets.join(" ")}`,
       );
     }
 

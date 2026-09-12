@@ -189,7 +189,6 @@ describe("configuration has no dead knobs", () => {
   test("every policy field is documented", () => {
     const iface = mcp.slice(mcp.indexOf("export interface Policy {"), mcp.indexOf("const DEFAULT_POLICY"));
     const fields = [...new Set([...iface.matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((m) => m[1]))];
-    // a loophole for the check in general.
     for (const field of fields) {
       assert.ok(
         readme.includes(field) || security.includes(field),

@@ -240,8 +240,11 @@ export async function requestApproval(
   // involved) is a value out or a planted credential, not a redaction gap —
   // so neither is ever read from or written to disk. They still coalesce
   // repeated calls within one long-lived process (e.g. hush ui's server) via
-  // the in-memory map alone.
-  const persistToDisk = req.action !== "reveal" && req.action !== "add";
+  // the in-memory map alone. The same goes for every action once biometry
+  // is required: rung 4 promises a fingerprint, and a file an agent can
+  // write must not be able to stand in for one — the MCP server, being one
+  // long-lived process, still gets its session grants from memory.
+  const persistToDisk = req.action !== "reveal" && req.action !== "add" && req.biometry !== "required";
 
   const key = grantKey(hushDir, req.scope);
   // Memory first (cheap, and always current within this process), then the

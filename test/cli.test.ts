@@ -905,6 +905,27 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
+  // Bites: with run grants read from disk regardless of biometry, the forged
+  // entry below lets the command run with no fingerprint and no prompt.
+  test("with biometry required, a forged run grant on disk is never honoured either", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["run"], biometry: "required", approvalTimeoutSeconds: 1 }),
+      );
+      // Exactly the scope runScope() computes for this command and this project's sets.
+      writeFileSync(
+        join(p.hushDir, "grants.local.json"),
+        JSON.stringify({ "run:npm:default": Date.now() + 3_600_000 }),
+      );
+      const r = p.run(["run", "--", "npm", "--version"]);
+      assert.equal(r.code, 1, `a forged grant stood in for a fingerprint:\n${r.out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret", () => {
     const p = project({ HUSH_APPROVAL_MODE: "file" });
     try {

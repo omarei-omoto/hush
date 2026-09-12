@@ -11,20 +11,21 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { parseEnvFile } from "./scan.ts";
-import { loadPolicy } from "./mcp.ts";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
+import { scanRepo, parseEnvFile } from "./scan.ts";
+import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import {
-  Vault, resolveVaultPath, namedVaultPath, audit,
+  Vault, locateProject, namedVaultPath, audit,
   isValidationError, ValidationError, slugifyEnv,
 } from "./vault.ts";
 import {
   librarySets, loadLinks, saveLinks, openGlobal, usedSets,
-  globalVaultName, globalVaultExists, globalVaultPath, namedVaults, saveConfig,
+  globalVaultName, globalVaultExists, namedVaults, saveConfig,
+  writeProjectDotfiles, ensureProjectVault, suggestSets,
 } from "./library.ts";
-import { requireIdentity, publicKeyOf } from "./identity.ts";
+import { requireIdentity, publicKeyOf, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 
@@ -40,11 +41,69 @@ function tokenOk(given: unknown): boolean {
 }
 
 interface UiCtx {
+  /**
+   * The project's own vault file. May not exist on disk yet — a links-only or
+   * brand-new folder has none until something writes into it — so every use
+   * of this must check existsSync() first rather than assume Vault.open() is
+   * safe to call.
+   */
   vaultPath: string;
   hushDir: string;
+  /** The folder hush is serving: where a scan for env-var usage looks, and the name a first project vault takes. */
+  root: string;
   defaultEnv: string;
-  /** True when the app was opened outside any project, on the library alone. */
-  standalone?: boolean;
+}
+
+/**
+ * Which of the three states this folder is in, checked fresh from disk each
+ * time rather than cached on ctx: a request can create the vault mid-flight
+ * (see projectVault()), and the state() call at the end of that same request
+ * has to see the result.
+ */
+function folderState(ctx: UiCtx): "unset" | "links-only" | "vault" {
+  if (existsSync(ctx.vaultPath)) return "vault";
+  // Any marker findHushDir() itself accepts means the folder was set up, even
+  // before it earns a vault of its own.
+  if (existsSync(join(ctx.hushDir, "envs.json")) || existsSync(join(ctx.hushDir, "link.json"))) return "links-only";
+  return "unset";
+}
+
+/** The project's vault, only if this folder already has one — never Vault.open() on a path that may not exist. */
+function openProjectVault(ctx: UiCtx): Vault | null {
+  return existsSync(ctx.vaultPath) ? Vault.open(ctx.vaultPath) : null;
+}
+
+/**
+ * The project's vault, required. Used by every endpoint that operates on an
+ * existing project secret and has no business creating one on the caller's
+ * behalf (reveal, move, tag, renaming a set) — the 400 names the state rather
+ * than crashing on Vault.open(missing file).
+ */
+function requireProjectVault(ctx: UiCtx): Vault {
+  const v = openProjectVault(ctx);
+  if (v) return v;
+  throw new ValidationError(
+    folderState(ctx) === "unset"
+      ? "This folder isn't set up for hush yet — use the panel on the page to pick sets for it first."
+      : "This folder has no vault of its own yet — add a project secret or a teammate to make one.",
+  );
+}
+
+/** The founding-member shape Vault.create()/ensureProjectVault() want, built the same way `hush init` builds it. */
+function memberOf(id: ResolvedIdentity): { name: string; pub?: Buffer; ageRecipient?: string } {
+  const name = process.env.USER || "me";
+  return id.pub ? { name, pub: id.pub } : { name, ageRecipient: id.age!.recipients[0] };
+}
+
+/**
+ * Open this project's vault, making one the moment something actually needs
+ * to write into it — a links-only folder has no business carrying key
+ * material before that. Every write path allowed to create the vault funnels
+ * through here, so "made on first write, toast once" is one behavior rather
+ * than four near-duplicates that could drift apart.
+ */
+function projectVault(ctx: UiCtx, id: ResolvedIdentity): { vault: Vault; created: boolean } {
+  return ensureProjectVault(ctx.hushDir, memberOf(id), basename(ctx.root));
 }
 
 /**
@@ -160,8 +219,11 @@ function dropStages(ids: unknown): number {
 }
 
 function state(ctx: UiCtx) {
-  const vault = Vault.open(ctx.vaultPath);
   const id = requireIdentity();
+  const fState = folderState(ctx);
+  // Never Vault.open() a project vault that does not exist yet — that is
+  // exactly the crash a links-only or brand-new folder used to hit.
+  const vault = fState === "vault" ? Vault.open(ctx.vaultPath) : null;
 
   // "default" is the floor, then linked sets in the order they were added —
   // this is the one order the whole page agrees on: which sets a run actually
@@ -182,18 +244,20 @@ function state(ctx: UiCtx) {
       note: i.note ?? "",
     }));
 
-  const projectSets = vault.sets().map((s) => ({
-    where: "project" as const,
-    name: s.name,
-    label: s.label,
-    description: s.description ?? "",
-    whenToUse: s.whenToUse ?? "",
-    source: s.source ?? "",
-    keys: s.keys,
-    secrets: describe(vault, s.name),
-    used: used.includes(s.name),
-    position: positionOf(s.name),
-  }));
+  const projectSets = vault
+    ? vault.sets().map((s) => ({
+        where: "project" as const,
+        name: s.name,
+        label: s.label,
+        description: s.description ?? "",
+        whenToUse: s.whenToUse ?? "",
+        source: s.source ?? "",
+        keys: s.keys,
+        secrets: describe(vault, s.name),
+        used: used.includes(s.name),
+        position: positionOf(s.name),
+      }))
+    : [];
 
   // The library is a second vault, and it may not exist yet or may not be
   // readable by this identity. Neither is a reason for the whole page to fail,
@@ -221,11 +285,37 @@ function state(ctx: UiCtx) {
     position: positionOf(s.name),
   }));
 
+  // A folder with no marker at all gets offered a one-click setup: what its
+  // code references, and which library sets already cover that. Only worth
+  // computing once there is no project yet — a linked or vaulted project has
+  // already made this choice.
+  const suggestion = fState === "unset" ? (() => {
+    const usages = scanRepo(ctx.root);
+    const needed = usages.map((u) => u.name);
+    const files = new Set<string>();
+    for (const u of usages) for (const site of u.sites) files.add(site);
+    return {
+      needed,
+      files: files.size,
+      ...suggestSets(needed, library.map((s) => ({ name: s.name, keys: s.keys }))),
+    };
+  })() : undefined;
+
+  // No project vault to name you in: fall back to the library's membership,
+  // then to what a first vault would call you, rather than crashing on
+  // vault.memberName() with no vault to ask.
+  const meName = vault ? vault.memberName(id) : libraryVault ? libraryVault.memberName(id) : (process.env.USER || "me");
+
   return {
-    vault: vault.data.name,
-    me: { name: vault.memberName(id), pk: publicKeyOf(id) },
+    vault: vault ? vault.data.name : null,
+    me: { name: meName, pk: publicKeyOf(id) },
     defaultEnv: ctx.defaultEnv,
-    standalone: Boolean(ctx.standalone),
+    folder: { root: ctx.root, state: fState, hushDir: ctx.hushDir },
+    // Derived for one release: this used to be the only signal for "no
+    // project to show"; folder.state is now the real source of truth and the
+    // page reads that instead. Kept in case anything else still reads it.
+    standalone: fState === "unset",
+    ...(suggestion ? { suggestion } : {}),
     global: {
       name: globalVaultName(),
       exists: globalVaultExists(),
@@ -242,17 +332,21 @@ function state(ctx: UiCtx) {
     catalog: Object.entries(CATALOG).map(([id2, d]) => ({ id: id2, label: d.label, vars: d.vars })),
     project: projectSets,
     used,
-    members: vault.members().map((m) => ({
-      name: m.name,
-      role: m.role,
-      pk: m.pk,
-      canDecrypt: m.canDecrypt,
-    })),
+    members: vault
+      ? vault.members().map((m) => ({
+          name: m.name,
+          role: m.role,
+          pk: m.pk,
+          canDecrypt: m.canDecrypt,
+        }))
+      : [],
   };
 }
 
 async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, path: string) {
-  const vault = () => Vault.open(ctx.vaultPath);
+  // Throws a 400-shaped message naming the folder's state rather than
+  // crashing on Vault.open() of a project vault that does not exist yet.
+  const vault = () => requireProjectVault(ctx);
   const id = requireIdentity();
 
   if (path === "/api/state" && req.method === "GET") {
@@ -267,12 +361,17 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       if (!scope || !key) return json(res, 400, { error: "scope and key are required" });
       const inLibrary = where === "library";
       let v: Vault;
+      let vaultCreated = false;
       if (inLibrary) {
         const g = openGlobal();
         if (!g) return json(res, 400, { error: "you have no library vault yet" });
         v = g;
       } else {
-        v = vault();
+        // A project secret is exactly the moment a links-only folder earns a
+        // vault of its own — not before.
+        const opened = projectVault(ctx, id);
+        v = opened.vault;
+        vaultCreated = opened.created;
       }
       if (value === null) {
         v.delete(scope, key);
@@ -283,7 +382,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         audit(ctx.hushDir, { actor: "ui", action: "set", scope, key, where });
       }
       v.save();
-      return json(res, 200, state(ctx));
+      return json(res, 200, { ...state(ctx), ...(vaultCreated ? { vaultCreated: true } : {}) });
     }
 
     /**
@@ -304,8 +403,20 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       const inLibrary = where !== "project";
       const id = requireIdentity();
 
+      // Naming the first set a links-only folder gets is a write to the
+      // project vault same as any other, so it is the one non-create path
+      // allowed to make one; renaming/describing/deleting need a set that
+      // already exists, which means the vault already does too.
+      let vaultCreated = false;
       const open = (): Vault => {
-        if (!inLibrary) return vault();
+        if (!inLibrary) {
+          if (action === "create") {
+            const opened = projectVault(ctx, id);
+            vaultCreated = opened.created;
+            return opened.vault;
+          }
+          return vault();
+        }
         const g = openGlobal();
         if (!g) throw new ValidationError("You have no library vault yet.");
         return g;
@@ -329,7 +440,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         // never stores a value itself, so a known service still goes through
         // /api/secret per row like any other key.
         const vars = typeof service === "string" ? (CATALOG[service.toLowerCase()]?.vars ?? []) : [];
-        return json(res, 200, { ...state(ctx), created: slug, vars });
+        return json(res, 200, { ...state(ctx), created: slug, vars, ...(vaultCreated ? { vaultCreated: true } : {}) });
       }
 
       if (!name) return json(res, 400, { error: "name is required" });
@@ -484,7 +595,10 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       }
 
       const parsed = parseEnvFile(text);
-      const v = vault();
+      // Staging never writes anywhere, so it must not require a project vault
+      // that does not exist yet — an unset or links-only folder just sees no
+      // existing project scopes to flag a conflict against.
+      const v = openProjectVault(ctx);
       const used = usedSets(ctx.hushDir);
 
       // Names the parser refused. Derived from its own output, so the two can
@@ -499,7 +613,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         if (!(name in parsed) && !rejected.includes(name)) rejected.push(name);
       }
 
-      const scopes = v.envNames();
+      const scopes = v ? v.envNames() : [];
       const entries = Object.entries(parsed).map(([key, value]) => {
         const service = serviceForVar(key);
         // Prefer a set this project already uses that is named for the
@@ -514,7 +628,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           multiline: value.includes("\n"),
           service,
           suggestedScope: pinned ?? anyForService[0] ?? ctx.defaultEnv,
-          existsIn: scopes.filter((s) => v.has(s, key)),
+          existsIn: v ? scopes.filter((s) => v!.has(s, key)) : [],
         };
       });
 
@@ -555,12 +669,17 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       // want it from every project — so the importer can target either vault.
       const intoLibrary = where === "library";
       let v: Vault;
+      let vaultCreated = false;
       if (intoLibrary) {
         const g = openGlobal();
         if (!g) return json(res, 400, { error: "you have no library vault yet" });
         v = g;
       } else {
-        v = vault();
+        // Importing into the project is a write to it, so it is one of the
+        // moments a links-only folder earns a vault of its own.
+        const opened = projectVault(ctx, id);
+        v = opened.vault;
+        vaultCreated = opened.created;
       }
       const imported: string[] = [];
       const skipped: { key: string; why: string }[] = [];
@@ -617,7 +736,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         else unpinned.push({ service, account, scope, keys: 1 });
       }
 
-      return json(res, 200, { ...state(ctx), imported, skipped, unpinned });
+      return json(res, 200, { ...state(ctx), imported, skipped, unpinned, ...(vaultCreated ? { vaultCreated: true } : {}) });
     }
 
     /**
@@ -667,17 +786,67 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
 
     case "/api/team": {
       const { action, name, pk } = body;
-      const v = vault();
+      // Adding or removing a teammate only makes sense against a real vault,
+      // and giving someone access is exactly the kind of write a links-only
+      // folder should earn one for.
+      const { vault: v, created: vaultCreated } = projectVault(ctx, id);
       if (action === "remove") {
         const r = v.removeRecipient(id, name);
         v.save();
         audit(ctx.hushDir, { actor: "ui", action: "team.remove", name });
-        return json(res, 200, { ...state(ctx), notice: `Removed ${name}; re-sealed ${r.reEncrypted} value(s).` });
+        return json(res, 200, {
+          ...state(ctx),
+          notice: `Removed ${name}; re-sealed ${r.reEncrypted} value(s).`,
+          ...(vaultCreated ? { vaultCreated: true } : {}),
+        });
       }
       v.addRecipient(id, name, pk);
       v.save();
       audit(ctx.hushDir, { actor: "ui", action: "team.add", name });
-      return json(res, 200, state(ctx));
+      return json(res, 200, { ...state(ctx), ...(vaultCreated ? { vaultCreated: true } : {}) });
+    }
+
+    /**
+     * "Set this folder up" — a links-only project is born here: which library
+     * (or, if this project already has a vault, project) sets it uses, and
+     * optionally the approval floor a coding agent gets pointed at it.
+     *
+     * Deliberately makes no vault: a folder that only uses library sets has
+     * no business carrying key material until it actually needs to (see
+     * projectVault()).
+     */
+    case "/api/setup": {
+      const { use, agent } = body;
+      if (!Array.isArray(use) || use.some((u: unknown) => typeof u !== "string")) {
+        return json(res, 400, { error: "use must be a list of set names" });
+      }
+      const existing = openProjectVault(ctx);
+      const known = new Set([...librarySets().map((s) => s.name), ...(existing ? existing.envNames() : [])]);
+      const unknown = (use as string[]).find((u) => !known.has(u));
+      if (unknown) {
+        return json(res, 400, {
+          error: `No set called "${unknown}". You have: ${known.size ? [...known].join(", ") : "none yet"}.`,
+        });
+      }
+
+      writeProjectDotfiles(ctx.hushDir);
+      saveLinks(ctx.hushDir, use as string[]);
+
+      let policyKept = false;
+      if (agent) {
+        const policyPath = join(ctx.hushDir, "policy.json");
+        if (existsSync(policyPath)) {
+          // Never clobber a policy someone already tuned — the whole point of
+          // "kept" is that a second setup run cannot silently loosen it back
+          // to the floor, or tighten one they deliberately relaxed.
+          policyKept = true;
+        } else {
+          writeFileSync(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
+        }
+      }
+
+      audit(ctx.hushDir, { actor: "ui", action: "setup", use, agent: Boolean(agent) });
+      return json(res, 200, { ...state(ctx), ...(policyKept ? { policyKept: true } : {}) });
     }
 
     default:
@@ -686,33 +855,32 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
 }
 
 export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
-  const loc = resolveVaultPath(process.cwd());
+  const proj = locateProject(process.cwd());
 
-  // Your library is yours wherever you are standing, so the app opens on it
-  // alone when there is no project here. Requiring a repo to look at your own
-  // keys is the kind of thing that makes a tool annoying, and the library is
-  // the level most of this is managed at anyway.
+  // Three states of "this folder": no .hush anywhere above it (a brand-new
+  // folder — the setup panel on the page is how it gets one), one that only
+  // links library sets (.hush/envs.json, no vault.json yet), and one with a
+  // vault of its own. The first two used to be unreachable here at all: no
+  // project meant a hard error unless a library existed, and a links-only
+  // project meant Vault.open() throwing on a file that was never supposed to
+  // exist yet — the crash this whole feature exists to fix.
   let ctx: UiCtx;
-  if (loc) {
-    ctx = { vaultPath: loc.vaultPath, hushDir: loc.hushDir, defaultEnv: loc.env || "default" };
-  } else if (globalVaultExists()) {
-    ctx = {
-      vaultPath: globalVaultPath(),
-      hushDir: dirname(globalVaultPath()),
-      defaultEnv: "default",
-      standalone: true,
-    };
+  if (proj) {
+    ctx = { vaultPath: proj.vaultPath, hushDir: proj.hushDir, root: dirname(proj.hushDir), defaultEnv: proj.env || "default" };
   } else {
-    throw new Error(
-      "No vault here and no library yet.\n" +
-        "  Start a project:  hush init\n" +
-        "  Or make a library: hush global --create",
-    );
+    const root = process.cwd();
+    const hushDir = join(root, ".hush");
+    ctx = { vaultPath: join(hushDir, "vault.json"), hushDir, root, defaultEnv: "default" };
   }
-  // Fail fast rather than after the browser opens.
-  const v = Vault.open(ctx.vaultPath);
+
+  // Fail fast rather than after the browser opens — but only against a vault
+  // that actually exists; a links-only or brand-new folder has none yet, and
+  // that is no longer a reason to refuse to start.
   const id = requireIdentity();
-  if (!v.canRead(id)) throw new Error(`Your key is not a recipient of vault "${v.data.name}".`);
+  const existing = openProjectVault(ctx);
+  if (existing && !existing.canRead(id)) {
+    throw new Error(`Your key is not a recipient of vault "${existing.data.name}".`);
+  }
 
   const server = createServer(async (req, res) => {
     try {
@@ -762,7 +930,8 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
     const addr = server.address();
     const actual = typeof addr === "object" && addr ? addr.port : port;
     const link = `http://127.0.0.1:${actual}/?t=${TOKEN}`;
-    process.stdout.write(`\n  hush ui  →  ${link}\n\n  vault: ${v.data.name}\n  Ctrl-C to stop.\n\n`);
+    const vaultLine = existing ? `vault: ${existing.data.name}` : "no vault here yet — set this folder up in the browser";
+    process.stdout.write(`\n  hush ui  →  ${link}\n\n  ${vaultLine}\n  Ctrl-C to stop.\n\n`);
     if (opts.open !== false) {
       import("node:child_process").then(({ spawn }) => {
         const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
@@ -922,7 +1091,11 @@ async function retag(scope,key,note){
   await refresh(await api("/api/tag",{scope,key,note}));
   toast(note?"tagged "+key:"tag cleared");
 }
-async function setSecret(scope,key,value,where){await refresh(await api("/api/secret",{scope,key,value,where}));toast(value===null?"deleted":"saved")}
+async function setSecret(scope,key,value,where){
+  const r=await api("/api/secret",{scope,key,value,where});
+  await refresh(r);
+  toast(r.vaultCreated?"made this folder's own vault — commit .hush/vault.json":(value===null?"deleted":"saved"));
+}
 async function reveal(scope,key,el,where){
   const {value}=await api("/api/reveal",{scope,key,where});
   el.textContent=value; el.style.color="var(--ink)";
@@ -1207,6 +1380,7 @@ async function runImport(){
   await refresh(res);
   let msg="imported "+res.imported.length;
   if(res.skipped.length)msg+=", skipped "+res.skipped.length;
+  if(res.vaultCreated)msg+=" — made this folder's own vault, commit .hush/vault.json";
   toast(msg);
   if(res.unpinned&&res.unpinned.length){
     const app=document.getElementById("app");
@@ -1401,7 +1575,7 @@ function newSetForm(){
   const g2=$('<div class="grid2"></div>');
   const dest=document.createElement("select");
   dest.append($('<option value="library">in my library</option>'));
-  if(!S.standalone)dest.append($('<option value="project">in this project</option>'));
+  if(!S.folder||S.folder.state!=="unset")dest.append($('<option value="project">in this project</option>'));
   if(!S.global.exists)dest.value="project";
   const svc=document.createElement("select");
   svc.append($('<option value="">for a service… (optional)</option>'));
@@ -1422,7 +1596,7 @@ function newSetForm(){
       });
       const created=r.created;
       await refresh(r);
-      toast("created "+nm.value.trim());
+      toast(r.vaultCreated?"made this folder's own vault — commit .hush/vault.json":"created "+nm.value.trim());
       f.reset();
       if(created&&r.vars&&r.vars.length)promptForVars(where,created,serviceLabel,r.vars);
     }catch(e){toast(e.message)}
@@ -1463,12 +1637,102 @@ function promptForVars(where,scope,serviceLabel,vars){
   app.insertBefore(box,app.firstChild);
 }
 
+/**
+ * "Set this folder up" — shown above the library when folder.state is
+ * "unset". Nothing is written until the button: checkboxes and radios only
+ * build up the list of names the click sends to /api/setup.
+ */
+function setupPanel(){
+  const sug=S.suggestion||{needed:[],files:0,picks:[],ambiguous:[],uncovered:[],provider:{}};
+  const c=$('<div class="card"></div>');
+  c.append($('<div class="svc"><b>This folder isn\'t set up for hush yet</b></div>'));
+
+  if(sug.needed.length){
+    const word=sug.files===1?"file":"files";
+    c.append($('<div class="muted">Its code references '+esc(sug.needed.join(", "))+' ('+sug.files+' '+word+').</div>'));
+  }else{
+    c.append($('<div class="muted">No env-var references were found here — pick sets from your library below, or add one.</div>'));
+  }
+
+  if(!S.global.exists||!S.library.length){
+    c.append($('<div class="muted">Your library has nothing to offer yet — set it up below, then come back here.</div>'));
+  }
+
+  const checks={};
+  if(S.library.length){
+    if(sug.picks.length)c.append($('<div class="muted">Your library covers them:</div>'));
+    S.library.forEach(function(set){
+      const picked=sug.picks.indexOf(set.name)>-1;
+      const row=$('<div class="row stagerow"></div>');
+      const cb=document.createElement("input");
+      cb.type="checkbox";cb.checked=picked;
+      checks[set.name]=cb;
+      row.append(cb);
+      row.append($('<div class="k">'+esc(set.label)+'</div>'));
+      const covered=Object.keys(sug.provider).filter(function(k){return sug.provider[k]===set.name});
+      row.append($('<div class="v">'+esc((covered.length?covered:set.keys).join(", "))+'</div>'));
+      c.append(row);
+    });
+  }
+
+  const radios={};
+  sug.ambiguous.forEach(function(a){
+    const row=$('<div class="row stagerow"></div>');
+    row.append($('<div class="k">'+esc(a.key)+'</div>'));
+    row.append($('<div class="v">is in more than one set</div>'));
+    const group=document.createElement("div");
+    radios[a.key]=group;
+    a.options.forEach(function(optName){
+      const set=S.library.find(function(x){return x.name===optName});
+      const label=document.createElement("label");
+      label.style.marginRight="12px";
+      const r=document.createElement("input");
+      r.type="radio";r.name="amb-"+a.key;r.value=optName;
+      label.append(r,document.createTextNode(" "+(set?set.label:optName)));
+      group.append(label);
+    });
+    row.append(group);
+    c.append(row);
+  });
+
+  if(sug.uncovered.length){
+    c.append($('<div class="muted">Not in your library: '+esc(sug.uncovered.join(", "))+' — add it to a set later</div>'));
+  }
+
+  const agentRow=document.createElement("label");
+  agentRow.className="muted";
+  const agentCb=document.createElement("input");
+  agentCb.type="checkbox";
+  agentRow.append(agentCb,document.createTextNode(" An AI agent will use secrets here (turn approvals on)"));
+  c.append(agentRow);
+
+  const go=$('<button type="button" class="primary">Use these here</button>');
+  go.onclick=async function(){
+    const use=[];
+    Object.keys(checks).forEach(function(name){if(checks[name].checked)use.push(name)});
+    Object.keys(radios).forEach(function(key){
+      const chosen=radios[key].querySelector("input[type=radio]:checked");
+      if(chosen&&use.indexOf(chosen.value)<0)use.push(chosen.value);
+    });
+    try{
+      await refresh(await api("/api/setup",{use:use,agent:agentCb.checked}));
+      toast("this folder now uses "+use.length+" set(s)");
+    }catch(e){toast(e.message)}
+  };
+  c.append(go);
+  return c;
+}
+
 function render(){
-  document.getElementById("vname").textContent="/ "+S.vault;
+  document.getElementById("vname").textContent=S.vault?("/ "+S.vault):"";
   document.getElementById("who").textContent="you are "+S.me.name+" · "+S.members.length+" member(s) · this file is safe to commit";
   const app=document.getElementById("app");app.innerHTML="";
 
   app.append(STAGES.length?stagingPanel():dropCard());
+
+  // The folder itself may need setting up before there is a project to speak
+  // of at all — shown above the library, since picks for it come from there.
+  if(S.folder&&S.folder.state==="unset")app.append(setupPanel());
 
   // One list of sets, at two levels — the point of the screen, so it comes
   // first. Library and project cards are the same shape with the same toggle;
@@ -1483,9 +1747,20 @@ function render(){
     S.library.forEach(set=>app.append(envSetCard(set,"library")));
   }
 
-  if(S.standalone){
+  const fstate=S.folder?S.folder.state:(S.standalone?"unset":"vault");
+  if(fstate==="unset"){
     app.append($('<h2>This project</h2>'));
-    app.append($('<div class="empty">You opened hush outside a project, so there is nothing here.<br>Run <b>hush init</b> in a repo, then <b>hush ui</b> there, to use a set in it.</div>'));
+    app.append($('<div class="empty">Set this folder up above to give it a project of its own.</div>'));
+  }else if(fstate==="links-only"){
+    app.append($('<h2>This project <span class="h2note">committed with the repo · your team gets these</span></h2>'));
+    const box=$('<div class="card"></div>');
+    box.append($('<div class="muted">no vault of its own yet — one is made the first time you add a project secret or a teammate</div>'));
+    if(S.used.length){
+      const chips=$('<div class="setkeys"></div>');
+      S.used.forEach(function(name){chips.append($('<span class="chip">'+esc(name)+'</span>'))});
+      box.append(chips);
+    }
+    app.append(box);
   }else{
     app.append($('<h2>This project <span class="h2note">committed with the repo · your team gets these</span></h2>'));
     if(!S.project.length)app.append($('<div class="empty">Drop a .env above, or make a set below.</div>'));
@@ -1504,7 +1779,8 @@ function render(){
     if(m.name!==S.me.name){
       const rm=$('<button class="link danger">remove</button>');
       rm.onclick=async()=>{if(!confirm("Remove "+m.name+"? Every value is re-encrypted and they lose access."))return;
-        const r2=await api("/api/team",{action:"remove",name:m.name});await refresh(r2);toast(r2.notice||"removed")};
+        const r2=await api("/api/team",{action:"remove",name:m.name});await refresh(r2);
+        toast(r2.vaultCreated?"made this folder's own vault — commit .hush/vault.json":(r2.notice||"removed"))};
       r.append(rm);
     }
     tc.append(r);
@@ -1516,8 +1792,9 @@ function render(){
   g2.append(nm,pk);tf.append(g2);
   tf.append($('<button type="submit">Give them access</button>'));
   tf.onsubmit=async(e)=>{e.preventDefault();if(!nm.value||!pk.value)return;
-    await refresh(await api("/api/team",{name:nm.value.trim(),pk:pk.value.trim()}));
-    toast("added "+nm.value);tf.reset()};
+    const res=await api("/api/team",{name:nm.value.trim(),pk:pk.value.trim()});
+    await refresh(res);
+    toast(res.vaultCreated?"made this folder's own vault — commit .hush/vault.json":"added "+nm.value);tf.reset()};
   tc.append(tf);app.append(tc);
 }
 

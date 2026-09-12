@@ -61,5 +61,9 @@
   "devDependencies": {
     "@types/node": "^22.20.2",
     "typescript": "^5.8.0"
-  }
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
 }

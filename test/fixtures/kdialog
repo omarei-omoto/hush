@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+/**
+ * Stands in for the real KDE `kdialog` binary so approval.test.ts can drive
+ * dialogs.ts's kdialog backend without a display, on macOS or headless Linux
+ * CI. Identical scripting contract to the `zenity` fixture next to this file
+ * — see its header — kept as a separate file because a real install would
+ * never have one binary answer to both names.
+ */
+const fs = require("fs");
+
+if (process.env.FAKE_ARGV_LOG) {
+  fs.appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)) + "\n");
+}
+
+setTimeout(() => {
+  if (process.env.FAKE_STDOUT) process.stdout.write(process.env.FAKE_STDOUT);
+  if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR);
+  process.exit(Number(process.env.FAKE_EXIT || "0"));
+}, Number(process.env.FAKE_SLEEP || "0"));

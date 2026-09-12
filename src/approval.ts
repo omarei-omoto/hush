@@ -15,15 +15,16 @@
  *     in the agent's tool result — so the transcript and the screen can be
  *     checked against each other.
  *
- * macOS gets native dialogs. Everywhere else falls back to a pending-request
- * file that the human resolves with `hush approve` in their own terminal.
+ * macOS, GNOME and KDE desktops get native dialogs (see dialogs.ts for how a
+ * backend is picked). Everywhere else falls back to a pending-request file
+ * that the human resolves with `hush approve` in their own terminal.
  */
-import { execFile } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
 import { authenticate, type BiometryMode, type BiometryResult } from "./biometry.ts";
+import { detectBackend, ttlLabel } from "./dialogs.ts";
 
 export type Decision = "once" | "session" | "deny" | "timeout";
 
@@ -57,11 +58,14 @@ export interface ApprovalResult {
 }
 
 /**
- * Evaluated per call, not at import: HUSH_APPROVAL_MODE=file forces the terminal
- * flow, and tests set it after this module is already loaded.
+ * Evaluated per call, not at import: HUSH_APPROVAL_MODE=file forces the
+ * terminal flow, tests set it (and HUSH_DIALOG, PATH, DISPLAY) after this
+ * module is already loaded, and a `platformFn` override — real callers never
+ * pass one — lets tests exercise the Linux branches of dialogs.ts's
+ * `detectBackend` from any host. See `ApprovalDeps.platform`.
  */
-const useNativeDialogs = (): boolean =>
-  platform() === "darwin" && process.env.HUSH_APPROVAL_MODE !== "file";
+const currentBackend = (platformFn: () => string = platform) =>
+  detectBackend({ env: process.env, platform: platformFn });
 
 /**
  * scope -> epoch ms when the session approval lapses. Process-lifetime only.
@@ -152,40 +156,7 @@ export function clearApprovalCache(hushDir?: string): void {
 
 const newCode = (): string => String(randomInt(1000, 10000));
 
-function run(cmd: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; out: string }> {
-  return new Promise((res) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 1 << 20 }, (err, stdout) => {
-      res({ ok: !err, out: String(stdout ?? "").trim() });
-    });
-  });
-}
-
-/** AppleScript string literal escaping. */
-const asStr = (s: string): string => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-
 // ------------------------------------------------------------------ approval
-
-async function askMac(req: ApprovalRequest, code: string, timeoutMs: number): Promise<Decision> {
-  const body = [
-    req.summary,
-    "",
-    ...(req.detail ?? []),
-    "",
-    `Approval code: ${code}`,
-  ].join("\n");
-
-  const script =
-    `display dialog ${asStr(body)} with title ${asStr("hush — approve this?")} ` +
-    `buttons {"Deny", "Allow once", "Allow 15 min"} default button "Allow once" ` +
-    `with icon caution giving up after ${Math.floor(timeoutMs / 1000)}`;
-
-  const { ok, out } = await run("osascript", ["-e", script], timeoutMs + 2000);
-  if (!ok) return "timeout";
-  if (/gave up:true/.test(out)) return "timeout";
-  if (/button returned:Allow 15 min/.test(out)) return "session";
-  if (/button returned:Allow once/.test(out)) return "once";
-  return "deny";
-}
 
 /** Fallback: drop a request file and wait for `hush approve` to answer it. */
 async function askViaFile(
@@ -229,9 +200,16 @@ async function askViaFile(
  * makes every fingerprint check succeed, which anything running as you — an
  * agent included — could set. A parameter can only be supplied by a caller
  * inside this process, and no production caller supplies one.
+ *
+ * `platform` is the same idea applied to dialog-backend selection: real code
+ * never sets it (the default is node:os's actual `platform()`), but a test
+ * can claim to be "linux" while running on this Mac to exercise the zenity/
+ * kdialog branches of dialogs.ts's `detectBackend` — again a parameter rather
+ * than an env var, for the same reason.
  */
 export interface ApprovalDeps {
   authenticate: (reason: string, timeoutMs: number) => Promise<BiometryResult>;
+  platform?: () => string;
 }
 
 export async function requestApproval(
@@ -282,9 +260,12 @@ export async function requestApproval(
     // "preferred" and unavailable: fall through to the click dialog.
   }
 
-  const native = useNativeDialogs();
-  const decision = native
-    ? await askMac(req, code, timeoutMs)
+  const backend = currentBackend(deps.platform);
+  const decision = backend
+    ? await backend.approve(
+        { summary: req.summary, detail: req.detail ?? [], code, ttlLabel: ttlLabel(req.ttlSeconds) },
+        timeoutMs,
+      )
     : await askViaFile(hushDir, req, code, timeoutMs);
 
   if (decision === "session") {
@@ -292,7 +273,7 @@ export async function requestApproval(
     granted.set(key, expiresAt);
     writeGrant(hushDir, req.scope, expiresAt);
   }
-  return { decision, code, cached: false, via: native ? "dialog" : "terminal" };
+  return { decision, code, cached: false, via: backend ? "dialog" : "terminal" };
 }
 
 /** For `hush approve`: list and answer pending requests on non-macOS hosts. */
@@ -325,23 +306,9 @@ export async function promptForSecretNatively(
   context: string[],
   timeoutMs = 180_000,
 ): Promise<SecretEntryResult> {
-  if (!useNativeDialogs()) return { value: null, cancelled: false };
-
-  const body = [...context, "", `Paste the value for ${label}:`].join("\n");
-  const script =
-    `display dialog ${asStr(body)} with title ${asStr("hush — add a secret")} ` +
-    `default answer "" with hidden answer ` +
-    `buttons {"Cancel", "Save"} default button "Save" with icon note ` +
-    `giving up after ${Math.floor(timeoutMs / 1000)}`;
-
-  const { ok, out } = await run("osascript", ["-e", script], timeoutMs + 2000);
-  if (!ok || /gave up:true/.test(out) || /button returned:Cancel/.test(out)) {
-    return { value: null, cancelled: true };
-  }
-  // `button returned:Save, text returned:<value>, gave up:false`
-  const m = out.match(/text returned:([\s\S]*?)(?:, gave up:(?:true|false))?$/);
-  const value = m ? m[1] : "";
-  return { value: value || null, cancelled: !value };
+  const backend = currentBackend();
+  if (!backend) return { value: null, cancelled: false };
+  return backend.enterSecret({ title: "hush — add a secret", lines: context, label }, timeoutMs);
 }
 
-export const nativeDialogsAvailable = (): boolean => useNativeDialogs();
+export const nativeDialogsAvailable = (): boolean => currentBackend() !== null;

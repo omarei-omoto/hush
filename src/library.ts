@@ -299,16 +299,35 @@ export function suggestSets(needed: string[], sets: { name: string; keys: string
     const best = Math.max(...scored.map((x) => x.covers.length));
     const top = scored.filter((x) => x.covers.length === best);
     if (top.length > 1) {
+      let contestedThisRound = 0;
       for (const key of [...remaining]) {
         const options = top.filter((x) => x.covers.includes(key)).map((x) => x.s.name);
         if (options.length > 1) {
           ambiguous.push({ key, options });
           remaining.delete(key);
+          contestedThisRound++;
         }
       }
       // Keys only one of the tied sets offers are still decidable by coverage
       // on the next pass, once the contested keys are out of the count.
-      if (!ambiguous.length) break;
+      if (contestedThisRound) continue;
+      // The tie was only in total coverage count, not in any actual key: the
+      // scan above just proved every remaining key has at most one provider
+      // among `top`, so their covered keys are disjoint and none of this is a
+      // real choice — take them all. Checking cumulative `ambiguous.length`
+      // here (as this used to) breaks two ways: a three-way tie over disjoint
+      // keys with no ambiguity yet (ambiguous.length === 0) fell through to
+      // `break` and reported perfectly coverable keys as `uncovered`; the same
+      // tie arriving after an earlier, unrelated ambiguity (ambiguous.length
+      // > 0 already) instead skipped the break and looped on this exact state
+      // forever, since nothing here changes `remaining`.
+      for (const { s, covers } of top) {
+        picks.push(s.name);
+        for (const key of covers) {
+          provider[key] = s.name;
+          remaining.delete(key);
+        }
+      }
       continue;
     }
     const pick = top[0];

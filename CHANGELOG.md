@@ -11,6 +11,11 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 - **Secure prompts on Linux** through `zenity` / `kdialog`, so off-transcript key entry and approvals are no longer macOS-only.
 - `docs/SAFETY.md` — which of the security model matters in your situation.
 - Windows declared unsupported (`package.json` `os`) until it has been run.
+- **Your library's `default` is your global environment** — under everything, in every folder; `hush add K=v --library` with no set name lands there.
+- `hush scan` reconciles against every set the project uses, not only the project vault.
+- `hush install-mcp` / `install-skill` work in a folder that only uses library sets.
+- `hush doctor` lists every set once and reports a repo policy that tried to go below your floor.
+- The MCP fallback for key entry says which desktops have a dialog; the approval "covers" line names the policy's real TTL.
 
 ## 0.1.3 — 2026-09-12
 

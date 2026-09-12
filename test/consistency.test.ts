@@ -142,7 +142,10 @@ describe("configuration has no dead knobs", () => {
     const fields = [...new Set([...iface.matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((m) => m[1]))];
     assert.ok(fields.length >= 6, `only found ${fields.length} policy fields`);
 
-    const consumers = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts"]
+    // policy.ts holds checkCommand/checkEnv/checkScopes, which is where
+    // allowCommands and allowEnvs are actually read now that mcp.ts and cli.ts
+    // both call them rather than each keeping their own copy.
+    const consumers = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
       .map((f) => read("src/" + f))
       .join("\n");
     for (const field of fields) {

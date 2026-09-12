@@ -7,22 +7,29 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, statSync, chmodSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { once } from "node:events";
 
 import { Vault } from "../src/vault.ts";
 import { generateIdentity, encodeSecret, encodePub } from "../src/crypto.ts";
 import { biometryStatus } from "../src/biometry.ts";
 import { ageAvailable } from "../src/age.ts";
+import { pendingRequests, answerRequest } from "../src/approval.ts";
 import { execFileSync } from "node:child_process";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
 
-function project() {
+/**
+ * @param envOverride  Merged over the base env — e.g. `{ HUSH_APPROVAL_MODE: "file" }`
+ * so a test that turns on `requireApproval` does not hang on a real macOS
+ * dialog it has no way to answer.
+ */
+function project(envOverride: NodeJS.ProcessEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), "hush-cli-home-"));
   const root = mkdtempSync(join(tmpdir(), "hush-cli-proj-"));
   mkdirSync(join(root, ".hush"), { recursive: true });
@@ -37,6 +44,7 @@ function project() {
     HUSH_BIOMETRY: "off",
     HUSH_NO_NUDGE: "1",
     NO_COLOR: "1",
+    ...envOverride,
   };
   /**
    * @param input piped to the command — `hush set` reads its value from stdin.
@@ -56,7 +64,11 @@ function project() {
     });
     return { out: (r.stdout ?? "") + (r.stderr ?? ""), code: r.status ?? 1 };
   };
-  return { home, root, run, cleanup: () => { for (const d of [home, root]) rmSync(d, { recursive: true, force: true }); } };
+  return {
+    home, root, env, run,
+    hushDir: join(root, ".hush"),
+    cleanup: () => { for (const d of [home, root]) rmSync(d, { recursive: true, force: true }); },
+  };
 }
 
 describe("hush level", () => {
@@ -784,4 +796,181 @@ describe("hush secure --biometry will not promise what the hardware cannot do", 
       }
     },
   );
+});
+
+describe("the CLI enforces .hush/policy.json — an agent's shell must not bypass what the MCP server enforces", () => {
+  // Every test in this block that turns on requireApproval also sets
+  // HUSH_APPROVAL_MODE=file and a short approvalTimeoutSeconds: on macOS,
+  // an enforced approval with neither would open a real osascript dialog and
+  // hang the test forever.
+
+  test("reveal denied by biometry: `hush get --yes` still refuses", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
+      );
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--yes"]);
+      assert.equal(r.code, 1, r.out);
+      assert.ok(!r.out.includes("sk_live_cli"), `a credential leaked past a denied approval:\n${r.out}`);
+      assert.match(r.out, /biometry|denied/i);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("export is gated as reveal; --names is not, because it reveals nothing", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
+      );
+      const exported = p.run(["export"]);
+      assert.equal(exported.code, 1, exported.out);
+      assert.ok(!exported.out.includes("sk_live_cli"), `export leaked a value past a denied approval:\n${exported.out}`);
+
+      const names = p.run(["export", "--names"]);
+      assert.equal(names.code, 0, names.out);
+      assert.match(names.out, /STRIPE_SECRET_KEY/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("allowCommands is a whitelist enforced by the CLI too", () => {
+    // "sh" would be refused by the built-in deny floor regardless of
+    // allowCommands (it is one of the built-in denyCommands), which would
+    // test the wrong mechanism. "git" is not on that floor, so refusing it
+    // can only be allowCommands doing its job.
+    const p = project();
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowCommands: ["npm"] }));
+
+      const refused = p.run(["run", "--", "git", "--version"]);
+      assert.equal(refused.code, 1, refused.out);
+      assert.match(refused.out, /allowCommands/);
+
+      const allowed = p.run(["run", "--quiet", "--", "npm", "--version"]);
+      assert.equal(allowed.code, 0, allowed.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the deny floor holds even with allowCommands unset", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      const r = p.run(["run", "--", "env"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /denied by default/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("allowEnvs restricts `hush run` to the environments named", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowEnvs: ["default"] }));
+      assert.equal(p.run(["set", "K", "--env", "prod"], "secret_value_1234\n").code, 0);
+
+      const r = p.run(["run", "--env", "prod", "--", "npm", "--version"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Policy forbids/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("run gated by requireApproval times out with nothing spawned", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const r = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(r.code, 1, r.out);
+      assert.ok(!r.out.includes("RAN"), `the command ran despite a timed-out approval:\n${r.out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a grant persisted by an earlier process is honoured, and its expiry is respected", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const grantsPath = join(p.hushDir, "grants.local.json");
+
+      // "run:default" is exactly the scope `hush run` computes for a plain,
+      // default-env run with no service accounts chosen — the same shape
+      // mcp.ts's hush_run builds, so a grant either surface hands out is
+      // honoured by the other.
+      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() + 60_000 }));
+      const granted = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(granted.code, 0, granted.out);
+      assert.match(granted.out, /RAN/);
+
+      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() - 1000 }));
+      const expired = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(expired.code, 1, expired.out);
+      assert.ok(!expired.out.includes("RAN"), `an expired grant was honoured:\n${expired.out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("with no policy file at all, the CLI is unchanged — the gate is opt-in, not a default refusal", () => {
+    const p = project();
+    try {
+      assert.ok(!existsSync(join(p.hushDir, "policy.json")), "test fixture drifted: a policy file exists");
+      assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_live_cli/);
+      assert.match(p.run(["run", "--", "echo", "RAN"]).out, /RAN/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a session grant is written to a file only its owner can read", async () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
+
+      // Pre-seeded world-readable, the way a stray file (or an earlier hush
+      // version) might leave it: writeFileSync only applies `mode` when it
+      // creates the file, so this is the case that actually exercises the fix
+      // rather than accidentally passing because the file happened to be new.
+      const grantsPath = join(p.hushDir, "grants.local.json");
+      writeFileSync(grantsPath, "{}", { mode: 0o644 });
+      chmodSync(grantsPath, 0o644);
+      assert.equal(statSync(grantsPath).mode & 0o777, 0o644, "fixture is not world-readable");
+
+      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "echo", "RAN"], {
+        cwd: p.root,
+        env: p.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      child.stdout?.on("data", (d) => (stdout += String(d)));
+      let stderr = "";
+      child.stderr?.on("data", (d) => (stderr += String(d)));
+
+      let seen: ReturnType<typeof pendingRequests> = [];
+      for (let i = 0; i < 80 && !seen.length; i++) {
+        seen = pendingRequests(p.hushDir);
+        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(seen.length, 1, `no pending approval request appeared:\n${stdout}${stderr}`);
+      answerRequest(p.hushDir, seen[0].id, "session");
+
+      const [code] = await once(child, "exit");
+      assert.equal(code, 0, stdout + stderr);
+
+      assert.ok(existsSync(grantsPath), "no grants file was written for the session approval");
+      assert.equal(statSync(grantsPath).mode & 0o777, 0o600);
+    } finally {
+      p.cleanup();
+    }
+  });
 });

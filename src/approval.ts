@@ -20,7 +20,7 @@
  */
 import { execFile } from "node:child_process";
 import { randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
 import { authenticate, type BiometryMode, type BiometryResult } from "./biometry.ts";
@@ -72,8 +72,83 @@ const granted = new Map<string, number>();
 
 const grantKey = (hushDir: string, scope: string): string => `${hushDir}\u0000${scope}`;
 
-/** Test seam: forget every cached approval. */
-export const clearApprovalCache = (): void => void granted.clear();
+const grantsFilePath = (hushDir: string): string => join(hushDir, "grants.local.json");
+
+/**
+ * Every grants file this process has written, so `clearApprovalCache()` can be
+ * called with no argument (as every existing test does) and still undo them.
+ */
+const writtenGrantFiles = new Set<string>();
+
+/**
+ * A CLI invocation is a new process every time, so the in-memory `granted` map
+ * above never survives from one command to the next: "Allow 15 min" would in
+ * practice mean "allow this one command", and the user would be re-prompted
+ * every single time. Mirroring session grants to a file next to the policy
+ * lets the next `hush` process (and the long-lived MCP server, which shares
+ * this module) see what an earlier process was told.
+ *
+ * This is a convenience cache, not the source of truth for whether an action
+ * is allowed, so a corrupt or unreadable file is treated as "no grants"
+ * rather than a crash, and expired entries are simply not returned.
+ */
+function readGrantsFile(hushDir: string): Record<string, number> {
+  try {
+    const raw = JSON.parse(readFileSync(grantsFilePath(hushDir), "utf8")) as Record<string, unknown>;
+    const now = Date.now();
+    const live: Record<string, number> = {};
+    for (const [scope, expiresAt] of Object.entries(raw)) {
+      if (typeof expiresAt === "number" && expiresAt > now) live[scope] = expiresAt;
+    }
+    return live;
+  } catch {
+    return {};
+  }
+}
+
+function writeGrant(hushDir: string, scope: string, expiresAt: number): void {
+  const path = grantsFilePath(hushDir);
+  try {
+    const grants = readGrantsFile(hushDir);
+    grants[scope] = expiresAt;
+    writeFileSync(path, JSON.stringify(grants), { mode: 0o600 });
+    // writeFileSync only applies `mode` on creation, so a grants file left over
+    // from an earlier run would otherwise keep whatever mode it started with;
+    // the same fix is in cli.ts's `hush export --out`.
+    chmodSync(path, 0o600);
+    writtenGrantFiles.add(path);
+  } catch {
+    // Best-effort: worst case the next process re-prompts instead of reusing
+    // a grant that never made it to disk, which is the safe direction to fail.
+  }
+}
+
+/**
+ * Test seam: forget every cached approval, in memory and on disk.
+ *
+ * With a `hushDir`, only that project's grants are cleared: memory entries
+ * keyed to it, and its grants file. With none, every grant this process has
+ * ever handed out is cleared, which is what every existing caller wants: they
+ * run inside a single node:test process and expect a clean slate between
+ * tests without knowing which scratch directory a previous test used (which
+ * may already be deleted, hence the try/catch rather than asserting it
+ * existed).
+ */
+export function clearApprovalCache(hushDir?: string): void {
+  if (hushDir) {
+    const prefix = `${hushDir}\u0000`;
+    for (const k of granted.keys()) if (k.startsWith(prefix)) granted.delete(k);
+    const path = grantsFilePath(hushDir);
+    try { unlinkSync(path); } catch { /* nothing to remove */ }
+    writtenGrantFiles.delete(path);
+    return;
+  }
+  granted.clear();
+  for (const path of writtenGrantFiles) {
+    try { unlinkSync(path); } catch { /* already gone, e.g. its scratch dir was rmSync'd */ }
+  }
+  writtenGrantFiles.clear();
+}
 
 const newCode = (): string => String(randomInt(1000, 10000));
 
@@ -167,8 +242,13 @@ export async function requestApproval(
   const code = newCode();
 
   const key = grantKey(hushDir, req.scope);
-  const until = granted.get(key);
+  // Memory first (cheap, and always current within this process), then the
+  // file another process — most often an earlier `hush` invocation — may have
+  // written. Found-on-disk is backfilled into memory so the rest of this
+  // process does not re-read the file for the same scope.
+  const until = granted.get(key) ?? readGrantsFile(hushDir)[req.scope];
   if (until && until > Date.now()) {
+    granted.set(key, until);
     return { decision: "session", code, cached: true, via: "cache" };
   }
 
@@ -182,7 +262,9 @@ export async function requestApproval(
     const bio = await deps.authenticate(reason, Math.min(timeoutMs, 60_000));
 
     if (bio === "ok") {
-      granted.set(key, Date.now() + req.ttlSeconds * 1000);
+      const expiresAt = Date.now() + req.ttlSeconds * 1000;
+      granted.set(key, expiresAt);
+      writeGrant(hushDir, req.scope, expiresAt);
       return { decision: "session", code, cached: false, via: "biometry" };
     }
     if (bio === "denied") {
@@ -206,7 +288,9 @@ export async function requestApproval(
     : await askViaFile(hushDir, req, code, timeoutMs);
 
   if (decision === "session") {
-    granted.set(key, Date.now() + req.ttlSeconds * 1000);
+    const expiresAt = Date.now() + req.ttlSeconds * 1000;
+    granted.set(key, expiresAt);
+    writeGrant(hushDir, req.scope, expiresAt);
   }
   return { decision, code, cached: false, via: native ? "dialog" : "terminal" };
 }

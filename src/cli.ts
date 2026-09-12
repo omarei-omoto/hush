@@ -20,7 +20,8 @@ import { loadIdentity, createIdentity, requireIdentity, publicKeyOf, hushHome } 
 import { scanRepo, reconcile, parseEnvFile } from "./scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "./run.ts";
 import { preview } from "./redact.ts";
-import { serveMcp, loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
+import { serveMcp, loadPolicy, DEFAULT_POLICY, type Policy } from "./mcp.ts";
+import { checkCommand, checkEnv, checkScopes } from "./policy.ts";
 import { serveUi } from "./ui.ts";
 import {
   compose, librarySets, loadLinks, saveLinks, openGlobal,
@@ -30,7 +31,7 @@ import { VERSION } from "./version.ts";
 import { assess } from "./posture.ts";
 import { checkAndRecord, inspect, acceptCurrent, describeRollback } from "./integrity.ts";
 import { renderLevel, runSecure, maybeNudge, snooze } from "./secure.ts";
-import { pendingRequests, answerRequest, nativeDialogsAvailable } from "./approval.ts";
+import { pendingRequests, answerRequest, nativeDialogsAvailable, requestApproval } from "./approval.ts";
 import { biometryStatus, ensureHelper, authenticate } from "./biometry.ts";
 import {
   ageAvailable, ageVersion, ageBinary, ageIdentityPath,
@@ -259,6 +260,30 @@ function ctx(a: Args): Ctx {
   };
 }
 
+/**
+ * The CLI is opt-in: with no `.hush/policy.json` at all, every command behaves
+ * exactly as it always has — that is rung 1 of the security ladder (see
+ * posture.ts and the README), and it must never gain a gate nobody asked for.
+ * `loadPolicy()` cannot tell "no file" from "a file with nothing unusual in
+ * it" — both return DEFAULT_POLICY — so the distinction is made here with
+ * `existsSync` before ever calling it.
+ */
+function policyFor(hushDir: string): Policy | null {
+  return existsSync(join(hushDir, "policy.json")) ? loadPolicy(hushDir) : null;
+}
+
+/**
+ * Turn a deny/timeout approval decision into the same kind of exit this
+ * command would take for any other refusal. Denied and timed-out are worded
+ * differently because a human said no is not the same event as nobody
+ * answering, even though both refuse the action.
+ */
+function dieOnApproval(ap: { decision: string; note?: string }, what: string): void {
+  if (ap.decision !== "deny" && ap.decision !== "timeout") return;
+  const reason = ap.decision === "deny" ? "denied" : "timed out";
+  die(`Approval ${reason} for ${what}.` + (ap.note ? ` ${ap.note}.` : ""));
+}
+
 function ensureGitignore(hushDir: string): void {
   const p = join(hushDir, ".gitignore");
   const body = ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n");
@@ -359,6 +384,19 @@ async function cmdSet(a: Args): Promise<void> {
   }
   if (!value) die("Empty value, nothing written.");
 
+  const policy = policyFor(hushDir);
+  if (policy?.requireApproval.includes("add")) {
+    const ap = await requestApproval(hushDir, {
+      action: "add",
+      summary: `Set ${key} (${env})`,
+      scope: `add:${env}/${key}`,
+      ttlSeconds: policy.approvalTtlSeconds,
+      timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+      biometry: policy.biometry,
+    });
+    dieOnApproval(ap, `setting ${key}`);
+  }
+
   const existed = vault.has(env, key);
   vault.set(id, env, key, value, str(a, "note"));
   vault.save();
@@ -374,6 +412,23 @@ async function cmdGet(a: Args): Promise<void> {
   const key = a._[0];
   if (!key) die("Usage: hush get <KEY>");
   if (!vault.has(env, key)) die(`No secret "${key}" in env "${env}".`);
+
+  const policy = policyFor(hushDir);
+  if (policy) {
+    checkEnv(policy, env);
+    if (policy.requireApproval.includes("reveal")) {
+      const ap = await requestApproval(hushDir, {
+        action: "reveal",
+        summary: `Reveal ${key} (${env})`,
+        scope: `reveal:${env}/${key}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+      });
+      // --yes only skips the scrollback warning below; it never skips policy.
+      dieOnApproval(ap, `revealing ${key}`);
+    }
+  }
 
   if (!bool(a, "yes")) {
     warn("This prints a live credential to your terminal, where it stays in scrollback.");
@@ -552,6 +607,37 @@ async function cmdRun(a: Args): Promise<void> {
   const choices = chooseAccounts(a, hushDir);
   // Library sets this project links, then its own env, then the chosen accounts.
   const { secrets, layers, missing } = compose(vault, id, hushDir, env, choices);
+
+  // Same checks the MCP server applies to hush_run, so a plain shell cannot
+  // walk around a policy an agent's MCP tools would have been refused by.
+  const policy = policyFor(hushDir);
+  if (policy) {
+    checkCommand(policy, argv[0]);
+    checkEnv(policy, env);
+    checkScopes(policy, layers);
+    if (policy.requireApproval.includes("run")) {
+      const using = choices.length ? choices.map((c) => `${c.service}:${c.account}`).join(", ") : env;
+      const ap = await requestApproval(hushDir, {
+        action: "run",
+        summary: `Run:  ${argv.join(" ")}`.trim(),
+        detail: [
+          `Using accounts:  ${using}`,
+          `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
+          `Directory:  ${process.cwd()}`,
+        ],
+        // Same shape mcp.ts's hush_run builds, so a grant cached by one
+        // surface (a "session" approval from either) is honoured by the other.
+        scope: `run:${layers.join("+")}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+      });
+      audit(hushDir, { actor: "cli", action: "approval", on: "run", decision: ap.decision, via: ap.via, code: ap.code });
+      // Denied or timed out: exit before the child is ever spawned.
+      dieOnApproval(ap, `running "${argv[0]}"`);
+    }
+  }
+
   if (missing.length) {
     warn(`This project uses ${missing.join(", ")}, which your library does not have.`);
     info(dim(`  Make your own:  hush env new ${missing[0]} --from .env`));
@@ -617,11 +703,34 @@ async function cmdExport(a: Args): Promise<void> {
   const { secrets, missing } = compose(vault, id, hushDir, env, choices);
   if (missing.length) warn(`Not exported: ${missing.join(", ")} — your library does not have them.`);
 
-  // Used by the shell hook to know what to unset again on the way out.
+  // Used by the shell hook to know what to unset again on the way out. Reveals
+  // no value, so this is never gated — the hook depends on it always working.
   if (bool(a, "names")) {
     for (const k of Object.keys(secrets).sort()) out(k);
     return;
   }
+
+  // Everything past here writes values somewhere (stdout or --out), so it is
+  // the "reveal" action regardless of format.
+  const policy = policyFor(hushDir);
+  if (policy) {
+    checkEnv(policy, env);
+    checkScopes(policy, choices.map((c) => scopeOf(c.service, c.account)));
+    if (policy.requireApproval.includes("reveal")) {
+      const using = choices.length ? choices.map((c) => `${c.service}:${c.account}`).join(", ") : env;
+      const ap = await requestApproval(hushDir, {
+        action: "reveal",
+        summary: `Export ${Object.keys(secrets).length} secret(s) from env "${env}"`,
+        detail: [`Using accounts:  ${using}`],
+        scope: `reveal:export:${env}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+      });
+      dieOnApproval(ap, "export");
+    }
+  }
+
   const format = str(a, "format") || (bool(a, "shell") ? "shell" : "env");
   const outFile = str(a, "out");
 
@@ -1219,6 +1328,20 @@ async function cmdAdd(a: Args): Promise<void> {
   }
 
   const scope = scopeOf(service, account);
+
+  const policy = policyFor(hushDir);
+  if (policy?.requireApproval.includes("add")) {
+    const ap = await requestApproval(hushDir, {
+      action: "add",
+      summary: `Add ${serviceLabel(service)} account "${account}" (${vars.join(", ")})`,
+      scope: `add:${scope}`,
+      ttlSeconds: policy.approvalTtlSeconds,
+      timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+      biometry: policy.biometry,
+    });
+    dieOnApproval(ap, `adding ${service}/${account}`);
+  }
+
   info(`${bold(serviceLabel(service))} ${dim("/")} account ${cyan(account)}`);
   info(dim(`  ${vars.length} variable(s). Leave blank to skip one.`));
   info("");

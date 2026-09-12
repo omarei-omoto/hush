@@ -102,17 +102,26 @@ routinely slurped into an LLM's context — [researchers caught a coding agent
 uploading whole repos with `.env` credentials verbatim and
 unredacted](https://www.sonarsource.com/blog/your-secrets-are-leaking-to-ai-coding-agents/).
 
-The existing fixes each solve half the problem:
+The existing tools each cover part of this:
 
-| | What it gets right | What it misses |
+| | What it gets right | What it costs you |
 |---|---|---|
-| **SOPS / age** | per-recipient crypto, real revocation | no idea agents exist |
+| **SOPS / age** | per-recipient crypto, real revocation | no idea agents exist; YAML and key juggling |
 | **secretctl** | the agent story | explicitly single-user |
 | **dotenvx / nevr-env** | encrypted file in git | one key for the whole team, so no real revocation |
-| **Doppler / Infisical / Vault** | solve it properly | a server to run and seats to buy |
+| **1Password CLI + MCP** | real vault, real hardware, real audit, agent access | an account and a subscription for everyone on the team |
+| **Doppler / Infisical + MCP** | proper secrets management, agent access | a server to run or seats to buy |
 
-`hush` is the middle: age's security model, Doppler's ergonomics, an agent-blind
-access layer, and nothing to deploy. Full comparison in
+**hush is the local, free, no-account option**, not a replacement for the last
+two. If your team already pays for 1Password or Doppler, their MCP servers do
+what hush does with better hardware and a real audit trail — use them. hush is
+for the solo developer and the small team who want age's security model and an
+agent that cannot read a value, with nothing to sign up for and nothing to
+deploy: the git repo is the backend.
+
+Where the line is: the moment you need dynamic credentials, leasing, expiry, or
+an audit log someone else cannot edit, you have outgrown a file in git. hush
+will not get you there and does not pretend to. Full comparison in
 [RESEARCH.md](./RESEARCH.md).
 
 ---

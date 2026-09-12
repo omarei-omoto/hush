@@ -295,6 +295,41 @@ describe("library: composeSets()", () => {
     });
   });
 
+  // Bites: resolving "default" from one vault only makes the library's default
+  // apply in vault-less folders and vanish the moment a project gets a vault.
+  test("the library's default is the global floor under the project's default, in every folder", () => {
+    const home = scratch();
+    withHome(home, () => {
+      const { owner, project, hushDir } = projectSetup();
+      const library = makeGlobalVault(home, owner);
+      library.set(owner, "default", "SHARED", "from-library");
+      library.set(owner, "default", "GLOBAL_ONLY", "everywhere");
+      library.save();
+      project.set(owner, "default", "SHARED", "from-project");
+
+      const withProject = composeSets(project, owner, hushDir);
+      assert.equal(withProject.secrets.SHARED, "from-project", "the project's default must sit on top");
+      assert.equal(withProject.secrets.GLOBAL_ONLY, "everywhere", "the library's default was not injected under it");
+      assert.deepEqual(withProject.layers, [`${globalVaultName()}:default`, "default"]);
+
+      const noProject = composeSets(null, owner, hushDir);
+      assert.equal(noProject.secrets.GLOBAL_ONLY, "everywhere");
+      assert.deepEqual(noProject.layers, [`${globalVaultName()}:default`]);
+    });
+  });
+
+  // Bites: an always-present "global:default" layer would name an empty set
+  // in every approval prompt and "using" line.
+  test("an empty library default adds no layer", () => {
+    const home = scratch();
+    withHome(home, () => {
+      const { owner, project, hushDir } = projectSetup();
+      makeGlobalVault(home, owner).save();
+      project.set(owner, "default", "K", "v");
+      assert.deepEqual(composeSets(project, owner, hushDir).layers, ["default"]);
+    });
+  });
+
   test("a library-only set is found through a link", () => {
     const home = scratch();
     withHome(home, () => {

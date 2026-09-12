@@ -31,8 +31,9 @@ is a set name.
    project's vault, and which of them this project already uses.
 2. Pass the one they meant to `hush_run` as `sets: ["work-fal"]`.
 
-If they don't name one, this project's usual sets are used — its own `default`
-plus whatever it links. Don't ask which set unless there are several and no
+If they don't name one, this project's usual sets are used — the library's
+`default` (the user's global environment), the project's own `default`, plus
+whatever it links. Don't ask which set unless there are several and no
 obvious default.
 
 ## Running something that needs credentials

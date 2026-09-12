@@ -144,7 +144,9 @@ A set lives in one of two places:
 - **This project** — `.hush/vault.json`, committed, shared with your team.
 
 A project *uses* sets. Its own `default` set is always used, as the floor;
-everything else layers on top in the order you added it, later wins.
+everything else layers on top in the order you added it, later wins. Under
+even that sits your library's `default` — your **global environment**,
+injected in every folder (`hush add K=v --library` with no `--to` lands there).
 `.hush/envs.json` records only the *names* — a teammate who clones the repo
 gets "this project uses a set called acme-production" and supplies their own.
 

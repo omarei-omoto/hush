@@ -185,15 +185,28 @@ export function composeSets(
   const names = lastMentionWins([...usedSets(hushDir), ...extra]);
 
   for (const name of names) {
+    if (name === "default") {
+      // "default" is two floors, not one. The library's default set is the
+      // global environment — the pile a value lands in when nobody named a
+      // set — and it sits under everything in every folder; the project's own
+      // default sits on top of it. An empty library default adds no layer,
+      // so the "using …" line stays honest about what was actually injected.
+      if (library && library.sets().some((s) => s.name === "default" && s.keys.length)) {
+        Object.assign(secrets, library.materialize(id, "default"));
+        layers.push(`${globalVaultName()}:default`);
+      }
+      if (project?.hasSet("default")) {
+        Object.assign(secrets, project.materialize(id, "default"));
+        layers.push("default");
+      }
+      continue;
+    }
     if (project?.hasSet(name)) {
       Object.assign(secrets, project.materialize(id, name));
       layers.push(name);
     } else if (library?.hasSet(name)) {
       Object.assign(secrets, library.materialize(id, name));
       layers.push(`${globalVaultName()}:${name}`);
-    } else if (name === "default") {
-      // Every vault is born with one; an empty project simply has none.
-      continue;
     } else if (typed.has(name)) {
       // Plain names, because that is what `--use` accepts — a "main:work-fal"
       // in this list would be a name the person cannot type back.

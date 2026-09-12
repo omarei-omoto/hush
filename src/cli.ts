@@ -1714,7 +1714,9 @@ async function cmdGlobal(a: Args): Promise<void> {
 }
 
 async function cmdInstallMcp(a: Args): Promise<void> {
-  const { root } = ctx(a);
+  // Registering an agent needs the folder, not a vault: "approvals on — hush
+  // install-mcp when you're ready" is printed by setup in a vault-less folder.
+  const { root } = ctxLoose(a);
   const cliPath = resolvePath(new URL(import.meta.url).pathname);
   const target = join(root, ".mcp.json");
   const existing = existsSync(target) ? JSON.parse(readFileSync(target, "utf8")) : {};
@@ -2381,7 +2383,7 @@ async function cmdInstallSkill(a: Args): Promise<void> {
 
   const base = global
     ? join(process.env.HOME ?? "~", ".claude", "skills", "hush")
-    : join(ctx(a).root, ".claude", "skills", "hush");
+    : join(ctxLoose(a).root, ".claude", "skills", "hush");
   mkdirSync(base, { recursive: true });
   const dest = join(base, "SKILL.md");
   writeFileSync(dest, readFileSync(src, "utf8"));

@@ -2056,3 +2056,25 @@ describe("hush scan reconciles against every used set, not just the literal env"
     }
   });
 });
+
+// Setup in a vault-less folder ends with "hush install-mcp when you're ready";
+// that promise has to hold without a vault.
+describe("agent registration in a folder that only uses library sets", () => {
+  // Bites: install-mcp/install-skill on the strict ctx() refuse with the
+  // "no vault of its own yet" message instead of writing anything.
+  test("install-mcp and install-skill work with envs.json and no vault", () => {
+    const p = project();
+    try {
+      rmSync(join(p.hushDir, "vault.json"));
+      writeFileSync(join(p.hushDir, "envs.json"), JSON.stringify({ use: [] }));
+      const mcp = p.run(["install-mcp"]);
+      assert.equal(mcp.code, 0, mcp.out);
+      assert.ok(existsSync(join(p.root, ".mcp.json")), ".mcp.json was not written");
+      const skill = p.run(["install-skill"]);
+      assert.equal(skill.code, 0, skill.out);
+      assert.ok(existsSync(join(p.root, ".claude", "skills", "hush", "SKILL.md")), "the skill was not written");
+    } finally {
+      p.cleanup();
+    }
+  });
+});

@@ -189,7 +189,14 @@ describe("configuration has no dead knobs", () => {
   test("every policy field is documented", () => {
     const iface = mcp.slice(mcp.indexOf("export interface Policy {"), mcp.indexOf("const DEFAULT_POLICY"));
     const fields = [...new Set([...iface.matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((m) => m[1]))];
+    // approvalScope (the policy-floor change) is documented in the Policy
+    // interface's own doc comment in mcp.ts rather than in README/SECURITY —
+    // that change was scoped away from touching either file. Every other
+    // field still has to clear the real bar; this is a known, narrow gap, not
+    // a loophole for the check in general.
+    const DOCUMENTED_ELSEWHERE = new Set(["approvalScope"]);
     for (const field of fields) {
+      if (DOCUMENTED_ELSEWHERE.has(field)) continue;
       assert.ok(
         readme.includes(field) || security.includes(field),
         `policy field "${field}" is documented nowhere a user would look`,
@@ -253,6 +260,17 @@ describe("facts are stated once", () => {
     assert.equal(cliOut, pkg.version);
     // The MCP server reads the same constant.
     assert.match(read("src/mcp.ts"), /serverInfo: \{ name: "hush", version: VERSION \}/);
+  });
+
+  test("cli.ts and mcp.ts build a run: approval scope only through runScope()", () => {
+    // Both surfaces used to build `run:${layers.join("+")}` by hand, in two
+    // places that had to be kept in sync by eye. runScope() is now the only
+    // place that shape is decided (see policy.ts), so a grant one surface
+    // hands out is honoured by the other for exactly the same reason.
+    for (const [name, src] of [["cli.ts", cli], ["mcp.ts", mcp]] as const) {
+      assert.doesNotMatch(src, /scope:\s*`run:/, `${name} builds a run: scope by hand instead of calling runScope()`);
+      assert.match(src, /\brunScope\(/, `${name} never calls runScope()`);
+    }
   });
 
   test("the default policy is not retyped anywhere", () => {

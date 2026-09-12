@@ -224,6 +224,34 @@ describe("hush doctor reports the whole setup", () => {
     p.cleanup();
   });
 
+  test("it reports whether a user-level policy floor exists", () => {
+    const p = project();
+    try {
+      assert.match(p.run(["doctor"]).out, /policy floor\s+.*none/);
+      writeFileSync(join(p.home, "policy.json"), JSON.stringify({ requireApproval: ["run"] }));
+      const out = p.run(["doctor"]).out;
+      assert.match(out, /policy floor/);
+      assert.ok(!/policy floor\s+.*none/.test(out), "a floor file was present but doctor still reported none");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("it flags a repo attempt to weaken the user's floor", () => {
+    const p = project();
+    try {
+      // A floor that never mentions unsafeAllowCommands defaults to allowing
+      // none of it — the repo's request below is exactly what the fix (only
+      // the user's own file can lower the floor) refuses.
+      writeFileSync(join(p.home, "policy.json"), JSON.stringify({ requireApproval: ["run"] }));
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
+      const out = p.run(["doctor"]).out;
+      assert.match(out, /unsafeAllowCommands: node — ignored, below your floor/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("biometry is only ticked when it is actually enforced", { skip: biometryStatus().available ? false : "no biometry on this host" }, () => {
     // Must run with biometry genuinely available, or "preferred" and "required"
     // both come out unticked and the test proves nothing.
@@ -947,16 +975,16 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
       writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
       const grantsPath = join(p.hushDir, "grants.local.json");
 
-      // "run:default" is exactly the scope `hush run` computes for a plain,
-      // default-env run with no service accounts chosen — the same shape
-      // mcp.ts's hush_run builds, so a grant either surface hands out is
-      // honoured by the other.
-      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() + 60_000 }));
+      // "run:echo:default" is exactly what runScope() computes for a plain,
+      // default-env `echo` run under the default approvalScope: "command" —
+      // the same shape mcp.ts's hush_run builds, so a grant either surface
+      // hands out is honoured by the other for the same command and sets.
+      writeFileSync(grantsPath, JSON.stringify({ "run:echo:default": Date.now() + 60_000 }));
       const granted = p.run(["run", "--", "echo", "RAN"]);
       assert.equal(granted.code, 0, granted.out);
       assert.match(granted.out, /RAN/);
 
-      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() - 1000 }));
+      writeFileSync(grantsPath, JSON.stringify({ "run:echo:default": Date.now() - 1000 }));
       const expired = p.run(["run", "--", "echo", "RAN"]);
       assert.equal(expired.code, 1, expired.out);
       assert.ok(!expired.out.includes("RAN"), `an expired grant was honoured:\n${expired.out}`);
@@ -971,6 +999,82 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
       assert.ok(!existsSync(join(p.hushDir, "policy.json")), "test fixture drifted: a policy file exists");
       assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_live_cli/);
       assert.match(p.run(["run", "--", "echo", "RAN"]).out, /RAN/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a user-level policy floor alone gates `hush run`, with no repo policy.json at all", () => {
+    // The whole point of a floor outside the repo: it must work even for a
+    // project that has never opted into .hush/policy.json.
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      assert.ok(!existsSync(join(p.hushDir, "policy.json")), "test fixture drifted: a repo policy file exists");
+      writeFileSync(join(p.home, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const r = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(r.code, 1, r.out);
+      assert.ok(!r.out.includes("RAN"), `the command ran despite no answer to the floor's approval prompt:\n${r.out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a session grant covers the command it was granted for, not every command sharing its sets", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const grantsPath = join(p.hushDir, "grants.local.json");
+      // Exactly what runScope() computes for `npm ...` under the default
+      // approvalScope: "command" and the plain default set.
+      writeFileSync(grantsPath, JSON.stringify({ "run:npm:default": Date.now() + 60_000 }));
+
+      const covered = p.run(["run", "--", "npm", "--version"]);
+      assert.equal(covered.code, 0, covered.out);
+
+      // Same sets, a different command: npm's grant must not reach it.
+      const other = p.run(["run", "--", "git", "--version"]);
+      assert.equal(other.code, 1, other.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test('approvalScope: "sets" opts back into the pre-existing, command-agnostic grant shape', () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["run"], approvalScope: "sets", approvalTimeoutSeconds: 1 }),
+      );
+      const grantsPath = join(p.hushDir, "grants.local.json");
+      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() + 60_000 }));
+
+      assert.equal(p.run(["run", "--", "npm", "--version"]).code, 0);
+      assert.equal(p.run(["run", "--", "git", "--version"]).code, 0, "\"sets\" scope should cover any command using those sets");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test('the approval prompt names exactly what "Allow 15 min" would cover', async () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
+
+      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "npm", "--version"], {
+        cwd: p.root, env: p.env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      let seen: ReturnType<typeof pendingRequests> = [];
+      for (let i = 0; i < 80 && !seen.length; i++) {
+        seen = pendingRequests(p.hushDir);
+        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(seen.length, 1, "no pending approval request appeared");
+      assert.match(seen[0].detail.join("\n"), /Allow 15 min covers:\s+npm with default/);
+
+      answerRequest(p.hushDir, seen[0].id, "deny");
+      const [code] = await once(child, "exit");
+      assert.equal(code, 1, "a denied run should not exit 0");
     } finally {
       p.cleanup();
     }

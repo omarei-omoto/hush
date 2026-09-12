@@ -11,10 +11,12 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { once } from "node:events";
 
 import { Vault } from "../src/vault.ts";
 import { generateIdentity, encodeSecret } from "../src/crypto.ts";
 import { saveLinks } from "../src/library.ts";
+import { pendingRequests, answerRequest } from "../src/approval.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
 
@@ -239,6 +241,11 @@ describe("mcp policy — the command deny list", () => {
 
   test("unsafeAllowCommands is the only way past it", () => {
     const p = project({ unsafeAllowCommands: ["node"] });
+    // unsafeAllowCommands now only takes effect where the user's own floor
+    // (outside the repo, at ~/.hush/policy.json) also names the command — a
+    // repo file alone can no longer reopen a denied command by itself. See
+    // policy.test.ts's mergePolicies tests for the rule in isolation.
+    writeFileSync(join(p.home, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
     return talk(p, [
       init,
       call(1, "hush_run", { command: "node", args: ["-e", "console.log('allowed')"] }),
@@ -698,6 +705,36 @@ describe("mcp policy — the gaps mutation testing found", () => {
   });
 });
 
+describe("mcp policy — approvalScope decides what a cached grant covers", () => {
+  test("a cached grant covers the command it was granted for, not every command sharing its sets", async () => {
+    const p = project({ requireApproval: ["run"], approvalTimeoutSeconds: 1 });
+    // Exactly what runScope() computes for `npm` under the default
+    // approvalScope: "command" and the plain default set.
+    writeFileSync(join(p.root, ".hush", "grants.local.json"), JSON.stringify({ "run:npm:default": Date.now() + 60_000 }));
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npm", args: ["--version"] }),
+      call(2, "hush_run", { command: "git", args: ["--version"] }),
+    ]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /exit 0/, "the granted command was refused");
+    assert.equal(s.replies.find((r) => r.id === 2)!.result?.isError, true, "a grant for npm also covered git");
+    p.cleanup();
+  });
+
+  test('approvalScope: "sets" restores the pre-existing, command-agnostic grant shape', async () => {
+    const p = project({ requireApproval: ["run"], approvalScope: "sets", approvalTimeoutSeconds: 1 });
+    writeFileSync(join(p.root, ".hush", "grants.local.json"), JSON.stringify({ "run:default": Date.now() + 60_000 }));
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npm", args: ["--version"] }),
+      call(2, "hush_run", { command: "git", args: ["--version"] }),
+    ]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /exit 0/);
+    assert.match(s.replies.find((r) => r.id === 2)!.result!.content![0].text!, /exit 0/, '"sets" scope should cover any command using those sets');
+    p.cleanup();
+  });
+});
+
 describe("mcp policy — a refusal is a refusal", () => {
   test("an approval that comes back denied stops the run", async () => {
     // Distinct from the timeout case above, and it has its own branch: with
@@ -793,6 +830,55 @@ describe("mcp — policy names sets the way the user does", () => {
     const refused = s.replies.find((r) => r.id === 2)!.result!;
     assert.equal(refused.isError, true, "a library set the policy does not name was injected");
     assert.match(refused.content![0].text!, /Policy forbids agent access to "global:other-lib-set"/);
+    p.cleanup();
+  });
+});
+
+describe("mcp — a grant is shared across surfaces, by command and sets alike", () => {
+  test("a 'session' grant recorded through the CLI for one command is honoured by the MCP server for that command, not a different one", async () => {
+    const p = project({ requireApproval: ["run"], approvalTimeoutSeconds: 5 });
+    const hushDir = join(p.root, ".hush");
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HUSH_HOME: p.home,
+      HUSH_IDENTITY: p.secret,
+      HUSH_BIOMETRY: "off",
+      HUSH_APPROVAL_MODE: "file",
+      NO_COLOR: "1",
+    };
+
+    // Record a "session" grant through the CLI, exactly the way a human would
+    // by clicking "Allow 15 min" — here answered via the file-approval path.
+    const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "npm", "--version"], {
+      cwd: p.root,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let seen: ReturnType<typeof pendingRequests> = [];
+    for (let i = 0; i < 120 && !seen.length; i++) {
+      seen = pendingRequests(hushDir);
+      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(seen.length, 1, "no pending approval appeared for the CLI run");
+    answerRequest(hushDir, seen[0].id, "session");
+    const [code] = await once(child, "exit");
+    assert.equal(code, 0, "the CLI run did not succeed after the grant was approved");
+
+    // Same command, same sets: the MCP server must honour the CLI's grant
+    // with no fresh prompt, proving the grant is shared, not private to
+    // whichever surface created it.
+    const covered = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"] })]);
+    const coveredReply = covered.replies.find((r) => r.id === 1)!;
+    assert.notEqual(coveredReply.result?.isError, true, coveredReply.result?.content?.[0]?.text);
+    assert.match(coveredReply.result!.content![0].text!, /exit 0/);
+
+    // A different command (different basename — `--help` would share npm's
+    // basename and prove nothing) using the same sets must NOT be covered:
+    // "the grant covers the command, not just the sets" is the whole point.
+    const other = await talk(p, [init, call(1, "hush_run", { command: "git", args: ["--version"] })]);
+    const otherReply = other.replies.find((r) => r.id === 1)!;
+    assert.equal(otherReply.result?.isError, true, "a grant for npm also covered git");
+
     p.cleanup();
   });
 });

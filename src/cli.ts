@@ -23,7 +23,7 @@ import { scanRepo, reconcile, parseEnvFile } from "./scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "./run.ts";
 import { preview } from "./redact.ts";
 import { serveMcp, loadPolicy, DEFAULT_POLICY, type Policy } from "./mcp.ts";
-import { checkCommand, checkEnv, checkScopes } from "./policy.ts";
+import { checkCommand, checkEnv, checkScopes, runScope, approvalCoverageLine, readPolicyFile, policyWeakenings } from "./policy.ts";
 import { serveUi } from "./ui.ts";
 import {
   usedSets, composeSets, librarySets, loadLinks, saveLinks, openGlobal,
@@ -331,15 +331,19 @@ function ctx(a: Args): Ctx {
 }
 
 /**
- * The CLI is opt-in: with no `.hush/policy.json` at all, every command behaves
- * exactly as it always has — that is rung 1 of the security ladder (see
- * posture.ts and the README), and it must never gain a gate nobody asked for.
- * `loadPolicy()` cannot tell "no file" from "a file with nothing unusual in
- * it" — both return DEFAULT_POLICY — so the distinction is made here with
- * `existsSync` before ever calling it.
+ * The CLI is opt-in: with neither a repo `.hush/policy.json` nor a user-level
+ * `~/.hush/policy.json` floor, every command behaves exactly as it always
+ * has — that is rung 1 of the security ladder (see posture.ts and the
+ * README), and it must never gain a gate nobody asked for. `loadPolicy()`
+ * cannot tell "no file anywhere" from "a file with nothing unusual in it" —
+ * both return DEFAULT_POLICY — so the distinction is made here with
+ * `existsSync` before ever calling it. A floor with no repo policy is enough
+ * on its own: that is the entire point of a floor the repo cannot see.
  */
 function policyFor(hushDir: string): Policy | null {
-  return existsSync(join(hushDir, "policy.json")) ? loadPolicy(hushDir) : null;
+  const hasRepoPolicy = existsSync(join(hushDir, "policy.json"));
+  const hasFloor = existsSync(join(hushHome(), "policy.json"));
+  return hasRepoPolicy || hasFloor ? loadPolicy(hushDir) : null;
 }
 
 /**
@@ -903,10 +907,12 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
           `Using sets:  ${layers.join(", ") || "(none)"}`,
           `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
           `Directory:  ${process.cwd()}`,
+          approvalCoverageLine(policy, argv[0], layers),
         ],
-        // Same shape mcp.ts's hush_run builds, so a grant cached by one
-        // surface (a "session" approval from either) is honoured by the other.
-        scope: `run:${layers.join("+")}`,
+        // Built by runScope() — the same helper mcp.ts's hush_run calls — so a
+        // grant cached by one surface (a "session" approval from either) is
+        // honoured by the other for the same command and sets.
+        scope: runScope(policy, argv[0], layers),
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
@@ -1475,6 +1481,16 @@ async function cmdDoctor(_a: Args): Promise<void> {
     "approval required",
     policy.requireApproval.length ? policy.requireApproval.join(", ") : "nothing is gated — see .hush/policy.json",
   );
+
+  // The floor lives outside the repo on purpose (see policy.ts's
+  // mergePolicies), so it is worth spelling out here that it exists at all —
+  // and, when the repo tried to loosen something it sets, exactly what got
+  // refused rather than leaving that invisible.
+  const floorPath = join(hushHome(), "policy.json");
+  check(existsSync(floorPath), "policy floor", existsSync(floorPath) ? floorPath : "none — only .hush/policy.json gates this project");
+  const weakenings = policyWeakenings(readPolicyFile(floorPath), readPolicyFile(join(loc.hushDir, "policy.json")));
+  for (const w of weakenings) info(`    ${dim(w)}`);
+
   const bio = biometryStatus();
   const enforcing = policy.biometry === "required" && bio.available;
   check(

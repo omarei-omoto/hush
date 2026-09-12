@@ -6,7 +6,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1205,5 +1205,196 @@ test("/api/move carves one pile into named sets", async () => {
     const s = (await libApi("/api/env", { action: "delete", where: "library", name: "scratch" })).body;
     assert.ok(!s.library.some((x: any) => x.name === "scratch"), "it survived deletion");
     assert.ok(s.library.some((x: any) => x.name === "acme-prod-eu"), "it deleted the wrong one");
+  });
+});
+
+describe("ui server — any folder", () => {
+  /**
+   * The third state a folder can be in: no .hush anywhere above it at all.
+   * Before this, opening hush here either refused to start outright (no
+   * project and no library), or — the actual bug this fixture exists to
+   * catch — crashed if a project marker existed without a vault, because
+   * Vault.open() throws unconditionally on a missing file. This fixture never
+   * creates .hush itself; every test below either reads state or drives it
+   * through the setup flow, in the order a real folder would go through it:
+   * unset → links-only → its own vault.
+   */
+  let bareChild: ChildProcess;
+  let bareBase: string;
+  let bareToken: string;
+  let bareHome: string;
+  let bareRoot: string;
+
+  const bareApi = async (path: string, body?: unknown) => {
+    const r = await fetch(bareBase + path, {
+      method: body ? "POST" : "GET",
+      headers: { "x-hush-token": bareToken, "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: r.status, body: (await r.json()) as any };
+  };
+
+  before(async () => {
+    bareHome = mkdtempSync(join(tmpdir(), "hush-bare-home-"));
+    bareRoot = mkdtempSync(join(tmpdir(), "hush-bare-proj-"));
+    // No .hush anywhere in bareRoot — that absence is the point of this fixture.
+    writeFileSync(
+      join(bareRoot, "index.js"),
+      "console.log(process.env.FAL_KEY, process.env.DATABASE_URL);\n",
+    );
+
+    const id = generateIdentity();
+    // Built by hand rather than via namedVaultPath(): that helper reads
+    // process.env.HUSH_HOME of *this* process, not the HUSH_HOME the child
+    // below is about to be spawned with.
+    const libPath = join(bareHome, "vaults", "global", "vault.json");
+    mkdirSync(dirname(libPath), { recursive: true });
+    const lib = Vault.create(libPath, "global", { name: "tester", pub: id.pub });
+    lib.set(id, "acme-production", "DATABASE_URL", "postgres_acme_prod_value_here");
+    lib.set(id, "acme-production", "FAL_KEY", "fal_acme_prod_value_here");
+    lib.set(id, "work-fal", "FAL_KEY", "fal_work_value_here");
+    lib.save();
+
+    bareChild = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
+      cwd: bareRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        HUSH_HOME: bareHome,
+        HUSH_IDENTITY: encodeSecret(id),
+        HUSH_BIOMETRY: "off",
+        HUSH_NO_KEYCHAIN: "1",
+        NO_COLOR: "1",
+      },
+    });
+    const url: string = await new Promise((resolve, reject) => {
+      let out = "";
+      const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
+      bareChild.stdout!.on("data", (d) => {
+        out += d;
+        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+        if (m) { clearTimeout(timer); resolve(m[1]); }
+      });
+    });
+    const parsed = new URL(url);
+    bareBase = parsed.origin;
+    bareToken = parsed.searchParams.get("t")!;
+  });
+
+  after(() => {
+    bareChild?.kill();
+    for (const d of [bareHome, bareRoot]) rmSync(d, { recursive: true, force: true });
+  });
+
+  test("a bare folder reports itself unset, with a setup suggestion drawn from the library", async () => {
+    const s = (await bareApi("/api/state")).body;
+    assert.equal(s.folder.state, "unset");
+    assert.deepEqual(s.suggestion.needed, ["DATABASE_URL", "FAL_KEY"], "did not find both variables the code references");
+    assert.deepEqual(s.suggestion.picks, ["acme-production"], "did not prefer the set covering both keys");
+    assert.deepEqual(s.library.map((x: any) => x.name).sort(), ["acme-production", "work-fal"]);
+    assert.deepEqual(s.project, [], "an unset folder reported project vault data");
+    assert.equal(s.vault, null, "an unset folder claimed to have a vault");
+    assert.deepEqual(s.members, []);
+
+    const raw = JSON.stringify(s);
+    assert.ok(!raw.includes("postgres_acme_prod_value_here"), "a library value reached the browser");
+    assert.ok(!raw.includes("fal_acme_prod_value_here"));
+    assert.ok(!raw.includes("fal_work_value_here"));
+  });
+
+  test("the setup panel is on the page for an unset folder, and the inline script still parses", async () => {
+    const html = await (await fetch(`${bareBase}/?t=${bareToken}`)).text();
+    assert.ok(html.includes("This folder"), "the setup panel heading is missing");
+    assert.ok(html.includes("set up for hush yet"), "the setup panel heading is missing");
+    assert.ok(html.includes("Use these here"), "the setup button is missing");
+
+    const m = html.match(/<script>([\s\S]*?)<\/script>/);
+    assert.ok(m, "the page has no script block");
+    assert.doesNotThrow(() => new Function(m![1]), "the page script has a syntax error");
+  });
+
+  test("/api/link toggles a library set with no project vault at all", async () => {
+    const before = (await bareApi("/api/state")).body;
+    assert.equal(before.folder.state, "unset");
+
+    const linked = await bareApi("/api/link", { name: "work-fal", use: true });
+    assert.equal(linked.status, 200, JSON.stringify(linked.body));
+    assert.deepEqual(linked.body.used, ["default", "work-fal"]);
+    // Linking writes envs.json, which is itself the marker that moves the
+    // folder past "unset" — before any vault exists anywhere.
+    assert.equal(linked.body.folder.state, "links-only");
+    assert.ok(!existsSync(join(bareRoot, ".hush", "vault.json")), "linking a set made a vault");
+  });
+
+  test("/api/setup refuses a name that is not in the library or an unknown name entirely", async () => {
+    const r = await bareApi("/api/setup", { use: ["not-a-real-set"] });
+    assert.equal(r.status, 400, "accepted a set name nothing offers");
+    assert.match(r.body.error, /acme-production/, "the error did not name what does exist");
+    assert.match(r.body.error, /work-fal/);
+  });
+
+  test("/api/setup links sets and writes the dotfiles, but makes no vault and no policy", async () => {
+    const r = await bareApi("/api/setup", { use: ["acme-production"] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.folder.state, "links-only");
+    // Replaces the whole list — the leftover "work-fal" link from the
+    // previous test does not linger alongside it.
+    assert.deepEqual(r.body.used, ["default", "acme-production"]);
+
+    const hushDir = join(bareRoot, ".hush");
+    assert.ok(existsSync(join(hushDir, "envs.json")), "envs.json was not written");
+    assert.ok(existsSync(join(hushDir, ".gitignore")), "the project dotfiles were not written");
+    assert.ok(!existsSync(join(hushDir, "vault.json")), "setup made a vault it was not asked to");
+    assert.ok(!existsSync(join(hushDir, "policy.json")), "setup wrote a policy without being asked to");
+  });
+
+  test("/api/setup with agent:true writes the three approvals, and a second call keeps an edited policy", async () => {
+    const hushDir = join(bareRoot, ".hush");
+    const policyPath = join(hushDir, "policy.json");
+
+    const r = await bareApi("/api/setup", { use: ["acme-production"], agent: true });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.ok(existsSync(policyPath), "no policy.json was written");
+    const written = JSON.parse(readFileSync(policyPath, "utf8"));
+    assert.deepEqual(written.requireApproval, ["run", "add", "reveal"]);
+    assert.ok(!r.body.policyKept, "reported keeping a policy it just wrote for the first time");
+
+    // Someone edits it by hand, turning approvals off.
+    writeFileSync(policyPath, JSON.stringify({ requireApproval: [] }));
+    const again = await bareApi("/api/setup", { use: ["acme-production"], agent: true });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.policyKept, true, "did not report keeping the edited policy");
+    const stillEdited = JSON.parse(readFileSync(policyPath, "utf8"));
+    assert.deepEqual(stillEdited.requireApproval, [], "a second setup call overwrote the edited policy");
+  });
+
+  test("revealing a project scope before any vault exists 400s naming the folder's state", async () => {
+    const s = (await bareApi("/api/state")).body;
+    assert.equal(s.folder.state, "links-only", "expected the folder to still have no vault at this point");
+
+    const r = await bareApi("/api/reveal", { scope: "default", key: "PROJECT_SECRET" });
+    assert.equal(r.status, 400, "revealed from a project vault that does not exist");
+    // Specifically the folder-state message, not the unrelated "you have no
+    // library vault yet" 400 that a where:"library" reveal would give — a
+    // reveal() that quietly fell through to that message would still be a
+    // 400 containing the word "vault" and pass a looser check.
+    assert.match(r.body.error, /This folder/, "the 400 did not name the folder's own state");
+  });
+
+  test("a links-only folder makes its own vault the first time a project secret is added", async () => {
+    const r = await bareApi("/api/secret", { scope: "default", key: "PROJECT_SECRET", value: "project_secret_value" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.vaultCreated, true, "the vault was not reported as created");
+    assert.equal(r.body.folder.state, "vault", "state still reports no vault right after making one");
+    assert.ok(existsSync(join(bareRoot, ".hush", "vault.json")), "no vault.json appeared on disk");
+
+    // The value written before the vault existed has to actually be in it.
+    const reveal = await bareApi("/api/reveal", { scope: "default", key: "PROJECT_SECRET" });
+    assert.equal(reveal.status, 200, JSON.stringify(reveal.body));
+    assert.equal(reveal.body.value, "project_secret_value");
+
+    const state = (await bareApi("/api/state")).body;
+    assert.equal(state.folder.state, "vault");
+    assert.ok(state.project.some((s: any) => s.secrets.some((k: any) => k.key === "PROJECT_SECRET")));
   });
 });

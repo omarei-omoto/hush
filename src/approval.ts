@@ -20,7 +20,7 @@
  * that the human resolves with `hush approve` in their own terminal.
  */
 import { randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, chmodSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
 import { authenticate, type BiometryMode, type BiometryResult } from "./biometry.ts";
@@ -113,6 +113,16 @@ function readGrantsFile(hushDir: string): Record<string, number> {
 function writeGrant(hushDir: string, scope: string, expiresAt: number): void {
   const path = grantsFilePath(hushDir);
   try {
+    // Never write through a symlink here. grants.local.json lives inside the
+    // project — an agent can create one there — and writeFileSync/chmodSync
+    // follow symlinks by default. A symlink planted at this path (pointing
+    // at, say, the user's ~/.hush/policy.json floor, which the agent cannot
+    // write to directly) would turn the next legitimate "Allow 15 min" into
+    // hush silently overwriting that file with grant JSON. Refusing costs
+    // nothing real: worst case a session grant does not persist to disk and
+    // the next `hush` invocation re-prompts, which is the safe direction.
+    const st = lstatSync(path, { throwIfNoEntry: false });
+    if (st && !st.isFile()) return;
     const grants = readGrantsFile(hushDir);
     grants[scope] = expiresAt;
     writeFileSync(path, JSON.stringify(grants), { mode: 0o600 });
@@ -219,12 +229,26 @@ export async function requestApproval(
 ): Promise<ApprovalResult> {
   const code = newCode();
 
+  // "run" only lets an already-injected secret be used by a child process
+  // whose output is still redacted, so caching that grant to disk (a file
+  // inside the project, which an agent with ordinary write access to the repo
+  // can create) is an accepted convenience — it is how "Allow 15 min" survives
+  // the next `hush` invocation being a new process. "reveal" and "add" are not
+  // that: reveal hands back plaintext directly, and add writes a new secret
+  // an agent supplied without the human ever typing it. Either one skipped by
+  // a forged grants.local.json (right timestamp, wrong scope name, no human
+  // involved) is a value out or a planted credential, not a redaction gap —
+  // so neither is ever read from or written to disk. They still coalesce
+  // repeated calls within one long-lived process (e.g. hush ui's server) via
+  // the in-memory map alone.
+  const persistToDisk = req.action !== "reveal" && req.action !== "add";
+
   const key = grantKey(hushDir, req.scope);
   // Memory first (cheap, and always current within this process), then the
   // file another process — most often an earlier `hush` invocation — may have
   // written. Found-on-disk is backfilled into memory so the rest of this
   // process does not re-read the file for the same scope.
-  const until = granted.get(key) ?? readGrantsFile(hushDir)[req.scope];
+  const until = granted.get(key) ?? (persistToDisk ? readGrantsFile(hushDir)[req.scope] : undefined);
   if (until && until > Date.now()) {
     granted.set(key, until);
     return { decision: "session", code, cached: true, via: "cache" };
@@ -242,7 +266,7 @@ export async function requestApproval(
     if (bio === "ok") {
       const expiresAt = Date.now() + req.ttlSeconds * 1000;
       granted.set(key, expiresAt);
-      writeGrant(hushDir, req.scope, expiresAt);
+      if (persistToDisk) writeGrant(hushDir, req.scope, expiresAt);
       return { decision: "session", code, cached: false, via: "biometry" };
     }
     if (bio === "denied") {
@@ -271,7 +295,7 @@ export async function requestApproval(
   if (decision === "session") {
     const expiresAt = Date.now() + req.ttlSeconds * 1000;
     granted.set(key, expiresAt);
-    writeGrant(hushDir, req.scope, expiresAt);
+    if (persistToDisk) writeGrant(hushDir, req.scope, expiresAt);
   }
   return { decision, code, cached: false, via: backend ? "dialog" : "terminal" };
 }

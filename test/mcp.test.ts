@@ -257,6 +257,42 @@ describe("mcp policy — the command deny list", () => {
     });
   });
 
+  // Red team, 2026-09-12: SECURITY.md already says the deny list is "a speed
+  // bump, not a boundary" and that redaction "cannot see a value that has
+  // been base64'd ... or reversed". This is one concrete way both hold at
+  // once with nothing but what ships in the box: `npx` is not itself an
+  // interpreter, so it is not denied, and it runs whatever is already on
+  // PATH — including `node`, which is denied by basename only. Piping the
+  // secret through a one-liner that hex-encodes it defeats the exact
+  // substring match the redactor relies on. Pinned, not fixed: this is the
+  // documented trade-off, and `allowCommands` (also asserted below) is the
+  // control that actually holds, per SECURITY.md and docs/SAFETY.md.
+  test("npx reaches a denied interpreter and a one-liner defeats redaction — the documented speed bump, pinned", async () => {
+    const p = project();
+    const secret = "super-secret-value-here"; // set by project() as API_KEY
+    const hex = Buffer.from(secret).toString("hex");
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npx", args: ["--yes", "node", "-e", "process.stdout.write(Buffer.from(process.env.API_KEY).toString('hex'))"] }),
+    ]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    assert.ok(!text.includes(secret), "the raw value should not appear (redaction still catches the literal)");
+    assert.ok(text.includes(hex), `expected the hex-encoded secret to slip past redaction, got:\n${text}`);
+    p.cleanup();
+  });
+
+  test("allowCommands — not denyCommands — is what actually stops the npx indirection", async () => {
+    const p = project({ allowCommands: ["npm"] });
+    const s = await talk(p, [
+      init,
+      call(1, "hush_run", { command: "npx", args: ["--yes", "node", "-e", "1"] }),
+    ]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "npx should have been refused outright by the allowlist");
+    assert.match(reply.result!.content![0].text!, /not in policy.allowCommands/);
+    p.cleanup();
+  });
+
   test("a stale policy cannot drop the list below the built-in floor", () => {
     const p = project({ denyCommands: ["env"] }); // what an older hush wrote
     return talk(p, [init, call(1, "hush_run", { command: "python3", args: ["-c", "print(1)"] })]).then((s2) => {

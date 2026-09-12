@@ -24,8 +24,14 @@ const skill = read("skills/hush/SKILL.md");
 const readme = read("README.md");
 const security = read("SECURITY.md");
 
-/** Commands that exist only as aliases or internals, not advertised in help. */
-const ALIASES = new Set(["list", "remove", "exec", "account", "root", "add"]);
+/**
+ * Commands that exist only as pre-unification aliases or internals, and are
+ * never advertised in `hush help --all` under their own name — they forward
+ * (with a deprecation notice) to a command that IS advertised: `set`/`import`
+ * to `add`, `accounts`/`envs` to `ls`, and the plain synonyms `list`/`remove`/
+ * `exec`/`account`.
+ */
+const ALIASES = new Set(["list", "remove", "exec", "account", "set", "import", "accounts", "envs"]);
 
 const mcpTools = [...new Set([...mcp.matchAll(/name: "(hush_[a-z_]+)"/g)].map((m) => m[1]))];
 const cliCommands = [
@@ -57,22 +63,41 @@ describe("docs describe the code that exists", () => {
     }
   });
 
-  test("every command appears in hush help, and help invents none", () => {
-    const help = execFileSync(process.execPath, [join(root, "src/cli.ts"), "help"], {
+  test("every command appears in hush help --all, and help invents none", () => {
+    // `hush help` alone is now eight lines by design (see the test below) — the
+    // exhaustive listing this check needs moved to `--all`.
+    const help = execFileSync(process.execPath, [join(root, "src/cli.ts"), "help", "--all"], {
       encoding: "utf8",
       env: { ...process.env, NO_COLOR: "1" },
     });
     for (const c of cliCommands) {
       if (ALIASES.has(c)) continue;
-      assert.ok(help.includes("hush " + c), `command "${c}" is missing from hush help`);
+      assert.ok(help.includes("hush " + c), `command "${c}" is missing from hush help --all`);
     }
     const builtins = new Set(["help", "mcp", "ui", "version"]);
     for (const m of help.matchAll(/^\s+hush ([a-z-]+)/gm)) {
       assert.ok(
         cliCommands.includes(m[1]) || builtins.has(m[1]),
-        `help advertises "hush ${m[1]}", which does not exist`,
+        `help --all advertises "hush ${m[1]}", which does not exist`,
       );
     }
+  });
+
+  test("hush help (no --all) lists exactly the eight daily commands", () => {
+    // The whole point of this change: 35 commands on one screen become eight,
+    // with everything else one flag away.
+    const help = execFileSync(process.execPath, [join(root, "src/cli.ts"), "help"], {
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    const shown = [...help.matchAll(/^\s+hush ([a-z-]+)/gm)].map((m) => m[1]);
+    // "help" itself comes from the closing "hush help --all" line, not one of
+    // the eight daily commands the screen exists to surface.
+    assert.deepEqual(
+      shown.filter((c) => c !== "help"),
+      ["add", "use", "run", "dev", "ls", "rm", "ui", "team"],
+    );
+    assert.match(help, /hush help --all/, "the short screen does not point at --all");
   });
 
   test("commands shown in README code blocks exist", () => {

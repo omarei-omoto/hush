@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+/**
+ * Stands in for the real GNOME `zenity` binary so approval.test.ts can drive
+ * dialogs.ts's zenity backend without a display, on macOS or headless Linux
+ * CI. Scripted entirely through environment variables — never argv — so the
+ * scripting itself can never show up in what the test asserts about argv
+ * (that the approval code, summary and detail lines really reached --text).
+ * Every invocation's argv is appended to FAKE_ARGV_LOG as one JSON line.
+ */
+const fs = require("fs");
+
+if (process.env.FAKE_ARGV_LOG) {
+  fs.appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)) + "\n");
+}
+
+// A real dialog blocks until the human answers; FAKE_SLEEP stands in for that
+// wait so a test can prove the caller's own timeout kills the process instead
+// of waiting for it to answer.
+setTimeout(() => {
+  if (process.env.FAKE_STDOUT) process.stdout.write(process.env.FAKE_STDOUT);
+  if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR);
+  process.exit(Number(process.env.FAKE_EXIT || "0"));
+}, Number(process.env.FAKE_SLEEP || "0"));

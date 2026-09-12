@@ -88,8 +88,12 @@ that changes what is cryptographically possible.**
 **A software identity is usable by anything running as you.** This is the big
 one. The identity key lives in the login keychain, and hush retrieves it with the
 `security` CLI. Any process running as your user can do the same — including a
-shell command from an agent, which can simply run `hush export`. The MCP policy
-constrains hush's own tools; it cannot constrain a process that bypasses hush.
+shell command from an agent. Once `.hush/policy.json` exists, `hush get`,
+`hush export`, `hush run` and `hush add` apply the same policy and approval
+as the MCP tools, so shelling out to hush is not a way around them. But the
+policy is a file in the repo — an agent that can edit files can loosen it — and
+nothing stops a process from reading the keychain directly. The policy
+constrains hush; it cannot constrain a process that bypasses hush.
 
 If that matters for your threat model, use a hardware identity
 ([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with `age-plugin-yubikey` or

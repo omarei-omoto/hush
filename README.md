@@ -392,8 +392,10 @@ Installs a skill telling your agent never to ask for a pasted key, to use
 `hush_run` rather than reading values, and how to pick an account when you name
 one. Without it the tools still work — you just have to say so each time.
 
-`.hush/policy.json` controls what it may run. Anything that exists to dump or
-re-encode the environment is denied by default — shells, `env`, `base64`,
+`.hush/policy.json` controls what it may run — through the MCP tools *and*
+through the CLI, so an agent that shells out to `hush run` or `hush export`
+meets the same policy and the same approval prompt. Anything that exists to dump
+or re-encode the environment is denied by default — shells, `env`, `base64`,
 `curl`, and every interpreter, because `node -e` can write the whole environment
 to a file that output redaction never sees:
 
@@ -684,8 +686,9 @@ The vault file holds ciphertext, public keys, and metadata. That is all:
 **Read [SECURITY.md](./SECURITY.md) before trusting it with anything real.** The
 most important line in it: with a *software* identity, anything running as your
 user can invoke hush and read the vault — including a shell command from an
-agent. The MCP policy constrains hush's own tools, not processes that go around
-them. Use a hardware identity if that matters to you.
+agent. The policy gates hush's own tools and CLI; it cannot gate a process that
+goes around hush, and `policy.json` is a file in your repo that an agent with
+write access can loosen. Use a hardware identity if that matters to you.
 
 - It is **not a KMS** — no dynamic credentials, no leasing, no expiry.
 - It **cannot rotate your provider credentials**. `hush team rm` re-keys the

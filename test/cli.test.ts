@@ -177,21 +177,25 @@ describe("hush verify", () => {
   });
 });
 
-describe("hush ls separates environments from accounts", () => {
-  test("account scopes are not listed as environments", () => {
-    // `hush accounts` is where fal/personal belongs; showing it under
-    // "other envs" invites treating an account like an environment.
+describe("hush ls treats every set the same, slash or not", () => {
+  // Sets unified environments and service accounts into one vocabulary, so
+  // the old split view ("environments" vs "other envs" holding accounts) is
+  // gone — a name with a "/" in it is listed exactly like any other set. This
+  // replaces the old "account scopes are not listed as environments" test,
+  // which asserted the opposite of what the unified model intends.
+  test("a slash-named set (an old service account) appears in THIS PROJECT like any other set", () => {
     const p = project();
     p.run(["set", "PROD_KEY", "--env", "prod"], "prod-value\n");
     p.run(["add", "fal", "--account", "personal", "--vars", "FAL_KEY"], "fal-value\n");
 
     const out = p.run(["ls"]).out;
-    const others = out.match(/other envs: (.*)/)?.[1] ?? "";
-    assert.ok(others.includes("prod"), `expected prod in "${others}"`);
-    assert.ok(!others.includes("/"), `an account scope was listed as an environment: ${others}`);
+    assert.match(out, /\(prod\)/, `expected the "prod" set in:\n${out}`);
+    assert.match(out, /\(fal\/personal\)/, `expected "fal/personal" listed like any other set:\n${out}`);
 
-    // And it does show up where it belongs.
-    assert.match(p.run(["accounts"]).out, /personal/);
+    // And `hush ls fal/personal` shows its key names, never values.
+    const detail = p.run(["ls", "fal/personal"]).out;
+    assert.match(detail, /FAL_KEY/);
+    assert.ok(!detail.includes("fal-value"), "a value leaked from `hush ls <set>`");
   });
 });
 
@@ -278,10 +282,11 @@ describe("hush add", () => {
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /stored 2 value/);
 
-      const accounts = p.run(["accounts", "--json"]);
-      const parsed = JSON.parse(accounts.out) as { accounts: { scope: string; vars: string[] }[] };
-      const twilio = parsed.accounts.find((a) => a.scope === "twilio/main");
-      assert.deepEqual(twilio?.vars.sort(), ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"]);
+      // `hush accounts` is now a deprecated alias for `hush ls`, which never
+      // prints a machine-readable per-account shape — read the vault directly.
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const twilio = vault.sets().find((s) => s.name === "twilio/main");
+      assert.deepEqual(twilio?.keys.sort(), ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"]);
     } finally {
       p.cleanup();
     }
@@ -298,9 +303,8 @@ describe("hush add", () => {
       assert.match(r.out, /GEMINI_API_KEY/, "the message does not say what to pipe");
 
       // And nothing was written.
-      const accounts = p.run(["accounts", "--json"]);
-      const parsed = JSON.parse(accounts.out) as { accounts: { scope: string }[] };
-      assert.equal(parsed.accounts.find((a) => a.scope === "gemini/team"), undefined);
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.equal(vault.hasSet("gemini/team"), false, "a set was created despite the failure");
     } finally {
       p.cleanup();
     }
@@ -342,14 +346,17 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     try {
       writeFileSync(join(p.root, ".env.in"), "STRIPE_SECRET_KEY=a_different_value\nNEW_ONE=brand_new_value\n");
 
-      const first = p.run(["import", ".env.in"]);
+      // A bare `hush import` (no --as, no --env) now requires --as, like `hush
+      // add <file>` — the alias's --env shortcut is the one path that still
+      // stores straight into an existing literal environment with no name.
+      const first = p.run(["import", ".env.in", "--env", "default"]);
       assert.equal(first.code, 0, first.out);
       assert.match(first.out, /1 already present/);
       assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_live_cli/, "the existing value was replaced");
       assert.match(p.run(["get", "NEW_ONE", "--yes"]).out, /brand_new_value/);
 
       // --overwrite is the opt-in, and it must actually do it.
-      const second = p.run(["import", ".env.in", "--overwrite"]);
+      const second = p.run(["import", ".env.in", "--overwrite", "--env", "default"]);
       assert.equal(second.code, 0, second.out);
       assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /a_different_value/, "--overwrite did nothing");
     } finally {
@@ -385,19 +392,21 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     }
   });
 
-  test("`hush import` with no flags keeps today's behaviour, non-interactively, and hints at --as", () => {
+  test("`hush import` with no flags now requires --as: a run that stores nothing must not look like one that did", () => {
+    // This used to default quietly into "default" with a tip; `hush import`
+    // is now a pure alias for `hush add <file>`, whose non-TTY rule (same
+    // principle `hush add <service>` already applied to an empty stdin pipe)
+    // is stricter — see specs/cli.md's `hush add` test list, bullet 1.
     const p = project();
     try {
       writeFileSync(join(p.root, ".env.in"), "PLAIN_ONE=v1\nPLAIN_TWO=v2\n");
       const r = p.run(["import", ".env.in"]);
-      assert.equal(r.code, 0, r.out);
-      // project()'s spawnSync runs with stdin ignored, i.e. non-TTY — the case
-      // that must never prompt and never fail, only nudge.
-      assert.match(r.out, /--as "Name"/, `no --as tip in:\n${r.out}`);
+      assert.equal(r.code, 1, `expected failure, got:\n${r.out}`);
+      assert.match(r.out, /--as/);
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
       const def = vault.envSets().find((s) => s.name === "default")!;
-      assert.ok(def.keys.includes("PLAIN_ONE") && def.keys.includes("PLAIN_TWO"), "keys did not land in default");
+      assert.ok(!def.keys.includes("PLAIN_ONE") && !def.keys.includes("PLAIN_TWO"), "keys were stored despite the failure");
     } finally {
       p.cleanup();
     }
@@ -471,32 +480,50 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     }
   });
 
-  test("`hush run` injects the pinned account, and --with overrides the pin", () => {
+  test("`hush run` injects the set this project uses, redacted", () => {
     const p = project();
     try {
-      // Different variable *sets* per account, so which one was chosen is
-      // visible without printing a value. Giving both the same single variable
-      // made the two cases indistinguishable — the output was
-      // "[redacted:FAL_KEY]" either way, and the test proved only that
-      // something was injected.
-      p.run(["add", "fal", "--account", "personal", "--vars", "FAL_KEY,FAL_PERSONAL_MARKER"],
-        "fal_personal_value\npersonal_marker_value\n");
-      p.run(["add", "fal", "--account", "work", "--vars", "FAL_KEY,FAL_WORK_MARKER"],
-        "fal_work_value\nwork_marker_value\n");
-      assert.equal(p.run(["use", "fal=personal"]).code, 0);
+      assert.equal(p.run(["add", "FAL_KEY=fal_default_value", "--to", "work-fal"]).code, 0);
+      assert.equal(p.run(["use", "work-fal"]).code, 0);
+      const ran = p.run(["run", "--quiet", "--", "sh", "-c", "echo \"${FAL_KEY:-absent}\""]);
+      assert.equal(ran.code, 0, ran.out);
+      assert.match(ran.out, /redacted:FAL_KEY/, `the used set's key did not reach the child:\n${ran.out}`);
+      assert.ok(!ran.out.includes("fal_default_value"), "a live value leaked into output");
+    } finally {
+      p.cleanup();
+    }
+  });
 
-      // `hush export --names` resolves exactly what `hush run` would inject.
-      const pinned = p.run(["export", "--names"]).out;
-      assert.match(pinned, /FAL_PERSONAL_MARKER/, "the pinned account was not injected");
-      assert.ok(!pinned.includes("FAL_WORK_MARKER"), `the wrong account was injected:\n${pinned}`);
+  test("sets are layers, not exclusive choices: --use appended last wins a shared key, but keeps the other layer's own keys", () => {
+    // Pre-unification, picking a different "account" replaced the injected
+    // keys wholesale — the two accounts here would have had the very same
+    // variable name, and choosing one meant the other's value simply could
+    // not be observed at the same time. Named sets compose instead: each
+    // layer's own keys always show up, and only a key both layers hold is
+    // decided by order (later wins). Two different keys plus one shared key
+    // is what actually exercises that, which is why this replaces the old
+    // "the pin won over --with" test (see specs/cli.md's `hush run` test).
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=work_value", "PROJECT_MARKER=work", "--to", "work-fal"]).code, 0);
+      assert.equal(p.run(["add", "FAL_KEY=personal_value", "PERSONAL_MARKER=mine", "--to", "personal-fal"]).code, 0);
+      assert.equal(p.run(["use", "work-fal"]).code, 0);
 
-      const overridden = p.run(["export", "--names", "--with", "fal:work"]).out;
-      assert.match(overridden, /FAL_WORK_MARKER/, "--with did not override the pin");
-      assert.ok(!overridden.includes("FAL_PERSONAL_MARKER"), `the pin won over --with:\n${overridden}`);
+      const first = JSON.parse(p.run(["export", "--format", "json"]).out) as Record<string, string>;
+      assert.equal(first.FAL_KEY, "work_value");
+      assert.equal(first.PROJECT_MARKER, "work");
+      assert.equal(first.PERSONAL_MARKER, undefined, "a set that is not used yet leaked a key");
 
-      // And the same choice really reaches a child process.
-      const ran = p.run(["run", "--quiet", "--with", "fal:work", "--", "sh", "-c", "echo \"${FAL_WORK_MARKER:-absent}\""]);
-      assert.match(ran.out, /redacted:FAL_WORK_MARKER/, `--with did not reach the child:\n${ran.out}`);
+      // `--use` on a set the project already uses (or a brand new one, as
+      // here) is appended last, so it wins for this run.
+      const layered = JSON.parse(p.run(["export", "--format", "json", "--use", "personal-fal"]).out) as Record<string, string>;
+      assert.equal(layered.FAL_KEY, "personal_value", "the later set did not win the shared key");
+      assert.equal(layered.PROJECT_MARKER, "work", "the earlier layer's own key was dropped, not composed");
+      assert.equal(layered.PERSONAL_MARKER, "mine");
+
+      const ran = p.run(["run", "--quiet", "--use", "personal-fal", "--", "sh", "-c", "echo \"${FAL_KEY:-absent}\""]);
+      assert.equal(ran.code, 0, ran.out);
+      assert.match(ran.out, /redacted:FAL_KEY/, `--use did not reach the child:\n${ran.out}`);
     } finally {
       p.cleanup();
     }
@@ -571,7 +598,9 @@ describe("hush secure — the gaps mutation testing found", () => {
     const p = project();
     try {
       writeFileSync(join(p.home, "state.json"), "{ this is not json");
-      const r = p.run(["ls"]);
+      // `hush ls` no longer lists key names on the overview screen (that
+      // information moved to `hush ls <set>`), so check the one that does.
+      const r = p.run(["ls", "default"]);
       assert.equal(r.code, 0, `a corrupt nudge state broke an unrelated command:\n${r.out}`);
       assert.match(r.out, /STRIPE_SECRET_KEY/);
     } finally {
@@ -617,23 +646,28 @@ describe("hush export / use / run — the rest of the CLI gaps", () => {
     }
   });
 
-  test("`hush use` refuses an account that does not exist", () => {
-    // Pinning a typo silently means every later `hush run` quietly injects
-    // nothing, and the failure surfaces somewhere else entirely.
+  test("`hush use` refuses a set that does not exist, and `fal=acme` aliases to `fal/acme`", () => {
+    // Using a typo silently means every later `hush run` quietly injects
+    // nothing, and the failure surfaces somewhere else entirely. `hush use`
+    // now names sets directly and records them in .hush/envs.json, not
+    // .hush/use.json — the pre-unification "pin a service=account" model this
+    // test used to cover, per the alias table in specs/cli.md.
     const p = project();
     try {
       p.run(["add", "fal", "--account", "personal", "--vars", "FAL_KEY"], "fal-value\n");
 
       const bad = p.run(["use", "fal=typo"]);
-      assert.equal(bad.code, 1, `a non-existent account was pinned:\n${bad.out}`);
-      assert.match(bad.out, /No account "typo"/);
-      assert.match(bad.out, /known: personal/, "the message does not say what is available");
-      assert.ok(!existsSync(join(p.root, ".hush", "use.json")), "it wrote the bad pin anyway");
+      assert.equal(bad.code, 1, `a non-existent set was used:\n${bad.out}`);
+      assert.match(bad.out, /"fal=typo" is deprecated/, "the alias was not translated with a deprecation notice");
+      assert.match(bad.out, /No set called "fal\/typo"/);
+      assert.match(bad.out, /fal\/personal/, "the message does not say what is available");
+      assert.ok(!existsSync(join(p.root, ".hush", "envs.json")), "it wrote the bad link anyway");
 
       const good = p.run(["use", "fal=personal"]);
       assert.equal(good.code, 0, good.out);
-      const use = JSON.parse(readFileSync(join(p.root, ".hush", "use.json"), "utf8")) as Record<string, string>;
-      assert.deepEqual(use, { fal: "personal" });
+      assert.match(good.out, /"fal=personal" is deprecated/);
+      const links = JSON.parse(readFileSync(join(p.root, ".hush", "envs.json"), "utf8")) as { use: string[] };
+      assert.deepEqual(links.use, ["fal/personal"]);
     } finally {
       p.cleanup();
     }
@@ -859,6 +893,23 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
+  test("pass-through is refused by allowCommands exactly like `hush run --`", () => {
+    // Pass-through (`hush <cmd>` with no `run --`) has to route through the
+    // same gate `hush run` does, or it would be a way around a policy an
+    // agent's other tools were already refused by.
+    const p = project();
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowCommands: ["npm"] }));
+
+      const refused = p.run(["echo", "hi"]);
+      assert.equal(refused.code, 1, refused.out);
+      assert.match(refused.out, /allowCommands/);
+      assert.ok(!refused.out.includes("hi"), "the command ran despite being refused");
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("the deny floor holds even with allowCommands unset", () => {
     const p = project();
     try {
@@ -969,6 +1020,486 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
 
       assert.ok(existsSync(grantsPath), "no grants file was written for the session approval");
       assert.equal(statSync(grantsPath).mode & 0o777, 0o600);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+// ===========================================================================
+// The new command surface: add / use / run+pass-through / dev / ls / rm.
+// See specs/cli.md — each test below corresponds to a bullet in its
+// "Tests" section.
+// ===========================================================================
+
+describe("hush add <file>", () => {
+  test("--as --library creates the set in the library; --project puts it in the project", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["global", "--create"]).code, 0);
+      writeFileSync(join(p.root, ".env.x"), "FAL_KEY=libval\n");
+
+      const lib = p.run(["add", ".env.x", "--as", "Work fal", "--library"]);
+      assert.equal(lib.code, 0, lib.out);
+      const library = Vault.open(join(p.home, "vaults", "global", "vault.json"));
+      const libSet = library.sets().find((s) => s.name === "work-fal");
+      assert.ok(libSet, `no "work-fal" in the library: ${library.sets().map((s) => s.name).join(", ")}`);
+      assert.equal(libSet!.label, "Work fal");
+      assert.deepEqual(libSet!.keys, ["FAL_KEY"]);
+      const project_ = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.equal(project_.hasSet("work-fal"), false, "--library also wrote the project vault");
+
+      const proj = p.run(["add", ".env.x", "--as", "Work fal", "--project"]);
+      assert.equal(proj.code, 0, proj.out);
+      const project2 = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.ok(project2.hasSet("work-fal"), "--project did not create the set in the project vault");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("non-TTY with no --as exits 1 and stores nothing", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.y"), "SOME_KEY=v\n");
+      const r = p.run(["add", ".env.y"]);
+      assert.equal(r.code, 1, `expected failure, got:\n${r.out}`);
+      assert.match(r.out, /--as/);
+
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.deepEqual(vault.sets().map((s) => s.name), ["default"], "a set was created despite the failure");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush add KEY=value", () => {
+  test("--to <set> adds to it; with no --to, non-TTY lands in project default and prints the tip", () => {
+    const p = project();
+    try {
+      const named = p.run(["add", "FAL_KEY=v", "--to", "work-fal"]);
+      assert.equal(named.code, 0, named.out);
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.ok(vault.hasSet("work-fal") && vault.has("work-fal", "FAL_KEY"), "FAL_KEY did not land in work-fal");
+
+      const bare = p.run(["add", "K=v"]);
+      assert.equal(bare.code, 0, bare.out);
+      assert.match(bare.out, /--to <set>/, `no --to tip in:\n${bare.out}`);
+      const vault2 = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.ok(vault2.has("default", "K"), "K did not land in default");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush add <service>", () => {
+  test('--as "Personal fal" stores FAL_KEY in personal-fal from one piped line', () => {
+    const p = project();
+    try {
+      const r = p.run(["add", "fal", "--as", "Personal fal"], "one_line_fal_value\n");
+      assert.equal(r.code, 0, r.out);
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      const set = vault.sets().find((s) => s.name === "personal-fal");
+      assert.ok(set, `no "personal-fal" among: ${vault.sets().map((s) => s.name).join(", ")}`);
+      assert.deepEqual(set!.keys, ["FAL_KEY"]);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--account x is a deprecated alias that produces fal/x and prints a notice", () => {
+    const p = project();
+    try {
+      const r = p.run(["add", "fal", "--account", "x"], "aliased_value\n");
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /--account is deprecated/);
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.ok(vault.hasSet("fal/x"), `--account did not create "fal/x": ${vault.sets().map((s) => s.name).join(", ")}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush use", () => {
+  test("using two sets writes envs.json in order; unknown name lists what exists; the list shows sources; --not removes", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "work-fal"]).code, 0);
+      assert.equal(p.run(["add", "DB_URL=v", "--to", "db-prod"]).code, 0);
+
+      const unknown = p.run(["use", "not-a-real-set"]);
+      assert.equal(unknown.code, 1, unknown.out);
+      assert.match(unknown.out, /No set called "not-a-real-set"/);
+      assert.match(unknown.out, /work-fal/, "the message does not say what sets exist");
+
+      const used = p.run(["use", "work-fal", "db-prod"]);
+      assert.equal(used.code, 0, used.out);
+      const links = JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] };
+      assert.deepEqual(links.use, ["work-fal", "db-prod"]);
+
+      const listed = p.run(["use"]).out;
+      assert.match(listed, /work-fal\s+project/);
+      assert.match(listed, /db-prod\s+project/);
+      assert.match(listed, /default\s+project/);
+
+      const removed = p.run(["use", "--not", "db-prod"]);
+      assert.equal(removed.code, 0, removed.out);
+      const after = JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] };
+      assert.deepEqual(after.use, ["work-fal"]);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("pass-through", () => {
+  test("an unrecognised command on PATH runs through hush run, injected and redacted", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=passthroughvalue"]).code, 0);
+      const r = p.run(["sh", "-c", "echo $FAL_KEY"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\[redacted:FAL_KEY\]/, r.out);
+      assert.ok(!r.out.includes("passthroughvalue"), "a live value leaked");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush ls` is never /bin/ls: a known command always wins over pass-through", () => {
+    const p = project();
+    try {
+      const r = p.run(["ls"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /YOUR LIBRARY/);
+      assert.match(r.out, /THIS PROJECT/);
+      assert.ok(!/\.hush\b/.test(r.out), "looked like a directory listing, not hush's ls");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("an unknown, non-existent command exits 1 with Unknown command", () => {
+    const p = project();
+    try {
+      const r = p.run(["definitely-not-a-real-command-xyz"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Unknown command/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush dev", () => {
+  // node, npm, pnpm and yarn all live under the same directory as the running
+  // node binary on a typical nvm install; bun does not. Restricting PATH to
+  // that directory plus the base system bins (for `sh`, which npm's own
+  // script runner shells out to) gives every test a real npm and a
+  // guaranteed-absent bun, deterministically, rather than depending on what
+  // happens to be installed on whichever machine runs the suite.
+  const NODE_BIN_DIR = `${dirname(process.execPath)}:/usr/bin:/bin`;
+
+  test("no lockfile runs the script via npm, injected and redacted", () => {
+    const p = project({ PATH: NODE_BIN_DIR });
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=devkeyvalue"]).code, 0);
+      writeFileSync(
+        join(p.root, "package.json"),
+        JSON.stringify({ scripts: { dev: "sh -c 'echo DEV $FAL_KEY'" } }),
+      );
+      const r = p.run(["dev"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /DEV/);
+      assert.match(r.out, /\[redacted:FAL_KEY\]/, r.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("no lockfile picks npm specifically, not just whichever package manager is on PATH", () => {
+    // A fake npm ahead of the real one on PATH proves *which* program was
+    // picked — pnpm and yarn can both run a plain npm script perfectly well
+    // with no lockfile of their own, so a test that only checks the script
+    // ran would pass identically whichever one hush chose.
+    const fakeBin = mkdtempSync(join(tmpdir(), "hush-fake-npm-"));
+    writeFileSync(join(fakeBin, "npm"), '#!/bin/sh\necho FAKE_NPM_INVOKED "$@"\n', { mode: 0o755 });
+    const p = project({ PATH: `${fakeBin}:${NODE_BIN_DIR}` });
+    try {
+      writeFileSync(join(p.root, "package.json"), JSON.stringify({ scripts: { dev: "true" } }));
+      const r = p.run(["dev"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /FAKE_NPM_INVOKED run dev/, `npm was not the program invoked:\n${r.out}`);
+    } finally {
+      rmSync(fakeBin, { recursive: true, force: true });
+      p.cleanup();
+    }
+  });
+
+  test("a bun.lock with no bun on PATH names bun in the error", () => {
+    const p = project({ PATH: NODE_BIN_DIR });
+    try {
+      writeFileSync(join(p.root, "package.json"), JSON.stringify({ scripts: { dev: "true" } }));
+      writeFileSync(join(p.root, "bun.lock"), "");
+      const r = p.run(["dev"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /bun/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("no package.json suggests hush run --", () => {
+    const p = project({ PATH: NODE_BIN_DIR });
+    try {
+      const r = p.run(["dev"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /hush run --/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush ls", () => {
+  test("shows both sections with the ● marker for what this project uses", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["global", "--create"]).code, 0);
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "work-fal", "--project"]).code, 0);
+      assert.equal(p.run(["use", "work-fal"]).code, 0);
+
+      const out = p.run(["ls"]).out;
+      assert.match(out, /YOUR LIBRARY/);
+      assert.match(out, /THIS PROJECT/);
+      assert.match(out, /●[^\n]*work-fal/, `expected work-fal marked used:\n${out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("hush ls <set> lists key names and never values", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=a_live_value", "--to", "work-fal"]).code, 0);
+      const out = p.run(["ls", "work-fal"]).out;
+      assert.match(out, /FAL_KEY/);
+      assert.ok(!out.includes("a_live_value"), "a value leaked from `hush ls <set>`");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush rm", () => {
+  test("rm KEY --from <set> removes the key; rm <set> --yes removes the whole set", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "work-fal"]).code, 0);
+      const removedKey = p.run(["rm", "FAL_KEY", "--from", "work-fal"]);
+      assert.equal(removedKey.code, 0, removedKey.out);
+      let vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.equal(vault.has("work-fal", "FAL_KEY"), false);
+      assert.ok(vault.hasSet("work-fal"), "removing the key also removed the set");
+
+      assert.equal(p.run(["add", "OTHER_KEY=v", "--to", "work-fal"]).code, 0);
+      const removedSet = p.run(["rm", "work-fal", "--yes"]);
+      assert.equal(removedSet.code, 0, removedSet.out);
+      vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.equal(vault.hasSet("work-fal"), false, "the set survived `rm <set> --yes`");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a name that is both a key and a set refuses and asks for --from", () => {
+    const p = project();
+    try {
+      // "shared" is both a set name and, once this runs, a key inside "other"
+      // — a key name cannot contain a "-", which is why this is not "work-fal".
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "shared"]).code, 0);
+      assert.equal(p.run(["add", "shared=v", "--to", "other"]).code, 0);
+
+      const r = p.run(["rm", "shared"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /both a key and a set/);
+      assert.match(r.out, /--from/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("deprecated aliases keep working, each with a one-line notice", () => {
+  test("`hush set` behaves like `hush add KEY=value`", () => {
+    const p = project();
+    try {
+      const r = p.run(["set", "PLAIN_KEY=v"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /`hush set` is deprecated/);
+      const vault = Vault.open(join(p.root, ".hush", "vault.json"));
+      assert.ok(vault.has("default", "PLAIN_KEY"));
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush accounts` behaves like `hush ls`", () => {
+    const p = project();
+    try {
+      const r = p.run(["accounts"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /`hush accounts` is deprecated/);
+      assert.match(r.out, /THIS PROJECT/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush envs` and `hush env` behave like `hush ls`", () => {
+    const p = project();
+    try {
+      for (const args of [["envs"], ["env"]]) {
+        const r = p.run(args);
+        assert.equal(r.code, 0, r.out);
+        assert.match(r.out, /is deprecated/);
+        assert.match(r.out, /THIS PROJECT/);
+      }
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`hush env use` and `hush env drop` behave like `hush use` / `hush use --not`", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "work-fal"]).code, 0);
+      const used = p.run(["env", "use", "work-fal"]);
+      assert.equal(used.code, 0, used.out);
+      assert.match(used.out, /`hush env use` is deprecated/);
+      assert.deepEqual((JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] }).use, ["work-fal"]);
+
+      const dropped = p.run(["env", "drop", "work-fal"]);
+      assert.equal(dropped.code, 0, dropped.out);
+      assert.match(dropped.out, /`hush env drop` is deprecated/);
+      assert.deepEqual((JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] }).use, []);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("`--with a:b` aliases to `--use a/b`", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=v", "--to", "fal/acme"]).code, 0);
+      const r = p.run(["export", "--names", "--with", "fal:acme"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /--with fal:acme is deprecated/);
+      assert.match(r.out, /FAL_KEY/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+// The library is reachable from every add/rm form, not only `add <file>`:
+// "save things into the global environment" has to work for one value, for a
+// service, and in reverse.
+describe("the library from add KEY=value, add <service> and rm", () => {
+  const withLibrary = (p: ReturnType<typeof project>) => {
+    assert.equal(p.run(["global", "--create"]).code, 0);
+    writeFileSync(join(p.root, ".env.x"), "FAL_KEY=libval\n");
+    const r = p.run(["add", ".env.x", "--as", "Work fal", "--library"]);
+    assert.equal(r.code, 0, r.out);
+  };
+  const libraryVault = (p: ReturnType<typeof project>) => Vault.open(join(p.home, "vaults", "global", "vault.json"));
+  const projectVault = (p: ReturnType<typeof project>) => Vault.open(join(p.root, ".hush", "vault.json"));
+
+  // Bites: a --to taken literally dies on the space in "Work fal"; a --to that
+  // only ever targets the project writes a same-named copy there instead.
+  test("add KEY=value --to reaches a library set by its label or its slug, with no flag", () => {
+    const p = project();
+    try {
+      withLibrary(p);
+      const byLabel = p.run(["add", "EXTRA_KEY=v1", "--to", "Work fal"]);
+      assert.equal(byLabel.code, 0, byLabel.out);
+      assert.ok(libraryVault(p).has("work-fal", "EXTRA_KEY"), "the key did not land in the library set");
+      assert.equal(projectVault(p).hasSet("work-fal"), false, "a copy of the set appeared in the project");
+
+      const bySlug = p.run(["add", "OTHER_KEY=v2", "--to", "work-fal"]);
+      assert.equal(bySlug.code, 0, bySlug.out);
+      assert.ok(libraryVault(p).has("work-fal", "OTHER_KEY"));
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("add KEY=value --to <new name> --library creates it there; a new name alone lands in the project", () => {
+    const p = project();
+    try {
+      withLibrary(p);
+      const lib = p.run(["add", "K=v", "--to", "Brand new", "--library"]);
+      assert.equal(lib.code, 0, lib.out);
+      assert.ok(libraryVault(p).has("brand-new", "K"), "--library did not create the set in the library");
+      const proj = p.run(["add", "K=v", "--to", "Also new"]);
+      assert.equal(proj.code, 0, proj.out);
+      assert.ok(projectVault(p).has("also-new", "K"), "a new name did not default to the project");
+      assert.equal(libraryVault(p).hasSet("also-new"), false);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: a service form that only knows the project vault stores the
+  // prompted value there and never touches the library.
+  test("add <service> --library stores the prompted values in the library", () => {
+    const p = project();
+    try {
+      withLibrary(p);
+      const r = p.run(["add", "fal", "--as", "Personal fal", "--library"], "piped-fal-value\n");
+      assert.equal(r.code, 0, r.out);
+      assert.ok(libraryVault(p).has("personal-fal", "FAL_KEY"), "FAL_KEY is not in the library set");
+      assert.equal(projectVault(p).hasSet("personal-fal"), false, "the set was created in the project instead");
+      assert.ok(!r.out.includes("piped-fal-value"), "the value was echoed");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("rm KEY --from a library set trims it; rm <set> --yes removes a library set", () => {
+    const p = project();
+    try {
+      withLibrary(p);
+      assert.equal(p.run(["add", "EXTRA_KEY=v1", "--to", "work-fal"]).code, 0);
+      const key = p.run(["rm", "EXTRA_KEY", "--from", "work-fal"]);
+      assert.equal(key.code, 0, key.out);
+      assert.equal(libraryVault(p).has("work-fal", "EXTRA_KEY"), false, "the key is still in the library set");
+      assert.ok(libraryVault(p).hasSet("work-fal"), "trimming a key removed the whole set");
+
+      const set = p.run(["rm", "work-fal", "--yes"]);
+      assert.equal(set.code, 0, set.out);
+      assert.equal(libraryVault(p).hasSet("work-fal"), false, "the library set is still there");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("pass-through by path", () => {
+  // Bites: an onPath() that only walks PATH never finds "./dev.sh", so the
+  // most natural thing to type after `hush` is "Unknown command".
+  test("hush ./script.sh runs a script by relative path, injected and redacted", () => {
+    const p = project();
+    try {
+      assert.equal(p.run(["add", "FAL_KEY=pathvalue"]).code, 0);
+      writeFileSync(join(p.root, "dev.sh"), "#!/bin/sh\necho $FAL_KEY\n", { mode: 0o755 });
+      const r = p.run(["./dev.sh"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\[redacted:FAL_KEY\]/, r.out);
+      assert.ok(!r.out.includes("pathvalue"), "a live value leaked");
     } finally {
       p.cleanup();
     }

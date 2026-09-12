@@ -222,6 +222,11 @@ export interface LinkFile {
 /** .hush/use.json — which account this repo uses for each service. Committable. */
 export type UseFile = Record<string, string>;
 
+/**
+ * @deprecated Read for compatibility by usedSets() in src/library.ts, which
+ * folds each pair into a `service/account` set name. Nothing else should
+ * start reading this file — a set name is now just a name.
+ */
 export function loadUse(hushDir: string): UseFile {
   const p = join(hushDir, "use.json");
   if (!existsSync(p)) return {};
@@ -232,6 +237,11 @@ export function loadUse(hushDir: string): UseFile {
   }
 }
 
+/**
+ * @deprecated There is no (service, account) pin left to save once a set is
+ * just a name — `hush use` still writes this file for old vaults, but
+ * src/library.ts and src/vault.ts never call it themselves.
+ */
 export function saveUse(hushDir: string, use: UseFile): void {
   mkdirSync(hushDir, { recursive: true });
   writeFileSync(join(hushDir, "use.json"), JSON.stringify(use, null, 2) + "\n");
@@ -786,7 +796,12 @@ export class Vault {
     return this.envNames().filter((e) => !isAccountScope(e));
   }
 
-  /** Every (service, account) pair holding at least one secret. */
+  /**
+   * @deprecated Use sets() — a scope with a "/" in it is just a set whose name
+   * has a "/" in it now, not a separate kind of thing.
+   *
+   * Every (service, account) pair holding at least one secret.
+   */
   accounts(): { service: string; account: string; scope: string; vars: string[] }[] {
     const out: { service: string; account: string; scope: string; vars: string[] }[] = [];
     for (const scope of this.envNames()) {
@@ -799,7 +814,7 @@ export class Vault {
     );
   }
 
-  /** Which accounts exist for one service, e.g. fal -> ["acme", "personal", "client"]. */
+  /** @deprecated Use hasSet() with the set name directly, e.g. hasSet("fal/acme"). */
   accountsFor(service: string): string[] {
     return this.accounts()
       .filter((a) => a.service === service.toLowerCase())
@@ -807,6 +822,9 @@ export class Vault {
   }
 
   /**
+   * @deprecated Use resolveSets(id, names) — a flat, ordered list of set
+   * names, later wins, with no separate "base env plus accounts" shape.
+   *
    * Build the environment for a run: the base env, then each chosen service
    * account layered on top. Later layers win, so `--with` beats a pinned default.
    */
@@ -833,6 +851,33 @@ export class Vault {
       }
       Object.assign(secrets, this.materialize(id, scope));
       layers.push(scope);
+    }
+    return { secrets, layers };
+  }
+
+  /**
+   * Merge named sets in order, later wins per key. The unified replacement
+   * for resolve(): `resolveSets(id, ["default", "fal/acme"])` is what
+   * `resolve(id, "default", [{service:"fal",account:"acme"}])` used to be —
+   * one flat list instead of a base env plus a pile of (service, account)
+   * pairs, because a name with a "/" in it was never anything but a name.
+   *
+   * Unlike resolve(), a missing name always throws rather than being skipped
+   * silently — "default" gets no special treatment, so silence for one name
+   * and a hard failure for another would just be arbitrary.
+   */
+  resolveSets(id: Opener, names: string[]): { secrets: Record<string, string>; layers: string[] } {
+    const secrets: Record<string, string> = {};
+    const layers: string[] = [];
+    for (const name of names) {
+      if (!this.data.envs[name]) {
+        const known = this.envNames();
+        throw new ValidationError(
+          `No set called "${name}". You have: ${known.length ? known.join(", ") : "none yet"}.`,
+        );
+      }
+      Object.assign(secrets, this.materialize(id, name));
+      layers.push(name);
     }
     return { secrets, layers };
   }
@@ -892,15 +937,15 @@ export class Vault {
 
   /**
    * Every environment as a named set, which is how a person thinks about them:
-   * a thing with a name, a purpose, and some keys in it.
+   * a thing with a name, a purpose, and some keys in it. A name with a "/" in
+   * it — "fal/acme" — is not treated specially; it is just a name someone chose.
    */
-  envSets(): {
+  sets(): {
     name: string;
     label: string;
     description?: string;
     whenToUse?: string;
     source?: string;
-    isAccount: boolean;
     keys: string[];
   }[] {
     return this.envNames()
@@ -912,11 +957,32 @@ export class Vault {
           description: safeText(meta.description, 500),
           whenToUse: safeText(meta.whenToUse, 500),
           source: safeText(meta.source, 200),
-          isAccount: isAccountScope(name),
           keys: Object.keys(this.data.envs[name] ?? {}).sort(),
         };
       })
       .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  /**
+   * @deprecated Use sets(). `isAccount` was how the two old vocabularies told
+   * themselves apart; computed here only so cli.ts and ui.ts keep working
+   * until they branch on the name instead.
+   */
+  envSets(): {
+    name: string;
+    label: string;
+    description?: string;
+    whenToUse?: string;
+    source?: string;
+    isAccount: boolean;
+    keys: string[];
+  }[] {
+    return this.sets().map((s) => ({ ...s, isAccount: isAccountScope(s.name) }));
+  }
+
+  /** A set by this name exists, whether or not it holds anything yet. */
+  hasSet(name: string): boolean {
+    return Boolean(this.data.envs[name]);
   }
 
   /**

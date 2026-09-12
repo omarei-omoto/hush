@@ -21,10 +21,10 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Vault, namedVaultPath, ValidationError, type EnvMeta } from "./vault.ts";
+import { Vault, namedVaultPath, ValidationError, loadUse, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
-import { scopeOf } from "./services.ts";
+import { setNameFor } from "./services.ts";
 
 // ------------------------------------------------------------------- config
 
@@ -103,12 +103,45 @@ export function loadLinks(hushDir: string): string[] {
   }
 }
 
+/**
+ * Dedupe keeping each name's *last* position. Sets are layered later-wins,
+ * so when a name is listed twice the later mention is the one that counts —
+ * "`--use a`" on a set the project already uses means "and let a win now".
+ */
+function lastMentionWins(names: string[]): string[] {
+  return [...new Set([...names].reverse())].reverse();
+}
+
 export function saveLinks(hushDir: string, use: string[]): void {
   mkdirSync(hushDir, { recursive: true });
-  // Deduplicated and ordered, so the file is stable in git and the resolution
-  // order is the one shown in the UI rather than insertion order.
-  const unique = [...new Set(use)].sort();
-  writeFileSync(linksPath(hushDir), JSON.stringify({ use: unique }, null, 2) + "\n");
+  // Order is precedence (later wins), so the file keeps the order it was
+  // given — never sorted — and mentioning a set again moves it to the end,
+  // which is how "hush use <set>" on an already-used set makes it win.
+  writeFileSync(linksPath(hushDir), JSON.stringify({ use: lastMentionWins(use) }, null, 2) + "\n");
+}
+
+/**
+ * The ordered list of set names this project uses, floor first: "default",
+ * then linked sets in the order they were added, then old (service, account)
+ * pins for compatibility. Later wins, so the project's own "default" is the
+ * baseline every set the person chose to use layers on top of — naming it in
+ * envs.json is the one way to move it (and so to make it win).
+ *
+ * The use.json read is compatibility only, for a project set up before sets
+ * were unified — nothing writes that file from here (loadUse's own
+ * @deprecated note says the same). It can be deleted once no vault on earth
+ * still has one.
+ */
+export function usedSets(hushDir: string | null): string[] {
+  const names: string[] = [];
+  if (hushDir) {
+    names.push(...loadLinks(hushDir));
+    for (const [service, account] of Object.entries(loadUse(hushDir))) {
+      names.push(setNameFor(service, account));
+    }
+  }
+  if (!names.includes("default")) names.unshift("default");
+  return lastMentionWins(names);
 }
 
 // -------------------------------------------------------------- composition
@@ -122,13 +155,75 @@ export interface Composed {
 }
 
 /**
- * Everything a command should run with: the library sets this project links,
- * then the project's own environment, then the chosen service accounts.
+ * Everything a command should run with: the sets this project uses (see
+ * usedSets(): "default" as the floor, then links, then old pins) with `extra`
+ * (a `--use` flag) layered last, later wins.
  *
- * A linked set the library does not have is reported rather than thrown on. It
- * is the expected state for a teammate who cloned the repo and has not made
- * their own copy yet, and failing the command outright would tell them far less
- * than naming what is missing.
+ * For each name, the project wins over a library set of the same name; a
+ * *linked* name neither vault has is reported in `missing` rather than
+ * thrown on — the expected state for a teammate who cloned the repo and has
+ * not made their own copy of a global set yet, and failing the command
+ * outright would tell them far less than naming what is missing. A name in
+ * `extra` is different: the person just typed it, so silence about it would
+ * be a lie — except "default", which an empty project simply does not have,
+ * and that is not something to report either.
+ */
+export function composeSets(
+  project: Vault | null,
+  id: Opener,
+  hushDir: string | null,
+  extra: string[] = [],
+): Composed {
+  const secrets: Record<string, string> = {};
+  const layers: string[] = [];
+  const missing: string[] = [];
+
+  const library = openGlobal();
+  const typed = new Set(extra);
+  // Position is precedence: a name the project already uses, named again in
+  // `extra`, moves to the end so it wins for this run.
+  const names = lastMentionWins([...usedSets(hushDir), ...extra]);
+
+  for (const name of names) {
+    if (project?.hasSet(name)) {
+      Object.assign(secrets, project.materialize(id, name));
+      layers.push(name);
+    } else if (library?.hasSet(name)) {
+      Object.assign(secrets, library.materialize(id, name));
+      layers.push(`${globalVaultName()}:${name}`);
+    } else if (name === "default") {
+      // Every vault is born with one; an empty project simply has none.
+      continue;
+    } else if (typed.has(name)) {
+      // Plain names, because that is what `--use` accepts — a "main:work-fal"
+      // in this list would be a name the person cannot type back.
+      const known = [
+        ...new Set([...(project ? project.envNames() : []), ...(library ? library.envNames() : [])]),
+      ];
+      throw new ValidationError(
+        `No set called "${name}". You have: ${known.length ? known.join(", ") : "none yet"}.`,
+      );
+    } else {
+      missing.push(name);
+    }
+  }
+
+  return { secrets, layers, missing };
+}
+
+/**
+ * @deprecated Use composeSets(). Kept for cli.ts's `hush run` and
+ * `hush export`, which still resolve an env plus a pile of (service, account)
+ * choices themselves; once they build a flat set-name list directly (from a
+ * `--use` flag) they can call composeSets() and this goes away.
+ *
+ * Deliberately *not* implemented by calling composeSets(): its `extra`
+ * handling goes through usedSets(hushDir), which re-reads use.json for
+ * compatibility. A caller here has already resolved use.json plus `--with`
+ * into `choices` itself (see chooseAccounts() in cli.ts), with `--with`
+ * winning per service — so that second read would silently re-add the pinned
+ * account's other variables even after `--with` overrode it for this run.
+ * resolveSets() takes `choices` as given instead, with no read of its own.
  */
 export function compose(
   project: Vault | null,
@@ -145,7 +240,7 @@ export function compose(
   if (links.length) {
     const library = openGlobal();
     for (const name of links) {
-      if (!library || !library.data.envs[name]) {
+      if (!library?.hasSet(name)) {
         missing.push(name);
         continue;
       }
@@ -155,13 +250,17 @@ export function compose(
   }
 
   if (project) {
-    const resolved = project.resolve(id, baseEnv, choices);
+    const names = [
+      ...(project.hasSet(baseEnv) ? [baseEnv] : []),
+      ...choices.map((c) => setNameFor(c.service, c.account)),
+    ];
+    const resolved = project.resolveSets(id, names);
     Object.assign(secrets, resolved.secrets);
     layers.push(...resolved.layers);
   } else if (choices.length) {
     throw new ValidationError(
       `No project vault here, so there is no account to use for ${choices
-        .map((c) => scopeOf(c.service, c.account))
+        .map((c) => setNameFor(c.service, c.account))
         .join(", ")}.`,
     );
   }
@@ -186,12 +285,13 @@ export function librarySets(hushDir: string | null): LibrarySet[] {
   if (!library) return [];
   const linked = new Set(hushDir ? loadLinks(hushDir) : []);
   return library
-    .envSets()
+    .sets()
     // Every vault is born with an empty "default". In a project that is the
     // environment you work in; in the library it is an entry nobody created,
     // with no name and nothing in it, sitting at the top of a list of things
-    // you did create. It appears the moment it has anything in it.
-    .filter((s) => !s.isAccount)
+    // you did create. It appears the moment it has anything in it. (A set
+    // with a "/" in its name — an old "service account" — is listed like any
+    // other; it was never anything but a name someone chose.)
     .filter((s) => !(s.name === "default" && s.keys.length === 0 && !s.description && !s.whenToUse))
     .map((s) => ({
       name: s.name,

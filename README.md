@@ -374,9 +374,10 @@ point.
 }
 ```
 
-Set `"requireApproval": []` to turn it off. On Linux and Windows, where there is
-no native dialog, requests queue and you answer them with `hush approve` in your
-own terminal.
+Set `"requireApproval": []` to turn it off. On a Linux desktop the dialog is
+`zenity` or `kdialog`, whichever is installed (`HUSH_DIALOG` picks one). With no
+desktop at all — a server, CI — requests queue and you answer them with
+`hush approve` in your own terminal.
 
 ## What the agent may run
 

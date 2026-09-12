@@ -45,6 +45,15 @@ covers them in full — see *What it does not protect* — but in short:
 - The command deny list is a speed bump, not a boundary.
 - Revocation protects future values only. Anyone who could read a secret has.
 - Git history is permanent.
+- The file-based approval fallback (no native dialog available, or
+  `HUSH_APPROVAL_MODE=file`) is an unsigned file: anything with filesystem
+  access to `.hush/pending/` can answer its own request, the same way anyone
+  with a shell can run `hush approve`. This includes the agent whose action is
+  being gated, when it also has a Bash or file tool on the same machine.
+  `biometry: "required"` does not fall back to this path — it refuses outright
+  when biometry is unavailable — so it is the actual mitigation, not a native
+  dialog backend alone (an agent that can write files can also write to a
+  headless box that has no dialog backend to fall back to).
 
 ---
 
@@ -98,6 +107,18 @@ in the repo can only tighten what `~/.hush/policy.json`, your floor outside
 the repo, allows — so an agent editing project files cannot loosen it — but
 nothing stops a process from reading the keychain directly. The policy
 constrains hush; it cannot constrain a process that bypasses hush.
+
+This holds for a project directory; it assumes `hush` is being asked about
+*this* vault. `.hush/vault.json` is meant to be committed and read by anyone
+with repo access — that is the design, envelope encryption protects the
+values, not the file — so nothing stops a copy of it, plus `HUSH_VAULT`
+pointing at the copy, from being opened from a directory that has no
+`policy.json` of its own. With no `~/.hush/policy.json` floor configured,
+that reverts to "no policy anywhere for this invocation," which is opt-in by
+design for a project that was never set up for an agent, not for a copy of
+one that was. **Set a floor if an agent can set environment variables when it
+spawns `hush`** — true of any agent with a shell — even an empty
+`~/.hush/policy.json` is enough to keep `requireApproval` from disappearing.
 
 If that matters for your threat model, use a hardware identity
 ([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with `age-plugin-yubikey` or

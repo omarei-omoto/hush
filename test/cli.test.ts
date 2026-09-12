@@ -8,7 +8,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, statSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, statSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
@@ -875,6 +875,58 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
+  // Red team, 2026-09-12: grants.local.json lives inside .hush/, which an
+  // agent has ordinary write access to — it is not the user-level floor. It
+  // used to be trusted unconditionally as proof a human already approved,
+  // for every action including "reveal" and "add". An agent could write its
+  // own future-dated entry for the exact scope string it was about to need
+  // (every shape is documented in policy.ts and this file's own comments)
+  // and skip approval entirely, including a policy that requires biometry.
+  // "run" keeps using this cache deliberately (see the tests above) — the
+  // fix is that "reveal" (hands back plaintext) and "add" (writes a secret
+  // the agent itself supplied, unreviewed) never consult it.
+  test("a forged reveal grant on disk is never honoured, even with biometry required", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
+      );
+      // Exactly the scope string cmdGet computes for this key and env.
+      writeFileSync(
+        join(p.hushDir, "grants.local.json"),
+        JSON.stringify({ "reveal:default/STRIPE_SECRET_KEY": Date.now() + 3_600_000 }),
+      );
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--yes"]);
+      assert.equal(r.code, 1, r.out);
+      assert.ok(!r.out.includes("sk_live_cli"), `a forged grants.local.json leaked a credential:\n${r.out}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret", () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["add"], biometry: "required", approvalTimeoutSeconds: 1 }),
+      );
+      // Exactly the scope string cmdAddKeyValue computes for this key and set.
+      writeFileSync(
+        join(p.hushDir, "grants.local.json"),
+        JSON.stringify({ "add:default/PLANTED_KEY": Date.now() + 3_600_000 }),
+      );
+      const r = p.run(["add", "PLANTED_KEY=malicious-value", "--to", "default"]);
+      assert.equal(r.code, 1, r.out);
+
+      const meta = JSON.parse(p.run(["ls", "default", "--json"]).out) as { keys: string[] };
+      assert.ok(!meta.keys.includes("PLANTED_KEY"), "a forged grants.local.json let an unapproved secret get planted");
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("export is gated as reveal; --names is not, because it reveals nothing", () => {
     const p = project({ HUSH_APPROVAL_MODE: "file" });
     try {
@@ -1117,6 +1169,54 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
 
       assert.ok(existsSync(grantsPath), "no grants file was written for the session approval");
       assert.equal(statSync(grantsPath).mode & 0o777, 0o600);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Red team, 2026-09-12: grants.local.json lives inside .hush/, which an
+  // agent confined to the project can write to. writeFileSync/chmodSync
+  // follow symlinks by default, so an agent that plants grants.local.json as
+  // a symlink to the user's ~/.hush/policy.json floor gets a free ride on the
+  // next legitimate approval: the human clicks "Allow 15 min" for something
+  // ordinary, and hush's own write silently replaces the floor's content
+  // with grant JSON — destroying every requireApproval/denyKeys/biometry
+  // requirement the floor held, permanently, for every project on the
+  // machine. The agent never touches the floor path itself; it only sets up
+  // where a later, legitimate write lands.
+  test("a symlinked grants.local.json cannot be used to clobber the user's policy floor", async () => {
+    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    try {
+      const floorPath = join(p.home, "policy.json");
+      const floorBefore = JSON.stringify({ requireApproval: ["run", "add", "reveal"], denyCommands: ["node", "bash"] });
+      writeFileSync(floorPath, floorBefore);
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
+
+      const grantsPath = join(p.hushDir, "grants.local.json");
+      symlinkSync(floorPath, grantsPath);
+
+      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "echo", "RAN"], {
+        cwd: p.root, env: p.env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      child.stdout?.on("data", (d) => (stdout += String(d)));
+      let stderr = "";
+      child.stderr?.on("data", (d) => (stderr += String(d)));
+
+      let seen: ReturnType<typeof pendingRequests> = [];
+      for (let i = 0; i < 80 && !seen.length; i++) {
+        seen = pendingRequests(p.hushDir);
+        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(seen.length, 1, `no pending approval request appeared:\n${stdout}${stderr}`);
+      // The human legitimately approves — this is not the attack, it is the
+      // ordinary path a real session grant is written through.
+      answerRequest(p.hushDir, seen[0].id, "session");
+
+      const [code] = await once(child, "exit");
+      assert.equal(code, 0, stdout + stderr);
+
+      assert.equal(readFileSync(floorPath, "utf8"), floorBefore, "a legitimate approval clobbered the user's policy floor through a symlink");
     } finally {
       p.cleanup();
     }

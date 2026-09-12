@@ -339,6 +339,10 @@ describe("fuzz: usedSets / composeSets order", () => {
               if (where === "project") project!.set(owner, name, "SHARED", `project:${name}`);
               else if (where === "library") library.set(owner, name, "SHARED", `library:${name}`);
             }
+            // The library's default is the global floor — but only when it
+            // holds something; an empty one must add no layer at all.
+            const globalHasKeys = chance(r, 0.5);
+            if (globalHasKeys) library.set(owner, "default", "GLOBAL_ONLY", "everywhere");
             library.save();
 
             const links = randomList(r, LINK_POOL, 5);
@@ -378,8 +382,11 @@ describe("fuzz: usedSets / composeSets order", () => {
             const expectedSecrets: Record<string, string> = {};
             for (const name of names) {
               if (name === "default") {
+                if (globalHasKeys) {
+                  expectedLayers.push(`${globalVaultName()}:default`);
+                  expectedSecrets.GLOBAL_ONLY = "everywhere";
+                }
                 if (hasProject) expectedLayers.push("default");
-                else expectedLayers.push(`${globalVaultName()}:default`);
                 continue;
               }
               const where = locations.get(name);

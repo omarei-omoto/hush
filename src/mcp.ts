@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { resolveVaultPath, Vault, audit, loadUse } from "./vault.ts";
 import { serviceLabel, knownVars, scopeOf, serviceForTool } from "./services.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
+import { checkEnv, checkScopes, checkCommand } from "./policy.ts";
 import { requireIdentity } from "./identity.ts";
 import { scanRepo, reconcile } from "./scan.ts";
 import { runWithSecrets } from "./run.ts";
@@ -297,50 +298,13 @@ function loadCtx(): Ctx {
   };
 }
 
-function checkEnv(ctx: Ctx, env: string): void {
-  if (ctx.policy.allowEnvs.length && !ctx.policy.allowEnvs.includes(env)) {
-    throw new Error(`Policy forbids agent access to environment "${env}".`);
-  }
-}
-
-/**
- * allowEnvs has to cover service-account scopes too. Checking only the base
- * environment let an agent pinned to "dev" pull any account it liked, including
- * a production one, by naming it in `accounts`.
- */
-function checkScopes(ctx: Ctx, scopes: string[]): void {
-  if (!ctx.policy.allowEnvs.length) return;
-  for (const s of scopes) {
-    if (!ctx.policy.allowEnvs.includes(s)) {
-      throw new Error(`Policy forbids agent access to "${s}". Allowed: ${ctx.policy.allowEnvs.join(", ")}.`);
-    }
-  }
-}
-
-function checkCommand(ctx: Ctx, command: string): void {
-  const base = command.split("/").pop() ?? command;
-  if (ctx.policy.denyCommands.includes(base)) {
-    throw new Error(
-      `Refused: "${base}" can read the whole injected environment and write it somewhere ` +
-        `redaction cannot see, so it is denied by default. Put the work in a script and run ` +
-        `that instead, or ask the human to add "${base}" to unsafeAllowCommands in ` +
-        `.hush/policy.json if they accept the risk.`,
-    );
-  }
-  if (ctx.policy.allowCommands.length && !ctx.policy.allowCommands.includes(base)) {
-    throw new Error(
-      `Refused: "${base}" is not in policy.allowCommands (${ctx.policy.allowCommands.join(", ")}).`,
-    );
-  }
-}
-
 async function callTool(name: string, args: any): Promise<unknown> {
   const ctx = loadCtx();
   const env = args?.env || ctx.defaultEnv;
 
   switch (name) {
     case "hush_list_secrets": {
-      checkEnv(ctx, env);
+      checkEnv(ctx.policy, env);
       const items = ctx.vault.list(env);
       audit(ctx.hushDir, { actor: "mcp", action: "list", env, count: items.length });
       if (!items.length) return text(`No secrets in env "${env}".`);
@@ -354,7 +318,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
     }
 
     case "hush_describe_secret": {
-      checkEnv(ctx, env);
+      checkEnv(ctx.policy, env);
       const key = requireArg(args, "key", "hush_describe_secret");
       if (!ctx.vault.has(env, key)) {
         return text(`"${key}" is NOT set in env "${env}". Use hush_request_secret to ask for it.`);
@@ -393,7 +357,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
     }
 
     case "hush_check_repo": {
-      checkEnv(ctx, env);
+      checkEnv(ctx.policy, env);
       const root = args?.path || ctx.root;
       const usages = scanRepo(root);
       const r = reconcile(usages, ctx.vault.list(env).map((i) => i.key));
@@ -418,9 +382,9 @@ async function callTool(name: string, args: any): Promise<unknown> {
     }
 
     case "hush_run": {
-      checkEnv(ctx, env);
+      checkEnv(ctx.policy, env);
       const command = requireArg(args, "command", "hush_run");
-      checkCommand(ctx, command);
+      checkCommand(ctx.policy, command);
       const cmdArgs: string[] = Array.isArray(args.args) ? args.args.map(String) : [];
 
       // Project defaults first, then whatever the caller explicitly asked for.
@@ -430,7 +394,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
       }
       const choices = [...chosen].map(([service, account]) => ({ service, account }));
       const resolved = ctx.vault.resolve(ctx.identity, env, choices);
-      checkScopes(ctx, resolved.layers);
+      checkScopes(ctx.policy, resolved.layers);
       const secrets = resolved.secrets;
       for (const k of ctx.policy.denyKeys) delete secrets[k];
 
@@ -491,7 +455,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
     }
 
     case "hush_add_secret": {
-      checkEnv(ctx, env);
+      checkEnv(ctx.policy, env);
 
       const service = args.service ? String(args.service).toLowerCase() : null;
       const account = args.account ? String(args.account) : null;
@@ -503,7 +467,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
       // HUSH_APPROVAL_MODE=file — a scope the policy forbids was never refused.
       // Worse, the fallback message handed the agent the exact command to run in
       // the terminal to get the forbidden account anyway.
-      checkScopes(ctx, [scope]);
+      checkScopes(ctx.policy, [scope]);
 
       if (!nativeDialogsAvailable()) {
         return text(

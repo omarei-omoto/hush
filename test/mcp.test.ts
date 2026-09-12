@@ -318,7 +318,10 @@ describe("policy has no dead knobs", () => {
     const fields = [...new Set([...iface.matchAll(/^\s{2}([a-zA-Z]+):/gm)].map((x) => x[1]))];
     assert.ok(fields.length >= 6, `only found ${fields.length} policy fields`);
 
-    const all = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts"]
+    // policy.ts now holds checkCommand/checkEnv/checkScopes — moved out of
+    // mcp.ts so cli.ts can call the same checks — which is where
+    // allowCommands and allowEnvs are actually read.
+    const all = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
       .map((f) => readFileSync(join(src, f), "utf8"))
       .join("\n");
 

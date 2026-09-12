@@ -498,6 +498,46 @@ describe("suggestSets()", () => {
     const s = suggestSets(["FAL_KEY", "GEMINI_API_KEY"], lib.filter((x) => x.name !== "acme-production"));
     assert.ok(s.picks.includes("gemini-team"), "the unambiguous key was abandoned after the tie");
   });
+
+  // Regression: found by the suggestSets fuzz property in test/fuzz-surfaces.test.ts.
+  // Three sets tied for "most coverage" (one key each, no set sharing a key with
+  // another) used to make the picker give up outright: the tie-break loop only
+  // ever cleared a key out of `remaining` when *two or more* of the tied sets
+  // both offered it, and checked whether *anything had ever been marked
+  // ambiguous* to decide whether to keep going. With no shared key anywhere,
+  // that check was false on the very first pass, so it `break`-ed immediately
+  // and reported all three keys as "uncovered" even though each had an exact,
+  // unambiguous provider.
+  test("a tie with no actually-contested key resolves every set, not 'uncovered'", () => {
+    const s = suggestSets(["A", "B", "C"], [
+      { name: "S1", keys: ["A"] },
+      { name: "S2", keys: ["B"] },
+      { name: "S3", keys: ["C"] },
+    ]);
+    assert.deepEqual(s.picks.slice().sort(), ["S1", "S2", "S3"]);
+    assert.deepEqual(s.provider, { A: "S1", B: "S2", C: "S3" });
+    assert.deepEqual(s.ambiguous, []);
+    assert.deepEqual(s.uncovered, []);
+  });
+
+  // Regression: same root cause, but worse. Once one real ambiguity had already
+  // been recorded earlier in the run, the same "anything ever ambiguous?" check
+  // stayed true forever, so a later three-way tie with no contested key neither
+  // broke nor made progress — `remaining` never shrank and the function spun
+  // forever. This is what the fuzzer actually found: a run of `npm test` that
+  // never returns. The fixed picker instead tracks whether *this round* found a
+  // contested key and, when it did not, takes every tied set at once (their
+  // covered keys are disjoint by construction, so there is nothing to decide).
+  test("a tie with no contested key after an earlier real one does not hang", () => {
+    const s = suggestSets(["X", "A", "B", "C"], [
+      { name: "S1", keys: ["X", "A"] },
+      { name: "S2", keys: ["X", "B"] },
+      { name: "S3", keys: ["C"] },
+    ]);
+    assert.deepEqual(s.ambiguous, [{ key: "X", options: ["S1", "S2"] }]);
+    assert.deepEqual(s.provider, { A: "S1", B: "S2", C: "S3" });
+    assert.deepEqual(s.uncovered, []);
+  });
 });
 
 describe("ensureProjectVault()", () => {

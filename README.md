@@ -8,9 +8,15 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![runtime deps](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](./package.json)
 
-No server. No SaaS. No shared password. Your git repo is the backend, and your
-coding agent gets to run `stripe migrate` without `sk_live_…` ever entering its
-context window.
+You keep your API keys in a `.env` file. It is plaintext, every process you
+launch can read it, and the day you pointed an AI coding agent at the repo it
+went into the agent's context window — and from there, wherever transcripts go.
+
+hush fixes that without a server, an account, or a shared password. Your
+secrets live **encrypted inside the repo itself**. `hush npm run dev` puts them
+in that one process and nowhere else. Your coding agent gets tools that can
+*use* a key but never read one. A teammate gets access with one command, and
+removing them re-encrypts everything. Zero dependencies; one `npm install`.
 
 ```bash
 hush init acme                  # a vault in .hush/vault.json — commit it

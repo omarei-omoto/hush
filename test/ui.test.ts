@@ -620,10 +620,13 @@ describe("the page script itself", () => {
 
   test("the page shows one list of sets at two levels, not the old two vocabularies", async () => {
     const { html } = await pageSource();
-    assert.ok(html.includes("Your library"), "the library section heading is missing");
-    // "This project" alone also names the (unrelated) standalone empty-state
-    // heading, so pin the one used by the actual set-listing section instead.
-    assert.ok(html.includes("committed with the repo"), "the project section heading is missing");
+    // The redesign moved the library's own copy into a one-line intro rather
+    // than a "Your library" card heading — pin that intro line instead.
+    assert.ok(html.includes("Yours alone, never in a repo."), "the library section intro is missing");
+    // "This folder" alone also names the (unrelated) setup-panel heading, so
+    // pin the folder-state string the header row actually shows once a
+    // project has a vault of its own.
+    assert.ok(html.includes("vault committed to the repo"), "the project folder-state copy is missing");
     assert.ok(!html.includes("Service accounts"), "the old Service accounts section is still there");
   });
 
@@ -649,6 +652,75 @@ describe("the page script itself", () => {
     assert.ok(libAt > -1 && projAt > -1, "the namer bar is missing a destination option");
     assert.ok(libAt < projAt, "the namer bar does not offer the library first");
     assert.match(panel, /if\(!S\.global\.exists\)dest\.value="project"/, "no fallback to project when there is no library");
+  });
+
+  test("a set's description and when-to-use render exactly once, not as a muted line plus a permanent boxed duplicate", async () => {
+    const { js } = await pageSource();
+    // The old boxed fields (mkField/.fieldinput/.fieldrow) are gone — editing
+    // happens in place on the same muted line the text is displayed on.
+    assert.ok(!/\bmkField\b/.test(js), "mkField still builds a second, boxed copy of the field");
+    assert.ok(!js.includes('className="fieldinput"'), ".fieldinput boxed input is still built");
+    assert.ok(!js.includes('"fieldrow"'), ".fieldrow wrapper is still built");
+    assert.match(js, /function editableRow\(/, "editableRow() is missing");
+    // setRow() must call it for both fields, and must not also emit a second
+    // static rowdesc for the description (which is how the duplicate happened).
+    const start = js.indexOf("function setRow(");
+    assert.ok(start > -1, "setRow() is missing");
+    const end = js.indexOf("\nfunction ", start + 1);
+    const body = js.slice(start, end > -1 ? end : undefined);
+    assert.equal(
+      (body.match(/editableRow\(set,where,"description"/g) || []).length,
+      1,
+      "description is not built by exactly one editableRow() call",
+    );
+    assert.match(body, /editableRow\(set,where,"whenToUse"/, "when-to-use is not editable in place");
+    assert.ok(!/\$\('<div class="rowdesc">'\+esc\(descText\)/.test(body), "the old static duplicate description line is still built");
+  });
+
+  test("Move to… is one control: an appearance:none select with its own drawn chevron, not a bare native select", async () => {
+    const { js, html } = await pageSource();
+    // Checked against the <style> text specifically — a comment in the script
+    // mentioning "appearance:none" must not be able to satisfy this on the
+    // actual CSS rule's behalf.
+    assert.match(html, /select\.moveselect\{appearance:none/, "the select still shows a native dropdown arrow");
+    assert.match(js, /className="moveto"/, "the select is not wrapped in .moveto for its own chevron");
+    assert.match(html, /\.moveto::after\{content:"⌄"/, "no chevron is drawn for the move-to control");
+  });
+
+  test("New set / New set here render as bordered buttons beside the section head, not toggles with no visual weight", async () => {
+    const { js, html } = await pageSource();
+    assert.match(js, /function newSetButton\(/, "newSetButton() is missing");
+    assert.ok(!/\bnewSetToggle\b/.test(js), "the old newSetToggle() is still referenced");
+    assert.match(html, /\.newbtn\{[^}]*border:1px solid var\(--line\)/, "the New set button has no visible border");
+    assert.match(js, /class="sectionhead"/, "New set is not paired with the section head on one line");
+  });
+
+  test("Delete this set sits at the end of the add-key row, not centered on its own line", async () => {
+    const { js } = await pageSource();
+    const start = js.indexOf("function setRow(");
+    const end = js.indexOf("\nfunction ", start + 1);
+    const body = js.slice(start, end > -1 ? end : undefined);
+    assert.match(body, /addRow\.append\(delBtn\)/, "Delete this set is not appended to the add-key row");
+    assert.ok(!body.includes('"fieldrow"'), "a separate centered row for Delete this set still exists");
+  });
+
+  test("the reorder arrows are real 24×24 targets, not ~8px glyphs", async () => {
+    const { html } = await pageSource();
+    assert.match(html, /\.resline \.updown button\{width:24px;height:24px/, "the reorder arrows were not sized up");
+  });
+
+  test("the narrow-width sidefoot (drop hint + rung) wraps to its own row, not squeezed into the scrollable tab row", async () => {
+    const { html } = await pageSource();
+    const start = html.indexOf("@media (max-width:800px)");
+    assert.ok(start > -1, "the 800px breakpoint is missing");
+    const end = html.indexOf("@media (max-width:480px)");
+    const block = html.slice(start, end > -1 ? end : undefined);
+    assert.match(block, /\.sidebar\{[^}]*flex-wrap:wrap/, "the sidebar no longer wraps its row");
+    assert.match(
+      block,
+      /\.sidefoot\{flex:1 1 100%/,
+      "the sidefoot is not forced onto its own line — it will compete with the tabs for width again",
+    );
   });
 });
 
@@ -1396,5 +1468,210 @@ describe("ui server — any folder", () => {
     const state = (await bareApi("/api/state")).body;
     assert.equal(state.folder.state, "vault");
     assert.ok(state.project.some((s: any) => s.secrets.some((k: any) => k.key === "PROJECT_SECRET")));
+  });
+});
+
+describe("ui server — the Agent section's endpoints", () => {
+  const hushDir = () => join(root, ".hush");
+
+  test("/api/policy writes only requireApproval, never touching a sibling field", async () => {
+    // The fixture's policy.json starts as {requireApproval: [], biometry: "off"}.
+    const r = await api("/api/policy", { requireApproval: ["run", "reveal"] });
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    const written = JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8"));
+    assert.deepEqual(written.requireApproval.sort(), ["reveal", "run"]);
+    assert.equal(written.biometry, "off", "a sibling field was clobbered");
+
+    const state = (await (await api("/api/state")).json()) as { policy: { requireApproval: string[] } };
+    assert.deepEqual(state.policy.requireApproval.sort(), ["reveal", "run"], "/api/state does not reflect the write");
+
+    // Turn it back off so later tests (reveal in particular) stay unattended.
+    await api("/api/policy", { requireApproval: [] });
+  });
+
+  test("/api/policy rejects a name outside run/add/reveal, and a non-array body", async () => {
+    for (const body of [{ requireApproval: ["run", "delete-everything"] }, { requireApproval: "run" }, {}]) {
+      const r = await api("/api/policy", body);
+      assert.equal(r.status, 400, `accepted ${JSON.stringify(body)}`);
+    }
+    // The rejected writes must not have landed.
+    const written = JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8"));
+    assert.deepEqual(written.requireApproval, []);
+  });
+
+  test("/api/policy 400s on a repo policy.json that is not valid JSON, rather than guessing at the rest of the file", async () => {
+    const policyPath = join(hushDir(), "policy.json");
+    const before = readFileSync(policyPath, "utf8");
+    writeFileSync(policyPath, "{ not json");
+    try {
+      const r = await api("/api/policy", { requireApproval: ["run"] });
+      assert.equal(r.status, 400);
+      assert.match(((await r.json()) as { error: string }).error, /not valid JSON/);
+      // Refused, not silently overwritten with a fresh file.
+      assert.equal(readFileSync(policyPath, "utf8"), "{ not json");
+    } finally {
+      writeFileSync(policyPath, before);
+    }
+  });
+
+  test("/api/pending lists a request the file-based approval flow dropped, and /api/answer resolves it and audits the decision", async () => {
+    const dir = join(hushDir(), "pending");
+    mkdirSync(dir, { recursive: true });
+    const id = "test-pending-1";
+    writeFileSync(
+      join(dir, `${id}.json`),
+      JSON.stringify({ id, code: "4242", action: "run", summary: "Run deploy.sh", detail: ["Scope: default"], at: new Date().toISOString() }),
+    );
+
+    const listed = await (await api("/api/pending", {})).json() as { pending: { id: string; code: string; summary: string }[] };
+    const mine = listed.pending.find((p) => p.id === id);
+    assert.ok(mine, "the pending request file was not listed");
+    assert.equal(mine!.code, "4242");
+    assert.equal(mine!.summary, "Run deploy.sh");
+
+    const before = readFileSync(join(hushDir(), "audit.log"), "utf8");
+    const answered = await api("/api/answer", { id, decision: "once" });
+    assert.equal(answered.status, 200, JSON.stringify(await answered.json()));
+
+    // answerRequest() writes the .answer file the file-based approval flow
+    // polls for; nothing is polling in this test, so it is still on disk.
+    assert.ok(existsSync(join(dir, `${id}.answer`)), "the decision was not written for the waiting caller to see");
+    assert.equal(readFileSync(join(dir, `${id}.answer`), "utf8"), "once");
+
+    const after = readFileSync(join(hushDir(), "audit.log"), "utf8");
+    assert.notEqual(after, before, "answering a pending request left no audit trail");
+    const newLine = after.slice(before.length).trim().split("\n").pop()!;
+    const event = JSON.parse(newLine);
+    assert.equal(event.action, "approval");
+    assert.equal(event.decision, "once");
+    assert.equal(event.on, "run", "the audited event did not name which gated action was answered");
+
+    // Clean up so it does not leak into other tests reading this hushDir.
+    rmSync(join(dir, `${id}.answer`));
+  });
+
+  test("/api/answer rejects an unknown decision, and requires an id", async () => {
+    assert.equal((await api("/api/answer", { id: "x", decision: "later" })).status, 400);
+    assert.equal((await api("/api/answer", { decision: "once" })).status, 400);
+  });
+
+  test("/api/audit returns the most recent events newest first, and never a field named value", async () => {
+    // Plenty of activity has already happened on this fixture by this point in
+    // the suite (secrets set, reveals, a team change) — enough real audit.log
+    // lines to check ordering against.
+    await api("/api/secret", { scope: "default", key: "AUDIT_MARKER", value: "audit_marker_value" });
+
+    const r = await (await api("/api/audit", {})).json() as { entries: Record<string, unknown>[] };
+    assert.ok(r.entries.length > 1, "too few entries to check ordering");
+    assert.equal(r.entries[0].action, "set", "the most recent event is not first");
+    assert.equal(r.entries[0].key, "AUDIT_MARKER");
+
+    const raw = JSON.stringify(r.entries);
+    assert.ok(!raw.includes("audit_marker_value"), "a value reached the browser through the audit log");
+    for (const e of r.entries) assert.ok(!("value" in e), "an audit entry carried a field named value");
+
+    // Belt and suspenders: even a line an attacker (or a bug elsewhere) wrote
+    // straight to the log with a "value" field must never be handed back.
+    const path = join(hushDir(), "audit.log");
+    const before = readFileSync(path, "utf8");
+    writeFileSync(path, before + JSON.stringify({ at: new Date().toISOString(), actor: "ui", action: "planted", value: "should_never_appear" }) + "\n");
+    try {
+      const r2 = await (await api("/api/audit", {})).json() as { entries: Record<string, unknown>[] };
+      const planted = r2.entries.find((e) => e.action === "planted");
+      assert.ok(planted, "the planted line did not even show up");
+      assert.ok(!("value" in planted!), "a field literally named value reached the browser");
+      assert.ok(!JSON.stringify(r2.entries).includes("should_never_appear"));
+    } finally {
+      writeFileSync(path, before);
+    }
+  });
+
+  test("/api/audit is empty rather than erroring before anything has ever been logged", async () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), "hush-audit-empty-"));
+    const emptyHome = mkdtempSync(join(tmpdir(), "hush-audit-empty-home-"));
+    const id = generateIdentity();
+    mkdirSync(join(emptyRoot, ".hush"), { recursive: true });
+    const emptyChild = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
+      cwd: emptyRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HUSH_HOME: emptyHome, HUSH_IDENTITY: encodeSecret(id), HUSH_BIOMETRY: "off", NO_COLOR: "1" },
+    });
+    try {
+      const url: string = await new Promise((resolve, reject) => {
+        let out = "";
+        const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
+        emptyChild.stdout!.on("data", (d) => {
+          out += d;
+          const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+          if (m) { clearTimeout(timer); resolve(m[1]); }
+        });
+      });
+      const parsed = new URL(url);
+      const r = await fetch(`${parsed.origin}/api/audit`, {
+        method: "POST",
+        headers: { "x-hush-token": parsed.searchParams.get("t")!, "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual((await r.json()) as { entries: unknown[] }, { entries: [] });
+    } finally {
+      emptyChild.kill();
+      for (const d of [emptyRoot, emptyHome]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  test("/api/state's resolution list explains what a run gets, without ever carrying a value", async () => {
+    // Give the library's own "default" set a key too, so this project's run
+    // gets both floors — the library's global default and this folder's own
+    // default — and "default" prints as two lines under one usedIndex.
+    await api("/api/secret", { where: "library", scope: "default", key: "GLOBAL_FLOOR_KEY", value: "global_floor_value" });
+
+    const s = (await (await api("/api/state")).json()) as {
+      used: string[];
+      resolution: { usedIndex: number; first: boolean; name: string; label: string; note: string; removable: boolean }[];
+    };
+    assert.ok(s.resolution.length >= s.used.length, "fewer resolution lines than used entries");
+    // "default" is two floors, not one — the library's global default (when it
+    // has keys) and the project's own default both print as usedIndex 0.
+    const defaultLines = s.resolution.filter((l) => l.usedIndex === 0);
+    assert.equal(defaultLines.length, 2, "expected both the global and this-folder default lines");
+    assert.equal(defaultLines.filter((l) => l.first).length, 1, "exactly one line per usedIndex must carry the reorder controls");
+    assert.ok(defaultLines.some((l) => l.note.includes("your global environment")));
+    assert.ok(defaultLines.some((l) => l.note === "(this folder)"));
+    assert.ok(!JSON.stringify(s.resolution).includes(SECRET_VALUE), "a value reached the resolution list");
+    assert.ok(!JSON.stringify(s.resolution).includes("global_floor_value"), "a value reached the resolution list");
+  });
+
+  test("/api/state's agent status is read fresh off disk, matching what hush doctor checks", async () => {
+    const mcpPath = join(root, ".mcp.json");
+    assert.ok(!existsSync(mcpPath), "a stray .mcp.json from another test would invalidate this check");
+    const before = (await (await api("/api/state")).json()) as { agent: { mcpRegistered: boolean } };
+    assert.equal(before.agent.mcpRegistered, false);
+
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { hush: { command: "node" } } }));
+    try {
+      const after = (await (await api("/api/state")).json()) as { agent: { mcpRegistered: boolean } };
+      assert.equal(after.agent.mcpRegistered, true, "state did not notice .mcp.json appearing");
+    } finally {
+      rmSync(mcpPath);
+    }
+
+    const again = (await (await api("/api/state")).json()) as { agent: { mcpRegistered: boolean } };
+    assert.equal(again.agent.mcpRegistered, false, "state kept reporting .mcp.json after it was removed");
+  });
+
+  test("/api/state's posture is a rung with a name, and members carry a fingerprint and a key/hardware kind", async () => {
+    const s = (await (await api("/api/state")).json()) as {
+      posture: { rung: number; name: string };
+      members: { name: string; fingerprint: string; kind: string }[];
+    };
+    assert.ok(Number.isInteger(s.posture.rung) && s.posture.rung >= 0 && s.posture.rung <= 5);
+    assert.ok(s.posture.name.length > 0);
+    assert.ok(s.members.length > 0, "the fixture's own member is missing");
+    for (const m of s.members) {
+      assert.equal(typeof m.fingerprint, "string");
+      assert.ok(m.fingerprint.length > 0, "a member has no fingerprint to show in the Team ledger");
+      assert.ok(m.kind === "key" || m.kind === "hardware", `unexpected member kind: ${m.kind}`);
+    }
   });
 });

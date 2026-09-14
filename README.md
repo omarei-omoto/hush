@@ -1,6 +1,13 @@
-# hush
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/omarei-omoto/hush/main/assets/logo-dark.png">
+    <img src="https://raw.githubusercontent.com/omarei-omoto/hush/main/assets/logo-light.png" alt="hush" width="260">
+  </picture>
+</p>
 
-**Envelope-encrypted team secrets your AI agent can use but never read.**
+<h1 align="center">hush</h1>
+
+<p align="center"><strong>Envelope-encrypted team secrets your AI agent can use but never read.</strong></p>
 
 [![CI](https://github.com/omarei-omoto/hush/actions/workflows/ci.yml/badge.svg)](https://github.com/omarei-omoto/hush/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@omarei/hush.svg)](https://www.npmjs.com/package/@omarei/hush)

@@ -4,7 +4,9 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
-Nothing yet.
+- **The app is an application now.** A sidebar — Library, This folder, Team, Agent, Activity — one section at a time, the folder and its state in the header. Sets are ledger rows; every value is a redaction bar that lifts on *Reveal*. New pages: **Team** (who can decrypt, with what key, and what removing them does), **Agent** (registration status, the three approval switches, pending approvals you can answer in the app), **Activity** (the audit log). Paper, ink and wax; system serif, sans and mono; no external resources. Works at phone width.
+- New endpoints: `/api/policy` (approval switches), `/api/pending` and `/api/answer` (the approval queue), `/api/audit`.
+- A logo, and a README that opens with the problem in plain words.
 
 ## 0.2.0 — 2026-09-12
 

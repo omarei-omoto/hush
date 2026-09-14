@@ -1215,6 +1215,8 @@ input[type=text].nameinput:focus{border-color:var(--line);background:var(--panel
 .editspan{cursor:pointer;display:inline-block;max-width:100%;border-bottom:1px dotted transparent}
 .editspan:hover{border-bottom-color:var(--ink-muted)}
 .editspan.placeholder{font-style:italic}
+/* An unset "when to use it" is an invitation, not information: offer it only once the row is open. */
+.ledgerrow:not(.open) .editrow.empty[data-field=whenToUse]{display:none}
 input[type=text].editinput{background:var(--panel);border:1px solid var(--line);border-radius:4px;
   padding:2px 6px;margin:-2px 0 0 -6px;font-size:13px;color:var(--ink);width:100%;max-width:60ch}
 input[type=text].editinput:focus{border-color:var(--ink);outline:none}
@@ -1522,6 +1524,7 @@ function redactionRow(scope,s,where){
 function editableRow(set,where,field,value,placeholder,ariaLabel){
   const holder=document.createElement("div");
   holder.className="rowdesc editrow";
+  holder.setAttribute("data-field",field);
   let current=value||"";
 
   const span=document.createElement("span");
@@ -1533,6 +1536,7 @@ function editableRow(set,where,field,value,placeholder,ariaLabel){
     holder.innerHTML="";
     span.textContent=current||placeholder;
     span.classList.toggle("placeholder",!current);
+    holder.classList.toggle("empty",!current);
     span.setAttribute("aria-label","Edit "+ariaLabel);
     holder.append(span);
   };
@@ -1629,6 +1633,7 @@ function setRow(set,where){
     chev.setAttribute("aria-expanded",open?"false":"true");
     chev.textContent=open?"›":"‹";
     detail.hidden=open;
+    row.classList.toggle("open",!open);
   };
 
   if(set.secrets&&set.secrets.length){

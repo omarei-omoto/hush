@@ -637,6 +637,15 @@ describe("the page script itself", () => {
     assert.ok(js.includes("● always used"), "the default set's card does not say it is the floor");
   });
 
+  // Bites: without the rule every collapsed row carries an italic
+  // "When to use it" line, which reads as noise on a screen of sets.
+  test("an unset when-to-use line is hidden until the row is opened", async () => {
+    const { html, js } = await pageSource();
+    assert.ok(html.includes(".ledgerrow:not(.open) .editrow.empty[data-field=whenToUse]{display:none}"), "the collapsed-row rule is missing");
+    assert.ok(js.includes('row.classList.toggle("open",!open)'), "opening a row does not mark it open");
+    assert.ok(js.includes('holder.classList.toggle("empty",!current)'), "an empty field is not marked empty");
+  });
+
   test("the namer bar's default destination is the library when one exists", async () => {
     const { js } = await pageSource();
     // Scoped to stagingPanel() itself — the new-set form lower on the page has

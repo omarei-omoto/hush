@@ -1208,16 +1208,21 @@ input[type=text].nameinput:focus{border-color:var(--line);background:var(--panel
 .quiet.wax{color:var(--wax)}
 .quiet.wax:hover{color:var(--wax)}
 .quiet:disabled{cursor:default;text-decoration:none}
+/* A single one-line control, not a stray span the name is edited with — click
+   turns it into an input; Enter/blur saves through /api/env describe, Escape
+   reverts. No separate boxed field duplicates it below the row. */
+.editrow{margin-top:2px}
+.editspan{cursor:pointer;display:inline-block;max-width:100%;border-bottom:1px dotted transparent}
+.editspan:hover{border-bottom-color:var(--ink-muted)}
+.editspan.placeholder{font-style:italic}
+input[type=text].editinput{background:var(--panel);border:1px solid var(--line);border-radius:4px;
+  padding:2px 6px;margin:-2px 0 0 -6px;font-size:13px;color:var(--ink);width:100%;max-width:60ch}
+input[type=text].editinput:focus{border-color:var(--ink);outline:none}
+.rowdetail{padding:0 4px 16px 32px}
 /* Dimming is only for the boundary-disabled reorder arrows — an informational
    label like "always used" must keep full-strength colour, or the "used" green
    drops below the 4.5:1 contrast floor (measured: 1.68:1 at 35% opacity). */
 .resline .updown button:disabled{opacity:.35}
-.rowdetail{padding:0 4px 16px 32px}
-.fieldrow{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;max-width:60ch}
-input[type=text].fieldinput{background:transparent;border:1px solid var(--line);border-radius:4px;
-  padding:6px 8px;color:var(--ink);font-size:14px;width:100%}
-input[type=text].fieldinput:hover{border-color:var(--ink-muted)}
-input[type=text].fieldinput:focus{border-color:var(--ink);outline:none}
 
 /* --------------------------------------------------------------- redrows */
 .redrow{display:flex;align-items:center;gap:10px;padding:6px 0}
@@ -1231,12 +1236,21 @@ input[type=text].fieldinput:focus{border-color:var(--ink);outline:none}
 .redbar.open .masked{transform:translateY(-100%)}
 @media (prefers-reduced-motion:reduce){.redbar .masked{transition:none}}
 .redactions{flex:0 0 auto;display:flex;gap:2px;align-items:center;flex-wrap:wrap}
-.moveselect{background:none;border:0;color:var(--ink-muted);font-size:13px;
-  padding:4px 6px;cursor:pointer;max-width:130px}
-.moveselect:hover{color:var(--ink)}
+/* One word-button, not a native select with a floating arrow: the select
+   itself carries the "Move to…" label, appearance:none removes the native
+   arrow, and .moveto draws a single small chevron of its own over it. */
+.moveto{position:relative;display:inline-flex;align-items:center}
+select.moveselect{appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  background:none;border:0;color:var(--ink-muted);font-size:13px;font-family:inherit;
+  padding:4px 16px 4px 6px;border-radius:4px;cursor:pointer;max-width:150px}
+select.moveselect:hover{color:var(--ink)}
+.moveto::after{content:"⌄";position:absolute;right:5px;top:50%;transform:translateY(-52%);
+  pointer-events:none;color:var(--ink-muted);font-size:11px}
+.moveto:hover::after{color:var(--ink)}
 .addrow{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}
 .addrow input{flex:1;min-width:120px}
 .addrow button{flex:0 0 auto}
+.addrow .deleteset{margin-left:auto}
 
 /* ----------------------------------------------------------------- forms */
 button.primary{background:var(--ink);color:var(--paper);border:1px solid var(--ink);
@@ -1252,16 +1266,32 @@ input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
 /* ----------------------------------------------------------- empty state */
 .empty{color:var(--ink-muted);padding:24px 4px;border-top:1px dashed var(--line);font-size:14px}
 
+/* A section's intro/subtitle line with its "New set" action on the same
+   line, right-aligned — so the button reads as an action next to what it
+   acts on, not a stray label floating in the ledger. */
+.sectionhead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
+  flex-wrap:wrap;margin:0 0 8px}
+.sectionhead .intro,.sectionhead .subtitle{margin:0}
+.newbtn{background:none;border:1px solid var(--line);color:var(--ink);border-radius:4px;
+  font-size:13px;padding:4px 10px;cursor:pointer;flex:0 0 auto;white-space:nowrap}
+.newbtn:hover{border-color:var(--ink-muted)}
+.newbtn[aria-expanded=true]{border-color:var(--ink)}
+
 /* -------------------------------------------------------------- setup box */
 .panelbox{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin:0 0 20px}
 .panelbox h3{font:600 15px var(--sans);margin:0 0 8px}
+.checkline{display:flex;align-items:center;gap:7px;margin:12px 0}
+.gorow{margin-top:16px}
 
 /* --------------------------------------------------------- resolution list */
 .resolution{margin:0 0 8px;padding:0;border-top:1px solid var(--line)}
 .resline{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--line);font-size:14px}
 .resline .num{font-family:var(--mono);color:var(--ink-muted);flex:0 0 20px}
 .resline .reslabel{flex:1;font-family:var(--serif)}
-.resline .updown{display:flex;gap:2px;flex:0 0 auto}
+.resline .updown{display:flex;gap:4px;flex:0 0 auto}
+.resline .updown button{width:24px;height:24px;padding:0;font-size:13px;line-height:1;
+  border:1px solid transparent;border-radius:4px}
+.resline .updown button:hover:not(:disabled),.resline .updown button:focus-visible{border-color:var(--line)}
 .rule{color:var(--ink-muted);font-size:13px;margin:10px 0 24px}
 
 /* ------------------------------------------------------------- team rows */
@@ -1329,13 +1359,29 @@ input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
 /* -------------------------------------------------------------- responsive */
 @media (max-width:800px){
   .shell{flex-direction:column}
-  .sidebar{width:auto;flex:0 0 auto;flex-direction:row;align-items:center;
-    padding:12px 16px;gap:16px;overflow-x:auto}
-  .navlist{flex-direction:row;gap:4px}
-  .navlist a{border-left:0;border-bottom:2px solid transparent;padding:6px 8px;border-radius:4px 4px 0 0}
+  /* flex-wrap so the sidefoot (drop hint + rung) is forced onto its own row
+     below brand+nav via flex-basis:100%, rather than competing with the tabs
+     for width in the same row and squeezing "Library" down to "Li…". */
+  .sidebar{width:auto;flex:0 0 auto;flex-direction:row;flex-wrap:wrap;align-items:center;
+    padding:12px 16px;gap:4px 16px}
+  .brand{flex:0 0 auto}
+  /* The tab row scrolls on its own axis rather than shrinking its labels —
+     min-width:0 lets a flex child shrink below its content size at all, which
+     is what makes its own overflow-x take over instead of wrapping text. */
+  .navlist{flex-direction:row;gap:4px;flex-wrap:nowrap;flex:1 1 auto;min-width:0;
+    overflow-x:auto;overflow-y:hidden;padding-right:24px;
+    -ms-overflow-style:none;scrollbar-width:none}
+  .navlist::-webkit-scrollbar{display:none}
+  .navlist li{flex:0 0 auto}
+  .navlist a{border-left:0;border-bottom:2px solid transparent;padding:6px 8px;
+    border-radius:4px 4px 0 0;white-space:nowrap}
   .navlist a.active{border-left-color:transparent;border-bottom-color:var(--ink)}
-  .sidefoot{margin-top:0;padding-top:0;border-top:0;flex-direction:row;gap:14px;white-space:nowrap}
+  .sidefoot{flex:1 1 100%;order:3;margin-top:4px;padding-top:10px;border-top:1px solid var(--line);
+    flex-direction:row;gap:14px;flex-wrap:wrap}
   .content{padding:20px}
+}
+@media (max-width:480px){
+  .navlist .count{display:none}
 }
 @media (max-width:400px){
   .content{padding:14px}
@@ -1437,6 +1483,11 @@ function redactionRow(scope,s,where){
   const dests=(here==="library"?S.library:S.project).map(function(x){return {name:x.name,label:x.label}})
     .filter(function(x){return x.name!==scope});
   if(dests.length){
+    // One control, not a select sitting loose next to a floating native arrow:
+    // .moveto draws its own chevron over an appearance:none select, so the
+    // whole thing reads as a single word-button like Replace beside it.
+    const mvWrap=document.createElement("span");
+    mvWrap.className="moveto";
     const mv=document.createElement("select");
     mv.className="moveselect";
     mv.setAttribute("aria-label","Move "+s.key+" to another set");
@@ -1448,7 +1499,8 @@ function redactionRow(scope,s,where){
       try{await refresh(await api("/api/move",{where:here,key:s.key,from:scope,to:to}));toast("moved "+s.key)}
       catch(e){toast(e.message)}
     };
-    actions.append(mv);
+    mvWrap.append(mv);
+    actions.append(mvWrap);
   }
 
   const del=$('<button type="button" class="quiet wax">Delete</button>');
@@ -1461,6 +1513,57 @@ function redactionRow(scope,s,where){
 }
 
 /* ------------------------------------------------------------ ledger rows */
+
+/**
+ * A muted line that becomes a text input on click — the description and
+ * when-to-use line under a set's name. Exactly one representation: no
+ * permanently-visible boxed field duplicates the same text below the row.
+ */
+function editableRow(set,where,field,value,placeholder,ariaLabel){
+  const holder=document.createElement("div");
+  holder.className="rowdesc editrow";
+  let current=value||"";
+
+  const span=document.createElement("span");
+  span.className="editspan";
+  span.tabIndex=0;
+  span.setAttribute("role","button");
+
+  const showSpan=()=>{
+    holder.innerHTML="";
+    span.textContent=current||placeholder;
+    span.classList.toggle("placeholder",!current);
+    span.setAttribute("aria-label","Edit "+ariaLabel);
+    holder.append(span);
+  };
+
+  const showInput=()=>{
+    const input=document.createElement("input");
+    input.type="text";input.className="editinput";input.value=current;input.placeholder=placeholder;
+    input.setAttribute("aria-label",ariaLabel);
+    holder.innerHTML="";holder.append(input);
+    input.focus();input.select();
+    let settled=false;
+    const save=async()=>{
+      if(settled)return;settled=true;
+      const next=input.value.trim();
+      if(next===current){showSpan();return}
+      const patch={action:"describe",where:where,name:set.name};patch[field]=next;
+      try{current=next;await refresh(await api("/api/env",patch))}
+      catch(e){toast(e.message);showSpan()}
+    };
+    input.onblur=save;
+    input.onkeydown=(ev)=>{
+      if(ev.key==="Enter"){input.blur()}
+      else if(ev.key==="Escape"){settled=true;showSpan()}
+    };
+  };
+
+  span.onclick=showInput;
+  span.onkeydown=(ev)=>{if(ev.key==="Enter"){ev.preventDefault();showInput()}};
+  showSpan();
+  return holder;
+}
 
 function setRow(set,where){
   const row=document.createElement("div");
@@ -1491,10 +1594,10 @@ function setRow(set,where){
   nm.onkeydown=(ev)=>{if(ev.key==="Enter")nm.blur();if(ev.key==="Escape"){nm.value=lastName;nm.blur()}};
   nameWrap.append(nm);
 
-  const fallback=(where==="library"&&set.name==="default")
-    ?"your global environment — under everything, in every folder":"";
-  const descText=set.description||fallback;
-  nameWrap.append($('<div class="rowdesc">'+esc(descText)+'</div>'));
+  const descFallback=(where==="library"&&set.name==="default")
+    ?"your global environment — under everything, in every folder":"what is this for?";
+  nameWrap.append(editableRow(set,where,"description",set.description,descFallback,"description for "+set.label));
+  nameWrap.append(editableRow(set,where,"whenToUse",set.whenToUse,"When to use it","when to use "+set.label));
   main.append(nameWrap);
 
   const keyWord=set.keys.length===1?" key":" keys";
@@ -1528,31 +1631,13 @@ function setRow(set,where){
     detail.hidden=open;
   };
 
-  const mkField=(value,placeholder,field,ariaLabel)=>{
-    const i=document.createElement("input");
-    i.type="text";i.className="fieldinput";i.value=value||"";i.placeholder=placeholder;
-    i.setAttribute("aria-label",ariaLabel);
-    let last=value||"";
-    i.onblur=async()=>{
-      if(i.value===last)return;
-      const patch={action:"describe",where:where,name:set.name};patch[field]=i.value;
-      try{last=i.value;await refresh(await api("/api/env",patch))}
-      catch(e){i.value=last;toast(e.message)}
-    };
-    i.onkeydown=(ev)=>{if(ev.key==="Enter")i.blur()};
-    return i;
-  };
-  const fr1=$('<div class="fieldrow"></div>');
-  fr1.append(mkField(set.description,"what is this for? (optional)","description","Description for "+set.label));
-  detail.append(fr1);
-  const fr2=$('<div class="fieldrow"></div>');
-  fr2.append(mkField(set.whenToUse,"when should you use it? (optional)","whenToUse","When to use "+set.label));
-  detail.append(fr2);
-
   if(set.secrets&&set.secrets.length){
     set.secrets.forEach(function(sec){detail.append(redactionRow(set.name,sec,where))});
   }
 
+  // The last line of the expanded row: the add-key fields on the left, and
+  // Delete this set at the far right of the very same line, not centered
+  // underneath it on a line of its own.
   const addRow=document.createElement("form");addRow.className="addrow";
   const ak=document.createElement("input");ak.type="text";ak.placeholder="KEY";ak.setAttribute("aria-label","New key name");
   const av=document.createElement("input");av.type="password";av.placeholder="value";av.autocomplete="new-password";
@@ -1565,18 +1650,15 @@ function setRow(set,where){
     if(!ak.value||!av.value)return;
     await setSecret(set.name,ak.value.trim(),av.value,where);
   };
-  detail.append(addRow);
-
-  if(set.source)detail.append($('<div class="muted">from '+esc(set.source)+'</div>'));
-
-  const delRow=$('<div class="fieldrow"></div>');
-  const delBtn=$('<button type="button" class="quiet wax">Delete this set</button>');
+  const delBtn=$('<button type="button" class="quiet wax deleteset">Delete this set</button>');
   delBtn.onclick=async()=>{
     if(!confirm('Delete "'+set.label+'" and its '+set.keys.length+' key(s)? This cannot be undone.'))return;
     await refresh(await api("/api/env",{action:"delete",where:where,name:set.name}));toast("deleted");
   };
-  delRow.append(delBtn);
-  detail.append(delRow);
+  addRow.append(delBtn);
+  detail.append(addRow);
+
+  if(set.source)detail.append($('<div class="muted">from '+esc(set.source)+'</div>'));
 
   row.append(detail);
   return row;
@@ -1641,18 +1723,20 @@ function newSetForm(where,onDone){
   return box;
 }
 
-function newSetToggle(where,buttonLabel){
-  const wrap=document.createElement("div");
-  const btn=$('<button type="button" class="quiet">'+esc(buttonLabel)+'</button>');
+/**
+ * The "New set" / "New set here" action — a bordered button that sits beside
+ * a section's own intro or subtitle line (see .sectionhead), toggling a
+ * full-width form panel in the caller-supplied holder below that line.
+ */
+function newSetButton(where,buttonLabel,holder){
+  const btn=$('<button type="button" class="newbtn">'+esc(buttonLabel)+'</button>');
   btn.setAttribute("aria-expanded","false");
-  const holder=document.createElement("div");
   btn.onclick=()=>{
     if(holder.childNodes.length){holder.innerHTML="";btn.setAttribute("aria-expanded","false");return}
     holder.append(newSetForm(where,function(){holder.innerHTML="";btn.setAttribute("aria-expanded","false")}));
     btn.setAttribute("aria-expanded","true");
   };
-  wrap.append(btn,holder);
-  return wrap;
+  return btn;
 }
 
 function librarySetup(){
@@ -1704,9 +1788,9 @@ function setupPanel(){
       cb.setAttribute("aria-label","Use "+set.label+" here");
       checks[set.name]=cb;
       row.append(cb);
-      row.append($('<div class="k">'+esc(set.label)+'</div>'));
+      row.append($('<div class="serif">'+esc(set.label)+'</div>'));
       const covered=Object.keys(sug.provider).filter(function(k){return sug.provider[k]===set.name});
-      row.append($('<div class="muted">'+esc((covered.length?covered:set.keys).join(", "))+'</div>'));
+      row.append($('<div class="muted mono">'+esc((covered.length?covered:set.keys).join(", "))+'</div>'));
       box.append(row);
     });
   }
@@ -1736,7 +1820,7 @@ function setupPanel(){
   }
 
   const agentRow=document.createElement("label");
-  agentRow.className="muted";
+  agentRow.className="muted checkline";
   const agentCb=document.createElement("input");
   agentCb.type="checkbox";
   agentRow.append(agentCb,document.createTextNode(" An AI agent will use secrets here (turn approvals on)"));
@@ -1755,7 +1839,10 @@ function setupPanel(){
       toast("this folder now uses "+use.length+" set(s)");
     }catch(e){toast(e.message)}
   };
-  box.append(go);
+  const goRow=document.createElement("div");
+  goRow.className="gorow";
+  goRow.append(go);
+  box.append(goRow);
   return box;
 }
 
@@ -1763,18 +1850,24 @@ function setupPanel(){
 
 function renderLibrary(){
   const wrap=document.createElement("div");
-  wrap.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
 
   if(S.global.error){
+    wrap.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
     wrap.append($('<div class="empty">'+esc(S.global.error)+'</div>'));
     return wrap;
   }
   if(!S.global.exists){
+    wrap.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
     wrap.append(librarySetup());
     return wrap;
   }
 
-  wrap.append(newSetToggle("library","New set"));
+  const holder=document.createElement("div");
+  const head=$('<div class="sectionhead"></div>');
+  head.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
+  head.append(newSetButton("library","New set",holder));
+  wrap.append(head);
+  wrap.append(holder);
 
   if(!S.library.length){
     wrap.append($('<div class="empty">Nothing here yet. Drop a .env anywhere on this page, or make a set.</div>'));
@@ -1838,12 +1931,15 @@ function renderFolder(){
   wrap.append(list);
   wrap.append($('<p class="rule">Later wins on a shared key.</p>'));
 
-  wrap.append($("<h3 class=\"subtitle\">This folder's own sets</h3>"));
+  const ownHolder=document.createElement("div");
+  const ownHead=$('<div class="sectionhead"></div>');
+  ownHead.append($("<h3 class=\"subtitle\">This folder's own sets</h3>"));
+  ownHead.append(newSetButton("project","New set here",ownHolder));
+  wrap.append(ownHead);
+  wrap.append(ownHolder);
   if(fstate==="links-only"){
     wrap.append($("<p class=\"muted\">No vault of its own yet — one is made the first time you add a secret here or a teammate.</p>"));
-    wrap.append(newSetToggle("project","New set here"));
   }else{
-    wrap.append(newSetToggle("project","New set here"));
     if(!S.project.length){
       wrap.append($('<div class="empty">Nothing here yet. Drop a .env anywhere on this page, or make a set.</div>'));
     }else{

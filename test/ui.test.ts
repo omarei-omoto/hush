@@ -653,6 +653,75 @@ describe("the page script itself", () => {
     assert.ok(libAt < projAt, "the namer bar does not offer the library first");
     assert.match(panel, /if\(!S\.global\.exists\)dest\.value="project"/, "no fallback to project when there is no library");
   });
+
+  test("a set's description and when-to-use render exactly once, not as a muted line plus a permanent boxed duplicate", async () => {
+    const { js } = await pageSource();
+    // The old boxed fields (mkField/.fieldinput/.fieldrow) are gone — editing
+    // happens in place on the same muted line the text is displayed on.
+    assert.ok(!/\bmkField\b/.test(js), "mkField still builds a second, boxed copy of the field");
+    assert.ok(!js.includes('className="fieldinput"'), ".fieldinput boxed input is still built");
+    assert.ok(!js.includes('"fieldrow"'), ".fieldrow wrapper is still built");
+    assert.match(js, /function editableRow\(/, "editableRow() is missing");
+    // setRow() must call it for both fields, and must not also emit a second
+    // static rowdesc for the description (which is how the duplicate happened).
+    const start = js.indexOf("function setRow(");
+    assert.ok(start > -1, "setRow() is missing");
+    const end = js.indexOf("\nfunction ", start + 1);
+    const body = js.slice(start, end > -1 ? end : undefined);
+    assert.equal(
+      (body.match(/editableRow\(set,where,"description"/g) || []).length,
+      1,
+      "description is not built by exactly one editableRow() call",
+    );
+    assert.match(body, /editableRow\(set,where,"whenToUse"/, "when-to-use is not editable in place");
+    assert.ok(!/\$\('<div class="rowdesc">'\+esc\(descText\)/.test(body), "the old static duplicate description line is still built");
+  });
+
+  test("Move to… is one control: an appearance:none select with its own drawn chevron, not a bare native select", async () => {
+    const { js, html } = await pageSource();
+    // Checked against the <style> text specifically — a comment in the script
+    // mentioning "appearance:none" must not be able to satisfy this on the
+    // actual CSS rule's behalf.
+    assert.match(html, /select\.moveselect\{appearance:none/, "the select still shows a native dropdown arrow");
+    assert.match(js, /className="moveto"/, "the select is not wrapped in .moveto for its own chevron");
+    assert.match(html, /\.moveto::after\{content:"⌄"/, "no chevron is drawn for the move-to control");
+  });
+
+  test("New set / New set here render as bordered buttons beside the section head, not toggles with no visual weight", async () => {
+    const { js, html } = await pageSource();
+    assert.match(js, /function newSetButton\(/, "newSetButton() is missing");
+    assert.ok(!/\bnewSetToggle\b/.test(js), "the old newSetToggle() is still referenced");
+    assert.match(html, /\.newbtn\{[^}]*border:1px solid var\(--line\)/, "the New set button has no visible border");
+    assert.match(js, /class="sectionhead"/, "New set is not paired with the section head on one line");
+  });
+
+  test("Delete this set sits at the end of the add-key row, not centered on its own line", async () => {
+    const { js } = await pageSource();
+    const start = js.indexOf("function setRow(");
+    const end = js.indexOf("\nfunction ", start + 1);
+    const body = js.slice(start, end > -1 ? end : undefined);
+    assert.match(body, /addRow\.append\(delBtn\)/, "Delete this set is not appended to the add-key row");
+    assert.ok(!body.includes('"fieldrow"'), "a separate centered row for Delete this set still exists");
+  });
+
+  test("the reorder arrows are real 24×24 targets, not ~8px glyphs", async () => {
+    const { html } = await pageSource();
+    assert.match(html, /\.resline \.updown button\{width:24px;height:24px/, "the reorder arrows were not sized up");
+  });
+
+  test("the narrow-width sidefoot (drop hint + rung) wraps to its own row, not squeezed into the scrollable tab row", async () => {
+    const { html } = await pageSource();
+    const start = html.indexOf("@media (max-width:800px)");
+    assert.ok(start > -1, "the 800px breakpoint is missing");
+    const end = html.indexOf("@media (max-width:480px)");
+    const block = html.slice(start, end > -1 ? end : undefined);
+    assert.match(block, /\.sidebar\{[^}]*flex-wrap:wrap/, "the sidebar no longer wraps its row");
+    assert.match(
+      block,
+      /\.sidefoot\{flex:1 1 100%/,
+      "the sidefoot is not forced onto its own line — it will compete with the tabs for width again",
+    );
+  });
 });
 
 describe("ui dropzone — imports that would not reach the app", () => {

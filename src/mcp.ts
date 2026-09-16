@@ -14,7 +14,15 @@ import { resolveVaultPath, Vault, audit } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
 import { composeSets, usedSets, librarySets, globalVaultName, openGlobal } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
-import { checkEnv, checkScopes, checkCommand, runScope, approvalCoverageLine, readPolicyFile, mergePolicies } from "./policy.ts";
+import {
+  checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
+  approvalCoverageLine, requestCoverageLine, readPolicyFile, mergePolicies,
+} from "./policy.ts";
+import {
+  isHeaderName, assertHeaderValue, requestWithSecrets, renderRequest,
+  requestSummary, requestSecretNames, prepare, type RequestInput,
+} from "./request.ts";
+import { loadSchema, validate, unsensitiveForOutput, describeProblems } from "./schema.ts";
 import { requireIdentity, hushHome } from "./identity.ts";
 import { scanRepo, reconcile } from "./scan.ts";
 import { runWithSecrets } from "./run.ts";
@@ -47,10 +55,26 @@ export interface Policy {
   unsafeAllowCommands: string[];
   /** Environments the agent may touch. */
   allowEnvs: string[];
+  /**
+   * Hosts `hush_request` may reach. Empty means "any host over https".
+   * Entries are a bare host (`api.stripe.com`), a host with a port
+   * (`localhost:3000`), or a subdomain glob (`*.example.com`). The list only
+   * ever narrows — it is the one control that decides *where* a credential
+   * may be sent, which no command or set rule can express.
+   */
+  allowHosts: string[];
   /** Keys the agent may never inject, even into an allowed command. */
   denyKeys: string[];
   maxRunMs: number;
-  /** Actions that need a human to approve on screen: "run", "add", "reveal". */
+  /**
+   * Actions that need a human to approve on screen: "run", "add", "reveal",
+   * "request".
+   *
+   * "request" is here by default for the same reason "run" is: it is a way to
+   * *use* a credential. It is arguably the one that needs it most, since a run
+   * keeps the value on this machine while a request puts it on the wire to a
+   * host the agent chose.
+   */
   requireApproval: string[];
   /** How long an "Allow 15 min" approval lasts. */
   approvalTtlSeconds: number;
@@ -71,6 +95,16 @@ export interface Policy {
    * policy.ts — both surfaces build the scope string through it.
    */
   approvalScope: "command" | "sets";
+  /**
+   * Keys the *user* has allowed to appear unmasked in output even though a
+   * project `.env.schema` also asks for it, e.g. `["APP_ENV"]`.
+   *
+   * This is deliberately floor-only: `mergePolicies` takes it from
+   * `~/.hush/policy.json` and ignores the repo file entirely, because a
+   * repository that can grant itself an unmask can read a value it was only
+   * ever supposed to use. Empty (the default) means "honour no repo request".
+   */
+  unmaskKeys: string[];
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -89,14 +123,17 @@ export const DEFAULT_POLICY: Policy = {
     "php", "irb", "osascript", "awk", "gawk", "tclsh", "lua",
   ],
   allowEnvs: [],
+  // See the interface above for the entry shapes.
+  allowHosts: [],
   denyKeys: [],
   maxRunMs: 120_000,
   unsafeAllowCommands: [],
-  requireApproval: ["run", "add", "reveal"],
+  requireApproval: ["run", "add", "reveal", "request"],
   approvalTtlSeconds: 900,
   approvalTimeoutSeconds: 120,
   biometry: "preferred",
   approvalScope: "command",
+  unmaskKeys: [],
 };
 
 /**
@@ -224,6 +261,55 @@ const TOOLS = [
         env: { type: "string", description: "Deprecated: the base set for this run, layered under sets. Prefer sets." },
       },
       required: ["command"],
+    },
+  },
+  {
+    name: "hush_request",
+    description:
+      "Make an authenticated HTTP request without the credential ever entering this " +
+      "conversation. Write $NAME where a secret belongs and hush substitutes it from the " +
+      "vault inside its own process; you get back the response with any secret values " +
+      "masked as [redacted:NAME]. Use this for any API call that needs a key, instead of " +
+      "trying to run curl/wget (denied) or building an Authorization header yourself. " +
+      "Secrets go into HEADER VALUES only unless you also list 'body' or 'query' in " +
+      "substitute. https only; the host must be one the policy allows.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Full URL, e.g. \"https://api.stripe.com/v1/refunds\".",
+        },
+        method: {
+          type: "string",
+          description: "HTTP method. Default GET, or POST when a body is given.",
+        },
+        headers: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description:
+            "Header name to value. Put the secret placeholder in the value, e.g. " +
+            "{\"Authorization\": \"Bearer $STRIPE_KEY\"}. The value is substituted inside " +
+            "hush and never returned to you.",
+        },
+        body: { type: "string", description: "Request body. Substituted only if \"body\" is in substitute." },
+        substitute: {
+          type: "array",
+          items: { type: "string", enum: ["body", "query"] },
+          description:
+            "Extra places, besides header values, where $NAME may be replaced. Omit for " +
+            "header values only, which is the safe default.",
+        },
+        sets: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Extra named sets to layer on top of this project's usual ones, for this call " +
+            "only, e.g. [\"work-stripe\"]. Later entries win on a shared key name. Use " +
+            "hush_list_sets to see the options.",
+        },
+      },
+      required: ["url"],
     },
   },
   {
@@ -450,6 +536,138 @@ async function callTool(name: string, args: any): Promise<unknown> {
       return text(lines.join("\n"));
     }
 
+    case "hush_request": {
+      const url = requireArg(args, "url", "hush_request");
+
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(url);
+      } catch {
+        return errText(`hush_request got something that is not a URL: ${JSON.stringify(url)}`);
+      }
+
+      // Names and values arrive as separate arguments here, so they are
+      // validated separately: joining them into "Name: value" and re-parsing
+      // would let a name containing a colon become a second header.
+      const headers: [string, string][] = [];
+      const rawHeaders = args.headers;
+      if (rawHeaders !== undefined && rawHeaders !== null) {
+        if (typeof rawHeaders !== "object" || Array.isArray(rawHeaders)) {
+          return errText('hush_request: "headers" must be an object of name -> value.');
+        }
+        for (const [name, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
+          if (typeof value !== "string") {
+            return errText(`hush_request: header ${JSON.stringify(name)} must have a string value.`);
+          }
+          if (!isHeaderName(name)) {
+            return errText(`hush_request: ${JSON.stringify(name)} is not a valid header name.`);
+          }
+          try {
+            assertHeaderValue(name, value);
+          } catch (e) {
+            return errText(`hush_request: ${(e as Error).message}`);
+          }
+          headers.push([name, value]);
+        }
+      }
+
+      const extraSets: string[] = Array.isArray(args.sets) ? args.sets.map(String) : [];
+      const resolved = composeSets(ctx.vault, ctx.identity, ctx.hushDir, extraSets);
+      checkScopes(ctx.policy, resolved.layers);
+      // The host takes the place of checkCommand's command: hush is the client
+      // here, so the destination is the thing the caller actually chooses, and
+      // it is the only control that decides where a credential may be sent.
+      checkHost(ctx.policy, parsedUrl);
+
+      const secrets = resolved.secrets;
+      for (const k of ctx.policy.denyKeys) delete secrets[k];
+
+      const input: RequestInput = {
+        url,
+        method: typeof args.method === "string" ? args.method : undefined,
+        headers,
+        body: typeof args.body === "string" ? args.body : undefined,
+        secrets,
+        substitute: Array.isArray(args.substitute) ? args.substitute.map(String) : [],
+        timeoutMs: ctx.policy.maxRunMs,
+        // A model's context is the scarce resource here, so a tool result is
+        // capped tighter than the CLI's own default.
+        maxBytes: 64 * 1024,
+      };
+
+      // Same schema gate as the CLI. No override here on purpose: a human may
+      // overrule their own schema, an agent should not be able to talk past it.
+      const requestSchema = loadSchema(ctx.root);
+      if (requestSchema) {
+        const problems = validate(secrets, requestSchema.rules, Object.keys(secrets));
+        if (problems.length) {
+          return errText(
+            `.env.schema rejected ${problems.length} value(s), so nothing was sent:\n` +
+              describeProblems(problems).map((l) => `  ${l}`).join("\n"),
+          );
+        }
+        // Only the user's floor can grant an unmask; see unsensitiveForOutput.
+        input.redactOmit = unsensitiveForOutput(requestSchema.rules, ctx.policy.unmaskKeys).omit;
+      }
+
+      // Validate before asking anyone to approve: a request that cannot be
+      // built (an unresolvable $NAME, a secret in the path, cleartext) should
+      // fail on its own, not after a human has been dragged into a dialog for
+      // something that was never going to be sent.
+      prepare(input);
+
+      if (ctx.policy.requireApproval.includes("request")) {
+        const ap = await requestApproval(ctx.hushDir, {
+          action: "request",
+          summary: `Request:  ${requestSummary(input, secrets)}`,
+          detail: [
+            `Sends:  ${requestSecretNames(input, secrets).join(", ") || "(no secret)"}`,
+            `Using sets:  ${resolved.layers.join(", ") || "(none)"}`,
+            `Directory:  ${ctx.root}`,
+            requestCoverageLine(ctx.policy, parsedUrl.host, resolved.layers),
+          ],
+          // Naming the host, so a grant for one destination cannot authorise
+          // the same sets being sent somewhere else.
+          scope: requestScope(ctx.policy, parsedUrl.host, resolved.layers),
+          ttlSeconds: ctx.policy.approvalTtlSeconds,
+          timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
+          biometry: ctx.policy.biometry,
+        });
+        audit(ctx.hushDir, { actor: "mcp", action: "approval", on: "request", decision: ap.decision, via: ap.via, code: ap.code });
+        if (ap.decision === "deny") {
+          return errText(ap.note ?? `The user denied this (code ${ap.code}, via ${ap.via}).`);
+        }
+        if (ap.decision === "timeout") {
+          return errText(
+            `No answer to the approval prompt (code ${ap.code}). Ask the user to check their screen, then retry.`,
+          );
+        }
+      }
+
+      let result;
+      try {
+        result = await requestWithSecrets(input);
+      } catch (e) {
+        return errText((e as Error).message);
+      }
+
+      audit(ctx.hushDir, {
+        actor: "mcp",
+        action: "request",
+        url: result.url,
+        method: result.method,
+        status: result.status,
+        layers: resolved.layers,
+        sent: result.used,
+        redactions: result.redactions,
+      });
+
+      // A non-2xx is a real answer the model needs to see rather than a tool
+      // failure: returning it as text lets it read the error body and adapt,
+      // where an isError result would just look like the call went wrong.
+      return text(renderRequest(result, { includeHeaders: true }));
+    }
+
     case "hush_run": {
       const command = requireArg(args, "command", "hush_run");
       checkCommand(ctx.policy, command);
@@ -476,6 +694,20 @@ async function callTool(name: string, args: any): Promise<unknown> {
       checkScopes(ctx.policy, resolved.layers);
       const secrets = resolved.secrets;
       for (const k of ctx.policy.denyKeys) delete secrets[k];
+
+      // Same schema gate as the CLI, and no way to skip it from here.
+      const runSchema = loadSchema(ctx.root);
+      // Only the user's floor can grant an unmask; see unsensitiveForOutput.
+      const redactOmit = runSchema ? unsensitiveForOutput(runSchema.rules, ctx.policy.unmaskKeys).omit : [];
+      if (runSchema) {
+        const problems = validate(secrets, runSchema.rules, Object.keys(secrets));
+        if (problems.length) {
+          return errText(
+            `.env.schema rejected ${problems.length} value(s), so nothing was run:\n` +
+              describeProblems(problems).map((l) => `  ${l}`).join("\n"),
+          );
+        }
+      }
 
       if (ctx.policy.requireApproval.includes("run")) {
         const ap = await requestApproval(ctx.hushDir, {
@@ -517,6 +749,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
         redact: true,
         capture: true,
         timeoutMs: ctx.policy.maxRunMs,
+        redactOmit,
       });
       audit(ctx.hushDir, {
         actor: "mcp",
@@ -556,10 +789,9 @@ async function callTool(name: string, args: any): Promise<unknown> {
             : ctx.defaultEnv;
 
       // Policy first, capability second. The other order meant that on any host
-      // without native dialogs — every Linux box, and macOS with
-      // HUSH_APPROVAL_MODE=file — a set the policy forbids was never refused.
-      // Worse, the fallback message handed the agent the exact command to run in
-      // the terminal to get the forbidden set anyway.
+      // without native dialogs a set the policy forbids was never refused.
+      // Worse, the fallback message handed the agent the exact command to run
+      // in the terminal to get the forbidden set anyway.
       checkScopes(ctx.policy, [set]);
 
       if (!nativeDialogsAvailable()) {
@@ -608,6 +840,9 @@ async function callTool(name: string, args: any): Promise<unknown> {
           "",
           service ? `Service:  ${serviceLabel(service)}` : `Set:  ${set}`,
           ...(account ? [`Account:  ${account}`] : []),
+          // Name the destination vault: the CLI's add approval already does,
+          // and the agent is the one choosing library vs project.
+          `Stored in:  ${target.label}`,
           target.vault.has(set, v) ? "This will REPLACE the existing value." : "",
         ].filter(Boolean));
         if (res.value) {

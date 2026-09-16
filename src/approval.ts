@@ -16,12 +16,12 @@
  *     checked against each other.
  *
  * macOS, GNOME and KDE desktops get native dialogs (see dialogs.ts for how a
- * backend is picked). Everywhere else falls back to a pending-request file
- * that the human resolves with `hush approve` in their own terminal.
+ * backend is picked). A machine that cannot put an approval in front of a human
+ * — no desktop, no fingerprint helper — is refused rather than handed a file
+ * to answer: the answer has to be *something the gated caller cannot supply*,
+ * and a file in the project is something an agent with a shell can write.
  */
 import { randomInt } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, chmodSync } from "node:fs";
-import { join } from "node:path";
 import { platform } from "node:os";
 import { authenticate, type BiometryMode, type BiometryResult } from "./biometry.ts";
 import { detectBackend, ttlLabel } from "./dialogs.ts";
@@ -46,6 +46,16 @@ export interface ApprovalRequest {
    * "off" — click dialog only.
    */
   biometry?: BiometryMode;
+  /**
+   * Whether the answer may include "allow for a while" as well as "allow once".
+   *
+   * Defaults to true, which suits a long-lived process (the MCP server, `hush
+   * ui`): the grant lives in that process's memory and covers the next request
+   * with the same scope. A one-shot command passes false, because its grant
+   * dies with it and offering the longer option would be a promise it cannot
+   * keep.
+   */
+  sessionGrant?: boolean;
 }
 
 export interface ApprovalResult {
@@ -53,19 +63,25 @@ export interface ApprovalResult {
   code: string;
   cached: boolean;
   /** How the human actually approved, for the audit log. */
-  via: "biometry" | "dialog" | "terminal" | "cache" | "none";
+  via: "biometry" | "dialog" | "cache" | "none";
   note?: string;
 }
 
 /**
- * Evaluated per call, not at import: HUSH_APPROVAL_MODE=file forces the
- * terminal flow, tests set it (and HUSH_DIALOG, PATH, DISPLAY) after this
- * module is already loaded, and a `platformFn` override — real callers never
- * pass one — lets tests exercise the Linux branches of dialogs.ts's
- * `detectBackend` from any host. See `ApprovalDeps.platform`.
+ * Evaluated per call, not at import: the optional seams on `ApprovalDeps` —
+ * real callers never pass them — let tests exercise the Linux branches of
+ * dialogs.ts's `detectBackend` from any host and resolve a dialog program to a
+ * fixture.
+ *
+ * Note what is *not* here: a way for the environment to choose the dialog
+ * program. That is the whole point of dialogs.ts's `systemProgram`.
  */
-const currentBackend = (platformFn: () => string = platform) =>
-  detectBackend({ env: process.env, platform: platformFn });
+const currentBackend = (deps: Pick<ApprovalDeps, "platform" | "resolveDialogProgram"> = {}) =>
+  detectBackend({
+    env: process.env,
+    platform: deps.platform ?? platform,
+    ...(deps.resolveDialogProgram ? { resolveProgram: deps.resolveDialogProgram } : {}),
+  });
 
 /**
  * scope -> epoch ms when the session approval lapses. Process-lifetime only.
@@ -76,129 +92,43 @@ const granted = new Map<string, number>();
 
 const grantKey = (hushDir: string, scope: string): string => `${hushDir}\u0000${scope}`;
 
-const grantsFilePath = (hushDir: string): string => join(hushDir, "grants.local.json");
 
 /**
- * Every grants file this process has written, so `clearApprovalCache()` can be
- * called with no argument (as every existing test does) and still undo them.
- */
-const writtenGrantFiles = new Set<string>();
-
-/**
- * A CLI invocation is a new process every time, so the in-memory `granted` map
- * above never survives from one command to the next: "Allow 15 min" would in
- * practice mean "allow this one command", and the user would be re-prompted
- * every single time. Mirroring session grants to a file next to the policy
- * lets the next `hush` process (and the long-lived MCP server, which shares
- * this module) see what an earlier process was told.
+ * Nothing here is written to disk, and that is the point.
  *
- * This is a convenience cache, not the source of truth for whether an action
- * is allowed, so a corrupt or unreadable file is treated as "no grants"
- * rather than a crash, and expired entries are simply not returned.
+ * An approval used to be mirrored into `.hush/grants.local.json` so that
+ * "Allow 15 min" survived the next `hush` invocation being a new process. That
+ * file lives inside the project, which is exactly the directory an agent with
+ * a shell can write, so the agent could pre-authorise its own approval — the
+ * same defect as the pending-request queue, in a different file. A grant is
+ * only worth something if the process reading it is the process the human
+ * answered, so that is where it lives now: the map above, gone when the
+ * process is.
+ *
+ * The practical effect: the long-lived surfaces (the MCP server, `hush ui`)
+ * still honour "Allow 15 min" for as long as they are running, and a fresh
+ * `hush` command asks again. A one-shot command is offered "Allow once" only,
+ * because that is all it can honestly promise — see `sessionGrant`.
  */
-function readGrantsFile(hushDir: string): Record<string, number> {
-  try {
-    const raw = JSON.parse(readFileSync(grantsFilePath(hushDir), "utf8")) as Record<string, unknown>;
-    const now = Date.now();
-    const live: Record<string, number> = {};
-    for (const [scope, expiresAt] of Object.entries(raw)) {
-      if (typeof expiresAt === "number" && expiresAt > now) live[scope] = expiresAt;
-    }
-    return live;
-  } catch {
-    return {};
-  }
-}
-
-function writeGrant(hushDir: string, scope: string, expiresAt: number): void {
-  const path = grantsFilePath(hushDir);
-  try {
-    // Never write through a symlink here. grants.local.json lives inside the
-    // project — an agent can create one there — and writeFileSync/chmodSync
-    // follow symlinks by default. A symlink planted at this path (pointing
-    // at, say, the user's ~/.hush/policy.json floor, which the agent cannot
-    // write to directly) would turn the next legitimate "Allow 15 min" into
-    // hush silently overwriting that file with grant JSON. Refusing costs
-    // nothing real: worst case a session grant does not persist to disk and
-    // the next `hush` invocation re-prompts, which is the safe direction.
-    const st = lstatSync(path, { throwIfNoEntry: false });
-    if (st && !st.isFile()) return;
-    const grants = readGrantsFile(hushDir);
-    grants[scope] = expiresAt;
-    writeFileSync(path, JSON.stringify(grants), { mode: 0o600 });
-    // writeFileSync only applies `mode` on creation, so a grants file left over
-    // from an earlier run would otherwise keep whatever mode it started with;
-    // the same fix is in cli.ts's `hush export --out`.
-    chmodSync(path, 0o600);
-    writtenGrantFiles.add(path);
-  } catch {
-    // Best-effort: worst case the next process re-prompts instead of reusing
-    // a grant that never made it to disk, which is the safe direction to fail.
-  }
-}
 
 /**
- * Test seam: forget every cached approval, in memory and on disk.
+ * Test seam: forget every cached approval.
  *
- * With a `hushDir`, only that project's grants are cleared: memory entries
- * keyed to it, and its grants file. With none, every grant this process has
- * ever handed out is cleared, which is what every existing caller wants: they
- * run inside a single node:test process and expect a clean slate between
- * tests without knowing which scratch directory a previous test used (which
- * may already be deleted, hence the try/catch rather than asserting it
- * existed).
+ * With a `hushDir`, only that project's grants are cleared. With none, every
+ * grant this process has handed out is cleared, which is what every existing
+ * caller wants: they run inside a single node:test process and expect a clean
+ * slate between tests without knowing which scratch directory a previous test
+ * used.
  */
 export function clearApprovalCache(hushDir?: string): void {
-  if (hushDir) {
-    const prefix = `${hushDir}\u0000`;
-    for (const k of granted.keys()) if (k.startsWith(prefix)) granted.delete(k);
-    const path = grantsFilePath(hushDir);
-    try { unlinkSync(path); } catch { /* nothing to remove */ }
-    writtenGrantFiles.delete(path);
-    return;
-  }
-  granted.clear();
-  for (const path of writtenGrantFiles) {
-    try { unlinkSync(path); } catch { /* already gone, e.g. its scratch dir was rmSync'd */ }
-  }
-  writtenGrantFiles.clear();
+  if (!hushDir) return void granted.clear();
+  const prefix = `${hushDir}\u0000`;
+  for (const k of granted.keys()) if (k.startsWith(prefix)) granted.delete(k);
 }
 
 const newCode = (): string => String(randomInt(1000, 10000));
 
 // ------------------------------------------------------------------ approval
-
-/** Fallback: drop a request file and wait for `hush approve` to answer it. */
-async function askViaFile(
-  hushDir: string,
-  req: ApprovalRequest,
-  code: string,
-  timeoutMs: number,
-): Promise<Decision> {
-  const dir = join(hushDir, "pending");
-  mkdirSync(dir, { recursive: true });
-  const id = `${Date.now()}-${code}`;
-  const file = join(dir, `${id}.json`);
-  writeFileSync(
-    file,
-    JSON.stringify({ id, code, action: req.action, summary: req.summary, detail: req.detail ?? [], at: new Date().toISOString() }, null, 2),
-  );
-
-  const answer = join(dir, `${id}.answer`);
-  const deadline = Date.now() + timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      if (existsSync(answer)) {
-        const a = readFileSync(answer, "utf8").trim();
-        return a === "session" ? "session" : a === "once" ? "once" : "deny";
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    return "timeout";
-  } finally {
-    for (const f of [file, answer]) if (existsSync(f)) unlinkSync(f);
-  }
-}
 
 /**
  * Seam for tests, and only for tests.
@@ -220,6 +150,13 @@ async function askViaFile(
 export interface ApprovalDeps {
   authenticate: (reason: string, timeoutMs: number) => Promise<BiometryResult>;
   platform?: () => string;
+  /**
+   * Same idea applied to the dialog program: real callers never supply one, so
+   * the program is always resolved by dialogs.ts's `systemProgram` (fixed
+   * OS-owned paths, root-owned, not group/world-writable). A test supplies a
+   * resolver to point at a fixture.
+   */
+  resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog") => string | null;
 }
 
 export async function requestApproval(
@@ -229,29 +166,11 @@ export async function requestApproval(
 ): Promise<ApprovalResult> {
   const code = newCode();
 
-  // "run" only lets an already-injected secret be used by a child process
-  // whose output is still redacted, so caching that grant to disk (a file
-  // inside the project, which an agent with ordinary write access to the repo
-  // can create) is an accepted convenience — it is how "Allow 15 min" survives
-  // the next `hush` invocation being a new process. "reveal" and "add" are not
-  // that: reveal hands back plaintext directly, and add writes a new secret
-  // an agent supplied without the human ever typing it. Either one skipped by
-  // a forged grants.local.json (right timestamp, wrong scope name, no human
-  // involved) is a value out or a planted credential, not a redaction gap —
-  // so neither is ever read from or written to disk. They still coalesce
-  // repeated calls within one long-lived process (e.g. hush ui's server) via
-  // the in-memory map alone. The same goes for every action once biometry
-  // is required: rung 4 promises a fingerprint, and a file an agent can
-  // write must not be able to stand in for one — the MCP server, being one
-  // long-lived process, still gets its session grants from memory.
-  const persistToDisk = req.action !== "reveal" && req.action !== "add" && req.biometry !== "required";
-
+  // One place a grant can live: this process's map. Nothing is read from the
+  // project, so there is nothing there for an agent to write — see the comment
+  // above `granted` for why "run" was not exempted from that.
   const key = grantKey(hushDir, req.scope);
-  // Memory first (cheap, and always current within this process), then the
-  // file another process — most often an earlier `hush` invocation — may have
-  // written. Found-on-disk is backfilled into memory so the rest of this
-  // process does not re-read the file for the same scope.
-  const until = granted.get(key) ?? (persistToDisk ? readGrantsFile(hushDir)[req.scope] : undefined);
+  const until = granted.get(key);
   if (until && until > Date.now()) {
     granted.set(key, until);
     return { decision: "session", code, cached: true, via: "cache" };
@@ -269,7 +188,6 @@ export async function requestApproval(
     if (bio === "ok") {
       const expiresAt = Date.now() + req.ttlSeconds * 1000;
       granted.set(key, expiresAt);
-      if (persistToDisk) writeGrant(hushDir, req.scope, expiresAt);
       return { decision: "session", code, cached: false, via: "biometry" };
     }
     if (bio === "denied") {
@@ -287,33 +205,42 @@ export async function requestApproval(
     // "preferred" and unavailable: fall through to the click dialog.
   }
 
-  const backend = currentBackend(deps.platform);
-  const decision = backend
-    ? await backend.approve(
-        { summary: req.summary, detail: req.detail ?? [], code, ttlLabel: ttlLabel(req.ttlSeconds) },
-        timeoutMs,
-      )
-    : await askViaFile(hushDir, req, code, timeoutMs);
+  const backend = currentBackend(deps);
+  if (!backend) {
+    // Nothing can put this request in front of a human: no dialog program, and
+    // no fingerprint helper was available a moment ago. The old fallback wrote
+    // the request to a file and accepted a matching answer file, which is not
+    // an approval — an agent with a shell writes that file itself, and the
+    // whole gate becomes a formality. Refusing is the honest answer, and the
+    // note says which of the two things would make it work.
+    return {
+      decision: "deny",
+      code,
+      cached: false,
+      via: "none",
+      note: "no prompt is available on this machine (no dialog program and no fingerprint helper)",
+    };
+  }
+
+  // A one-shot caller passes sessionGrant: false. Offering "Allow 15 min" from
+  // a process that exits with the command would be a promise it cannot keep,
+  // now that a grant is not written anywhere it could survive the process.
+  const sessionGrant = req.sessionGrant !== false;
+  const decision = await backend.approve(
+    {
+      summary: req.summary,
+      detail: req.detail ?? [],
+      code,
+      ttlLabel: sessionGrant ? ttlLabel(req.ttlSeconds) : null,
+    },
+    timeoutMs,
+  );
 
   if (decision === "session") {
     const expiresAt = Date.now() + req.ttlSeconds * 1000;
     granted.set(key, expiresAt);
-    if (persistToDisk) writeGrant(hushDir, req.scope, expiresAt);
   }
-  return { decision, code, cached: false, via: backend ? "dialog" : "terminal" };
-}
-
-/** For `hush approve`: list and answer pending requests on non-macOS hosts. */
-export function pendingRequests(hushDir: string): { id: string; code: string; summary: string; detail: string[] }[] {
-  const dir = join(hushDir, "pending");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")));
-}
-
-export function answerRequest(hushDir: string, id: string, decision: "once" | "session" | "deny"): void {
-  writeFileSync(join(hushDir, "pending", `${id}.answer`), decision);
+  return { decision, code, cached: false, via: "dialog" };
 }
 
 // ------------------------------------------------------------- secret entry
@@ -332,8 +259,9 @@ export async function promptForSecretNatively(
   label: string,
   context: string[],
   timeoutMs = 180_000,
+  deps: Pick<ApprovalDeps, "platform" | "resolveDialogProgram"> = {},
 ): Promise<SecretEntryResult> {
-  const backend = currentBackend();
+  const backend = currentBackend(deps);
   if (!backend) return { value: null, cancelled: false };
   return backend.enterSecret({ title: "hush — add a secret", lines: context, label }, timeoutMs);
 }

@@ -13,6 +13,7 @@ import { dirname, join, resolve, isAbsolute } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import {
   SCHEME,
+  SCHEME_V2,
   newDek,
   wrapDek,
   unwrapDek,
@@ -52,6 +53,15 @@ export interface SecretEntry extends Sealed {
    * value is still readable only by whoever could read the old key.
    */
   gen: number;
+  /**
+   * 2 when this value's AAD binds `gen` (see crypto.ts SCHEME_V2). Absent on
+   * values written by an older hush, whose AAD carried only `env|KEY`.
+   *
+   * Per entry rather than per file so a vault that was upgraded value by value
+   * still opens: the generation is only fed to the AEAD for entries that
+   * actually bound it.
+   */
+  v?: number;
   updatedAt: string;
   updatedBy: string;
   note?: string;
@@ -259,8 +269,26 @@ export function findHushDir(start = process.cwd()): string | null {
   }
 }
 
-export const namedVaultPath = (name: string): string =>
-  join(hushHome(), "vaults", name, "vault.json");
+/**
+ * A vault name, as it appears under `~/.hush/vaults/<name>/`.
+ *
+ * One path segment, no traversal. Every caller that turns an outside string
+ * into a vault path has to go through this: `path.join` normalises `..`, so a
+ * name like "../../escape" is otherwise joined straight out of the vault root
+ * and the create path then mkdirs the tree and writes a vault there.
+ */
+export function assertVaultName(name: string): void {
+  if (!LINK_NAME.test(name)) {
+    throw new ValidationError(
+      `"${name.slice(0, 40)}" is not a vault name. A name is one segment: letters, digits, dot, dash, underscore.`,
+    );
+  }
+}
+
+export const namedVaultPath = (name: string): string => {
+  assertVaultName(name);
+  return join(hushHome(), "vaults", name, "vault.json");
+};
 
 /** Resolve the vault file a given directory is governed by. */
 /**
@@ -552,6 +580,10 @@ function assertVaultShape(data: VaultFile, path: string): void {
       if (!isGeneration((e as unknown as SecretEntry).gen)) {
         bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" records generation ${JSON.stringify((e as unknown as SecretEntry).gen)}`);
       }
+      const aadVersion = (e as unknown as SecretEntry).v;
+      if (aadVersion !== undefined && (!Number.isSafeInteger(aadVersion) || aadVersion < 2)) {
+        bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" records an unknown AAD version ${JSON.stringify(aadVersion)}`);
+      }
     }
   }
 }
@@ -621,7 +653,7 @@ export class Vault {
     }
 
     const data: VaultFile = {
-      scheme: SCHEME,
+      scheme: SCHEME_V2,
       id: `vlt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
       name,
       createdAt: now,
@@ -656,9 +688,9 @@ export class Vault {
       );
     }
 
-    if (data?.scheme !== SCHEME) {
+    if (data?.scheme !== SCHEME && data?.scheme !== SCHEME_V2) {
       throw new Error(
-        `Unsupported vault scheme ${data?.scheme ?? "(none)"} (this build speaks ${SCHEME}).\n` +
+        `Unsupported vault scheme ${data?.scheme ?? "(none)"} (this build speaks ${SCHEME} and ${SCHEME_V2}).\n` +
           `  Upgrade hush, or check that ${path} really is a vault file.`,
       );
     }
@@ -727,6 +759,12 @@ export class Vault {
   }
 
   private writeAtomically(): void {
+    // A vault that now holds generation-bound values must not keep claiming to
+    // be v1: an older hush reading it would fail those values with a bare AEAD
+    // error instead of a clear "this build is too old" message.
+    if (Object.values(this.data.envs).some((m) => Object.values(m).some((e) => e.v === 2))) {
+      this.data.scheme = SCHEME_V2;
+    }
     const body = JSON.stringify(this.data, null, 2) + "\n";
     const tmp = `${this.path}.${process.pid}.tmp`;
 
@@ -839,7 +877,7 @@ export class Vault {
       // Sanitised here rather than at each call site: every renderer reads this,
       // and one that forgot would be a terminal-escape hole, not a cosmetic slip.
       .map(([key, e]) => ({
-        key,
+        key: safeText(key, 64) ?? "<unprintable>",
         updatedAt: safeText(e.updatedAt, 32) ?? "",
         updatedBy: safeText(e.updatedBy, 64) ?? "unknown",
         note: safeText(e.note),
@@ -897,12 +935,18 @@ export class Vault {
       .map((name) => {
         const meta = this.envMeta(name);
         return {
-          name,
+          // Scrubbed for the same reason a key name is: this is the shape every
+          // renderer reads, and a name that arrived in a hand-edited or
+          // git-merged vault file is shown, not looked up. `envNames()` and
+          // `hasSet()` keep the exact bytes for identity.
+          name: safeText(name, 80) ?? "<unprintable>",
           label: this.envLabel(name),
           description: safeText(meta.description, 500),
           whenToUse: safeText(meta.whenToUse, 500),
           source: safeText(meta.source, 200),
-          keys: Object.keys(this.data.envs[name] ?? {}).sort(),
+          keys: Object.keys(this.data.envs[name] ?? {})
+            .sort()
+            .map((k) => safeText(k, 64) ?? "<unprintable>"),
         };
       })
       .sort((a, b) => a.label.localeCompare(b.label));
@@ -974,6 +1018,15 @@ export class Vault {
     return out.sort((a, b) => a.env.localeCompare(b.env) || a.key.localeCompare(b.key));
   }
 
+  /**
+   * The generation bound into an entry's AAD, or undefined for a value this
+   * build did not seal. One place, so every reader makes the same decision
+   * about a vault that was upgraded value by value.
+   */
+  private aadGen(entry: SecretEntry): number | undefined {
+    return entry.v === 2 ? entry.gen : undefined;
+  }
+
   set(id: Opener, env: string, key: string, value: string, note?: string): void {
     assertScopeName(env);
     assertKeyName(key);
@@ -983,8 +1036,9 @@ export class Vault {
     const dek = this.dek(id);
     const slot = this.ensureEnv(env);
     slot[key] = {
-      ...sealValue(dek, env, key, value),
+      ...sealValue(dek, env, key, value, this.data.dek.generation),
       gen: this.data.dek.generation,
+      v: 2,
       updatedAt: new Date().toISOString(),
       updatedBy: this.memberName(id),
       ...(trimNote(note) ? { note: trimNote(note) } : {}),
@@ -994,7 +1048,7 @@ export class Vault {
   get(id: Opener, env: string, key: string): string {
     const entry = this.data.envs[env]?.[key];
     if (!entry) throw new ValidationError(`No secret "${key}" in env "${env}".`);
-    return openValue(this.dek(id), env, key, entry);
+    return openValue(this.dek(id), env, key, entry, this.aadGen(entry));
   }
 
   /**
@@ -1024,11 +1078,12 @@ export class Vault {
     this.structural = true;
     this.opener = id;
 
-    const value = openValue(this.dek(id), from, key, entry);
+    const value = openValue(this.dek(id), from, key, entry, this.aadGen(entry));
     const slot = this.ensureEnv(to);
     slot[key] = {
-      ...sealValue(this.dek(id), to, key, value),
+      ...sealValue(this.dek(id), to, key, value, this.data.dek.generation),
       gen: this.data.dek.generation,
+      v: 2,
       updatedAt: entry.updatedAt,
       updatedBy: entry.updatedBy,
       ...(entry.note ? { note: entry.note } : {}),
@@ -1067,7 +1122,7 @@ export class Vault {
     const dek = this.dek(id);
     const out: Record<string, string> = {};
     for (const [key, entry] of Object.entries(this.data.envs[env] ?? {})) {
-      out[key] = openValue(dek, env, key, entry);
+      out[key] = openValue(dek, env, key, entry, this.aadGen(entry));
     }
     return out;
   }
@@ -1195,8 +1250,9 @@ export class Vault {
     for (const [key, value] of Object.entries(plaintext)) {
       const prev = previous[key];
       moved[key] = {
-        ...sealValue(dek, to, key, value),
+        ...sealValue(dek, to, key, value, this.data.dek.generation),
         gen: this.data.dek.generation,
+        v: 2,
         updatedAt: prev.updatedAt,
         updatedBy: prev.updatedBy,
         ...(prev.note ? { note: prev.note } : {}),
@@ -1243,8 +1299,9 @@ export class Vault {
       for (const [key, value] of Object.entries(values)) {
         const prev = this.data.envs[env][key];
         this.data.envs[env][key] = {
-          ...sealValue(dek, env, key, value),
+          ...sealValue(dek, env, key, value, generation),
           gen: generation,
+          v: 2,
           updatedAt: prev.updatedAt,
           updatedBy: prev.updatedBy,
           ...(prev.note ? { note: prev.note } : {}),

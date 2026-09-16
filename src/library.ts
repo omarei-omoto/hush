@@ -228,8 +228,9 @@ export function composeSets(
 
 /**
  * The files every project's .hush/ carries besides the vault: what git must
- * never see (the audit log, pending approvals, local grants, a loose identity)
- * and what it must never try to merge (a vault is re-sealed as a whole, so a
+ * never see (the audit log, a loose identity, and the leftovers an older hush
+ * wrote next to them — a `pending/` directory and `*.local.json` grants) and
+ * what it must never try to merge (a vault is re-sealed as a whole, so a
  * textual merge of two versions is a corrupt vault).
  */
 export function writeProjectDotfiles(hushDir: string): void {

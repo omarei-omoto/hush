@@ -30,6 +30,19 @@ Anything that lets someone read a secret they should not be able to:
   them — including through `hush_run`'s output.
 - Reaching the local UI from another machine, or without the session token.
 - A revoked member still being able to decrypt.
+- Getting a value out through `hush_request` / `hush_request`: in a header the
+  caller named, in a query string or body it opted into, or reflected back in a
+  response the redactor failed to mask.
+- `hush_request` reaching a host the policy does not allow, being redirected to
+  one, or sending a credential in cleartext to a host that is not loopback.
+- Any approval being pre-authorised by a file in the project. Grants live in
+  the process the human answered and nowhere else, so there is no
+  `grants.local.json` to forge — see the approval section below.
+- `hush run --materialize` writing a value to a path the caller chose, handing
+  that path to a child, or leaving the file behind after the child exits.
+- The clipboard path in `hush get --copy`: the value reaching it, or the
+  clipboard tool being chosen from somewhere other than a real file on `PATH`.
+- `.env.schema` validation printing a value, or a schema declaring a value.
 - Code execution from something a vault or a repository can carry: a value, a
   key name, `.hush/link.json`, `.hush/vault.json`.
 
@@ -42,18 +55,32 @@ covers them in full — see *What it does not protect* — but in short:
   hardware rung exists for.
 - Output redaction is defeated by encoding. It stops an accident, not an
   adversary.
+- `hush_request` inherits that: the response is masked by matching known values,
+  and it is read as plain text — the request asks for `Accept-Encoding:
+  identity` for exactly that reason, and the body is capped before it is
+  scanned. A remote that base64-encodes a reflected credential still defeats it.
+- `allowHosts` is empty by default, so an agent may send an allowed set to any
+  https host. The approval dialog is what makes that visible; the host list is
+  what bounds it.
+- **Materialising is a reveal, and is treated as one.** It writes plaintext to
+  the filesystem, so it needs the `reveal` approval, and it is deliberately
+  absent from the MCP surface. The file is `0600` and removed on exit, but a
+  `SIGKILL` cannot be caught: the file survives that, and page cache holds it
+  regardless.
+- **Values under five characters are not masked at all.** `redact.ts` skips
+  them as noise; `hush add` and `hush adopt` now say so when they store one.
+- `.env.schema` is read for rules only. The placeholder after `=` is ignored,
+  and a validation failure prints the key, the rule and the length, never the
+  value.
 - The command deny list is a speed bump, not a boundary.
 - Revocation protects future values only. Anyone who could read a secret has.
 - Git history is permanent.
-- The file-based approval fallback (no native dialog available, or
-  `HUSH_APPROVAL_MODE=file`) is an unsigned file: anything with filesystem
-  access to `.hush/pending/` can answer its own request, the same way anyone
-  with a shell can run `hush approve`. This includes the agent whose action is
-  being gated, when it also has a Bash or file tool on the same machine.
-  `biometry: "required"` does not fall back to this path — it refuses outright
-  when biometry is unavailable — so it is the actual mitigation, not a native
-  dialog backend alone (an agent that can write files can also write to a
-  headless box that has no dialog backend to fall back to).
+- An approval has to come from something the gated process cannot supply: a
+  dialog drawn on your screen by an OS-owned program, or your fingerprint. There
+  is deliberately no file to answer. A host with no desktop *and* no biometric
+  helper cannot ask you anything, so it refuses the gated action instead of
+  pretending. Nothing in the environment can make an approval easier — the one
+  switch that exists (`HUSH_NO_DIALOG`) can only make hush refuse.
 
 ---
 
@@ -71,6 +98,10 @@ read before you trust it with anything real.
 | Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism |
 | Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new |
 | Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output |
+| A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed |
+| A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` |
+| A credential reaching the clipboard instead of the terminal | `hush get --copy` pipes it to `pbcopy`/`wl-copy`/`xclip`, resolved from `PATH`, never through argv |
+| A value of the wrong shape | `.env.schema` rules, checked before anything runs or is sent; messages carry the rule and the length, never the value |
 | A key entering a transcript | `hush_add_secret` opens a native input box; the value goes keyboard → vault |
 | Silent use of a credential | Approval dialog naming the command, accounts and variables, optionally gated on Touch ID |
 | Key theft from disk | Only with a hardware identity — see below |
@@ -104,11 +135,31 @@ one. The identity key lives in the login keychain, and hush retrieves it with th
 `security` CLI. Any process running as your user can do the same — including a
 shell command from an agent. Once `.hush/policy.json` exists, `hush get`,
 `hush export`, `hush run` and `hush add` apply the same policy and approval
-as the MCP tools, so shelling out to hush is not a way around them. The policy
+as the MCP tools, so shelling out to hush does not skip the *policy*. The
+approval is a separate question and depends on the mode: the dialog program is
+resolved only from fixed OS-owned paths (`/usr/bin`, `/bin`, `/usr/local/bin`,
+root-owned and not group- or world-writable) and is always executed by absolute
+path, so a caller cannot choose it by editing `PATH`, and there is no longer any
+environment variable that selects, replaces or skips it. There is also no file
+to answer: the pending-request queue that used to back this up was a second
+place the same caller could answer from, and it is gone. **An agent with a
+shell cannot answer an approval by itself**: it would have to click a dialog on
+your screen or touch the fingerprint reader for you. Where a machine can offer
+neither of those, hush refuses the gated action rather than accepting a file.
+The fingerprint helper is built fresh from hush's own source, per process, into
+a private folder — it is never read from a path anything running as you could
+have written, which is what makes "touch the sensor" mean what it says.
+The policy
 in the repo can only tighten what `~/.hush/policy.json`, your floor outside
 the repo, allows — so an agent editing project files cannot loosen it — but
 nothing stops a process from reading the keychain directly. The policy
 constrains hush; it cannot constrain a process that bypasses hush.
+
+The prompt itself is app-modal: a click anywhere else cannot answer it and
+cannot dismiss it. On macOS it is re-presented every 45 seconds until it is
+answered or the configured wait runs out, so a window that slips behind
+something comes back to the front, and a request that nobody answers lapses
+into a refusal rather than a quiet yes.
 
 This holds for a project directory; it assumes `hush` is being asked about
 *this* vault. `.hush/vault.json` is meant to be committed and read by anyone
@@ -121,6 +172,9 @@ design for a project that was never set up for an agent, not for a copy of
 one that was. **Set a floor if an agent can set environment variables when it
 spawns `hush`** — true of any agent with a shell — even an empty
 `~/.hush/policy.json` is enough to keep `requireApproval` from disappearing.
+The floor and the approval now hold on their own terms: the floor keeps the
+*policy* in force, and the approval is answered by a dialog or a fingerprint,
+neither of which the caller can supply.
 
 If that matters for your threat model, use a hardware identity
 ([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with `age-plugin-yubikey` or

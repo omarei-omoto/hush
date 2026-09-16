@@ -78,14 +78,14 @@ describe("crypto properties", () => {
   test("every seal uses a fresh IV", () => {
     const dek = newDek();
     const ivs = new Set<string>();
-    for (let i = 0; i < 2000; i++) ivs.add(sealValue(dek, "default", "K", "same value").iv);
+    for (let i = 0; i < 2000; i++) ivs.add(sealValue(dek, "default", "K", "same value", 1).iv);
     assert.equal(ivs.size, 2000, "an IV repeated under one key — GCM loses all guarantees");
   });
 
   test("the same value sealed twice yields different ciphertext", () => {
     const dek = newDek();
-    const a = sealValue(dek, "default", "K", "value");
-    const b = sealValue(dek, "default", "K", "value");
+    const a = sealValue(dek, "default", "K", "value", 1);
+    const b = sealValue(dek, "default", "K", "value", 1);
     assert.notEqual(a.ct, b.ct);
     assert.notEqual(a.iv, b.iv);
   });
@@ -98,14 +98,14 @@ describe("crypto properties", () => {
 
   test("tampering with any part of a sealed value is detected", () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "default", "K", "the value");
+    const sealed = sealValue(dek, "default", "K", "the value", 1);
     const flip = (field: "iv" | "ct" | "tag") => {
       const buf = Buffer.from(sealed[field], "base64");
       buf[0] ^= 0xff;
       return { ...sealed, [field]: buf.toString("base64") };
     };
     for (const field of ["iv", "ct", "tag"] as const) {
-      assert.throws(() => openValue(dek, "default", "K", flip(field)), /./, `${field} tamper undetected`);
+      assert.throws(() => openValue(dek, "default", "K", flip(field), 1), /./, `${field} tamper undetected`);
     }
   });
 

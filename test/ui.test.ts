@@ -41,7 +41,12 @@ before(async () => {
   child = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, HUSH_HOME: home, HUSH_IDENTITY: encodeSecret(id), HUSH_BIOMETRY: "off", NO_COLOR: "1" },
+    // HUSH_NO_DIALOG: no test here should ever pop a real approval dialog on
+    // the machine running the suite; a gated action refuses instead.
+    env: {
+      ...process.env, HUSH_HOME: home, HUSH_IDENTITY: encodeSecret(id),
+      HUSH_BIOMETRY: "off", HUSH_NO_DIALOG: "1", NO_COLOR: "1",
+    },
   });
 
   const url: string = await new Promise((resolve, reject) => {
@@ -950,6 +955,7 @@ describe("ui server — staged plaintext expires", () => {
         HUSH_HOME: ttlHome,
         HUSH_IDENTITY: encodeSecret(id),
         HUSH_BIOMETRY: "off",
+        HUSH_NO_DIALOG: "1",
         HUSH_UI_STAGE_TTL_MS: "400",
         NO_COLOR: "1",
       },
@@ -1090,6 +1096,7 @@ describe("ui server — named env sets", () => {
         HUSH_IDENTITY: encodeSecret(id),
         HUSH_BIOMETRY: "off",
         HUSH_NO_KEYCHAIN: "1",
+        HUSH_NO_DIALOG: "1",
         NO_COLOR: "1",
       },
     });
@@ -1345,6 +1352,7 @@ describe("ui server — any folder", () => {
         HUSH_IDENTITY: encodeSecret(id),
         HUSH_BIOMETRY: "off",
         HUSH_NO_KEYCHAIN: "1",
+        HUSH_NO_DIALOG: "1",
         NO_COLOR: "1",
       },
     });
@@ -1429,7 +1437,7 @@ describe("ui server — any folder", () => {
     assert.ok(!existsSync(join(hushDir, "policy.json")), "setup wrote a policy without being asked to");
   });
 
-  test("/api/setup with agent:true writes the three approvals, and a second call keeps an edited policy", async () => {
+  test("/api/setup with agent:true writes the default approvals, and a second call keeps an edited policy", async () => {
     const hushDir = join(bareRoot, ".hush");
     const policyPath = join(hushDir, "policy.json");
 
@@ -1437,7 +1445,7 @@ describe("ui server — any folder", () => {
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.ok(existsSync(policyPath), "no policy.json was written");
     const written = JSON.parse(readFileSync(policyPath, "utf8"));
-    assert.deepEqual(written.requireApproval, ["run", "add", "reveal"]);
+    assert.deepEqual(written.requireApproval, ["run", "add", "reveal", "request"]);
     assert.ok(!r.body.policyKept, "reported keeping a policy it just wrote for the first time");
 
     // Someone edits it by hand, turning approvals off.
@@ -1483,6 +1491,30 @@ describe("ui server — any folder", () => {
 describe("ui server — the Agent section's endpoints", () => {
   const hushDir = () => join(root, ".hush");
 
+  test("/api/policy sets how long an approval lasts, and leaves it alone when not asked", async () => {
+    // Someone who finds 15 minutes too short should be able to fix that from
+    // the page rather than by hand-editing policy.json.
+    const set = await api("/api/policy", { requireApproval: ["run"], approvalTtlSeconds: 1800 });
+    assert.equal(set.status, 200, JSON.stringify(await set.json()));
+    assert.equal(JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8")).approvalTtlSeconds, 1800);
+
+    const shown = (await (await api("/api/state")).json()) as { policy: { approvalTtlSeconds: number } };
+    assert.equal(shown.policy.approvalTtlSeconds, 1800, "/api/state does not report the duration the dialog uses");
+
+    // A caller that knows nothing about the field must not be able to reset it
+    // by leaving it out — that is how a control gets quietly cleared.
+    await api("/api/policy", { requireApproval: ["run"] });
+    assert.equal(JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8")).approvalTtlSeconds, 1800);
+  });
+
+  test("/api/policy refuses a duration outside a minute to a day", async () => {
+    for (const bad of [0, 30, 90_000, 1.5, "1800"]) {
+      const r = await api("/api/policy", { requireApproval: ["run"], approvalTtlSeconds: bad });
+      assert.equal(r.status, 400, `accepted ${JSON.stringify(bad)}`);
+    }
+    assert.equal(JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8")).approvalTtlSeconds, 1800);
+  });
+
   test("/api/policy writes only requireApproval, never touching a sibling field", async () => {
     // The fixture's policy.json starts as {requireApproval: [], biometry: "off"}.
     const r = await api("/api/policy", { requireApproval: ["run", "reveal"] });
@@ -1523,45 +1555,23 @@ describe("ui server — the Agent section's endpoints", () => {
     }
   });
 
-  test("/api/pending lists a request the file-based approval flow dropped, and /api/answer resolves it and audits the decision", async () => {
+  test("there is no pending-approval surface left to answer, from the page or by hand", async () => {
+    // The page used to list .hush/pending/*.json and POST /api/answer. The
+    // endpoint the page would have called is the same thing an agent's shell
+    // could call, and the file underneath it is one the agent can write, so the
+    // whole surface is gone: a gated action either reaches a dialog or refuses.
+    assert.equal((await api("/api/pending", {})).status, 404);
+    assert.equal((await api("/api/answer", { id: "x", decision: "once" })).status, 404);
+
+    // A planted request file changes nothing either way: nothing reads it.
     const dir = join(hushDir(), "pending");
     mkdirSync(dir, { recursive: true });
-    const id = "test-pending-1";
     writeFileSync(
-      join(dir, `${id}.json`),
-      JSON.stringify({ id, code: "4242", action: "run", summary: "Run deploy.sh", detail: ["Scope: default"], at: new Date().toISOString() }),
+      join(dir, "test-pending-1.json"),
+      JSON.stringify({ id: "test-pending-1", code: "4242", action: "run", summary: "Run deploy.sh" }),
     );
-
-    const listed = await (await api("/api/pending", {})).json() as { pending: { id: string; code: string; summary: string }[] };
-    const mine = listed.pending.find((p) => p.id === id);
-    assert.ok(mine, "the pending request file was not listed");
-    assert.equal(mine!.code, "4242");
-    assert.equal(mine!.summary, "Run deploy.sh");
-
-    const before = readFileSync(join(hushDir(), "audit.log"), "utf8");
-    const answered = await api("/api/answer", { id, decision: "once" });
-    assert.equal(answered.status, 200, JSON.stringify(await answered.json()));
-
-    // answerRequest() writes the .answer file the file-based approval flow
-    // polls for; nothing is polling in this test, so it is still on disk.
-    assert.ok(existsSync(join(dir, `${id}.answer`)), "the decision was not written for the waiting caller to see");
-    assert.equal(readFileSync(join(dir, `${id}.answer`), "utf8"), "once");
-
-    const after = readFileSync(join(hushDir(), "audit.log"), "utf8");
-    assert.notEqual(after, before, "answering a pending request left no audit trail");
-    const newLine = after.slice(before.length).trim().split("\n").pop()!;
-    const event = JSON.parse(newLine);
-    assert.equal(event.action, "approval");
-    assert.equal(event.decision, "once");
-    assert.equal(event.on, "run", "the audited event did not name which gated action was answered");
-
-    // Clean up so it does not leak into other tests reading this hushDir.
-    rmSync(join(dir, `${id}.answer`));
-  });
-
-  test("/api/answer rejects an unknown decision, and requires an id", async () => {
-    assert.equal((await api("/api/answer", { id: "x", decision: "later" })).status, 400);
-    assert.equal((await api("/api/answer", { decision: "once" })).status, 400);
+    writeFileSync(join(dir, "test-pending-1.answer"), "session");
+    rmSync(join(dir, "test-pending-1.answer"));
   });
 
   test("/api/audit returns the most recent events newest first, and never a field named value", async () => {
@@ -1603,7 +1613,10 @@ describe("ui server — the Agent section's endpoints", () => {
     const emptyChild = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
       cwd: emptyRoot,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, HUSH_HOME: emptyHome, HUSH_IDENTITY: encodeSecret(id), HUSH_BIOMETRY: "off", NO_COLOR: "1" },
+      env: {
+        ...process.env, HUSH_HOME: emptyHome, HUSH_IDENTITY: encodeSecret(id),
+        HUSH_BIOMETRY: "off", HUSH_NO_DIALOG: "1", NO_COLOR: "1",
+      },
     });
     try {
       const url: string = await new Promise((resolve, reject) => {

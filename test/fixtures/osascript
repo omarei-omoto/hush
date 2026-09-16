@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+/**
+ * Stands in for the real macOS `osascript` so approval.test.ts can drive the
+ * darwin backend without putting a dialog on the screen of whoever is running
+ * the suite.
+ *
+ * Real `display dialog` reports "gave up:true" when its own timer expires with
+ * nobody having clicked, so the backend re-presents the prompt. FAKE_GIVE_UP_TIMES
+ * makes the first N invocations look like that expired window, which is how a
+ * test proves the prompt comes back instead of vanishing.
+ *
+ * Scripted entirely through environment variables, never argv, so the argv this
+ * test inspects is exactly what a real osascript invocation would have received.
+ * Every invocation's argv is appended to FAKE_ARGV_LOG as one JSON line.
+ */
+const fs = require("fs");
+
+if (process.env.FAKE_ARGV_LOG) {
+  fs.appendFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)) + "\n");
+}
+
+const countFile = process.env.FAKE_CALL_COUNT;
+let calls = 0;
+if (countFile) {
+  try {
+    calls = Number(fs.readFileSync(countFile, "utf8")) || 0;
+  } catch {
+    calls = 0;
+  }
+  fs.writeFileSync(countFile, String(calls + 1));
+}
+
+const giveUpTimes = Number(process.env.FAKE_GIVE_UP_TIMES || "0");
+if (calls < giveUpTimes) {
+  // What macOS prints when the window's timer runs out: the default button's
+  // name is reported, plus the marker.
+  process.stdout.write("button returned:Allow once, gave up:true");
+  process.exit(0);
+}
+
+if (process.env.FAKE_STDOUT) process.stdout.write(process.env.FAKE_STDOUT);
+if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR);
+process.exit(Number(process.env.FAKE_EXIT || "0"));

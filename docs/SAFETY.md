@@ -66,7 +66,7 @@ tool that returns one.
 
 - Answer **yes** when hush asks *"Will an AI agent use secrets here?"* the
   first time it sets a folder up (or `hush init --agent`). That writes
-  `.hush/policy.json` with `requireApproval: ["run", "add", "reveal"]`.
+  `.hush/policy.json` with `requireApproval: ["run", "add", "reveal", "request"]`.
 - `hush install-mcp` and `hush install-skill`.
 - A **floor** the repo cannot lower: put the parts of the policy you never
   want an agent to relax in `~/.hush/policy.json`. A repo's `policy.json` can
@@ -81,17 +81,21 @@ tool that returns one.
   command deny list are speed bumps: a program can base64 a value before
   printing it, and `npm run <script>` executes whatever `package.json` says —
   which the agent can edit. Prefer `allowCommands` for anything sensitive.
-- **"Allow 15 min" covers that command with those sets.** It does not cover a
-  different command. (`approvalScope: "sets"` in the policy widens it to any
-  allowed command with those sets, if you find the prompts too frequent.)
+- **"Allow 15 min" covers that command with those sets, for as long as the
+  thing that asked is running.** It does not cover a different command, and a
+  fresh `hush` command asks again — the window lives in the process you
+  answered, never in a file. (`approvalScope: "sets"` in the policy widens it
+  to any allowed command with those sets, if you find the prompts too
+  frequent.)
 - **A click can be made by anything at your unlocked laptop.** If the agent
   can drive your screen, rung 4 — `hush biometry setup` and
   `"biometry": "required"` — makes the approval a fingerprint instead.
-- **The terminal queue is not a boundary.** With no desktop dialog (a
-  server, `HUSH_APPROVAL_MODE=file`), a request waits as a file under
-  `.hush/pending/` for you to answer with `hush approve` — and an agent with
-  a file tool can answer it too. `biometry: "required"` refuses rather than
-  falling back to that queue, which is why it is the real mitigation.
+- **An approval is answered by you, not by a file.** It arrives as a dialog
+  drawn by an OS-owned program, or as a fingerprint prompt. There is no
+  `.hush/pending/`, no `hush approve`, and no environment variable that
+  replaces or skips the prompt — the only switch that exists
+  (`HUSH_NO_DIALOG`) makes hush refuse. On a machine with no desktop and no
+  fingerprint helper, a gated action is refused rather than waved through.
 - **Set a floor, even an empty one.** An agent that can set environment
   variables when it runs `hush` can point `HUSH_VAULT` at a copy of the vault
   in a folder with no policy. With `~/.hush/policy.json` present — even

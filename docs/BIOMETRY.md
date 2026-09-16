@@ -42,9 +42,18 @@ Then in `.hush/policy.json`:
 silently downgrade. `"off"` disables it.
 
 Implementation: a small Swift helper calling
-`LAContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)`, compiled on
-demand to `~/.hush/bin/` and cached by source hash. No entitlements, no signing,
+`LAContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)`, compiled
+on demand from hush's own source into a private scratch folder, once per process
+and never stored anywhere a later run would trust. No entitlements, no signing,
 no native dependency at install.
+
+It used to be compiled once into `~/.hush/bin/` and reused while a stamp matched
+the source hash. That was a hole rather than a cache: `~/.hush` is inside your
+own home, so anything running as you could have replaced the program there,
+stamp and all, and answered "ok" with no finger anywhere near the sensor. The
+cost of not trusting it is about a third of a second per process that needs a
+prompt (three seconds the very first time on a machine, while `swiftc` warms its
+module cache).
 
 **What it buys:** nothing runs with your credentials unless a human with an
 enrolled finger is physically present. Your agent cannot approve its own

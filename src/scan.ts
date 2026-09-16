@@ -90,8 +90,17 @@ function walk(dir: string, root: string, out: string[], depth = 0): void {
   }
 }
 
-/** Parse a `.env`-shaped file into name -> value. Values are ignored by scan(). */
-export function parseEnvFile(text: string): Record<string, string> {
+/**
+ * Parse a `.env`-shaped file into name -> value. Values are ignored by scan().
+ *
+ * A repeated key used to be dropped in silence, with the later value quietly
+ * winning. Callers that care (imports, `hush add`) pass `onDuplicate` so the
+ * person sees which line was discarded.
+ */
+export function parseEnvFile(
+  text: string,
+  onDuplicate?: (name: string) => void,
+): Record<string, string> {
   const out: Record<string, string> = {};
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -110,6 +119,7 @@ export function parseEnvFile(text: string): Record<string, string> {
     } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
       value = value.slice(1, -1); // single quotes are literal
     }
+    if (name in out) onDuplicate?.(name);
     out[name] = value;
   }
   return out;
@@ -180,4 +190,3 @@ export function reconcile(usages: Usage[], vaultKeys: string[]): Reconciliation 
   const unused = vaultKeys.filter((k) => !referenced.has(k));
   return { needed: usages, satisfied, missing, unused };
 }
-

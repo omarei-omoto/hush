@@ -14,12 +14,11 @@
  * What hush hands age is only the 32-byte data key, never a secret value.
  */
 import { execFileSync, execFileSync as run } from "node:child_process";
-import { existsSync, readFileSync, accessSync, statSync, constants } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-
-const { X_OK } = constants;
+import { onPath, isExecutableFile } from "./which.ts";
 
 /** Duplicated from identity.ts on purpose: importing it would make a cycle. */
 const hushHome = (): string => process.env.HUSH_HOME || join(homedir(), ".hush");
@@ -38,24 +37,6 @@ let missingUntil = 0;
 
 /** How long to trust "age is not installed" before looking again. */
 const MISSING_TTL_MS = 5_000;
-
-/**
- * A real program: a regular file with the execute bit.
- *
- * A directory's execute bit means "you may traverse me", so an `accessSync(p,
- * X_OK)` on its own is satisfied by a directory called `age` sitting on PATH —
- * and the failure then surfaces as EACCES from the middle of a decrypt rather
- * than as "age is not installed".
- */
-function isExecutableFile(path: string): boolean {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Locate the `age` binary. HUSH_AGE_BIN wins, for pinned or vendored copies.
@@ -79,31 +60,6 @@ export function ageBinary(): string | null {
   if (found) return (cachedBin = found);
 
   missingUntil = Date.now() + MISSING_TTL_MS;
-  return null;
-}
-
-/**
- * Resolve an executable from PATH ourselves.
- *
- * The obvious implementation shells out to `which`, but `which` is not on
- * Windows at all and is missing from plenty of minimal container images — so
- * the age bridge would report "not installed" on exactly the machines where
- * that is hardest to debug. Reading PATH costs no subprocess either.
- */
-function onPath(name: string): string | null {
-  const dirs = (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":");
-  const extensions =
-    process.platform === "win32"
-      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";")
-      : [""];
-
-  for (const dir of dirs) {
-    if (!dir) continue;
-    for (const ext of extensions) {
-      const candidate = join(dir, name + ext.toLowerCase());
-      if (isExecutableFile(candidate)) return candidate;
-    }
-  }
   return null;
 }
 

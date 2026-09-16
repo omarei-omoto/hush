@@ -30,12 +30,15 @@ import { Redactor, preview } from "../src/redact.ts";
 import { scanRepo, reconcile, parseEnvFile } from "../src/scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "../src/run.ts";
 import { knownVars, serviceForVar, setNameFor } from "../src/services.ts";
-import { requestApproval, pendingRequests, answerRequest, clearApprovalCache } from "../src/approval.ts";
-import { biometryStatus, authenticate, ensureHelper } from "../src/biometry.ts";
+import { requestApproval, clearApprovalCache } from "../src/approval.ts";
+import { biometryStatus, authenticate, ensureHelper, resetBiometryCache } from "../src/biometry.ts";
 import { ageAvailable, isAgeRecipient, wrapDekWithAge, unwrapDekWithAge, identityPlugin, ageFingerprint, ageBinary, resetAgeBinaryCache } from "../src/age.ts";
 import { execFileSync } from "node:child_process";
 
 const scratch = () => mkdtempSync(join(tmpdir(), "hush-test-"));
+
+/** The stand-in desktop dialog, for the tests that need a human to say yes. */
+const ZENITY = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "zenity");
 
 /**
  * loadPolicy() now also reads ~/.hush/policy.json (see identity.ts's
@@ -75,24 +78,33 @@ describe("crypto", () => {
 
   test("a value round-trips under the DEK", () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "prod", "API_KEY", "sk_live_abc123");
-    assert.equal(openValue(dek, "prod", "API_KEY", sealed), "sk_live_abc123");
+    const sealed = sealValue(dek, "prod", "API_KEY", "sk_live_abc123", 1);
+    assert.equal(openValue(dek, "prod", "API_KEY", sealed, 1), "sk_live_abc123");
   });
 
   test("AAD binds a ciphertext to its env and key — it cannot be moved", () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "staging", "DATABASE_URL", "postgres://staging");
+    const sealed = sealValue(dek, "staging", "DATABASE_URL", "postgres://staging", 1);
     // Same DEK, same ciphertext, different slot: must fail, not silently decrypt.
-    assert.throws(() => openValue(dek, "prod", "DATABASE_URL", sealed));
-    assert.throws(() => openValue(dek, "staging", "REDIS_URL", sealed));
+    assert.throws(() => openValue(dek, "prod", "DATABASE_URL", sealed, 1));
+    assert.throws(() => openValue(dek, "staging", "REDIS_URL", sealed, 1));
+  });
+
+  test("AAD binds a ciphertext to its generation — a bumped label fails to open", () => {
+    // This is what makes the rollback alarm honest: the freshness check reads
+    // the plaintext generation, so a vault writer who raises it to silence the
+    // warning now finds the values simply do not decrypt.
+    const dek = newDek();
+    const sealed = sealValue(dek, "prod", "API_KEY", "sk_live_abc123", 1);
+    assert.throws(() => openValue(dek, "prod", "API_KEY", sealed, 9), /./, "an inflated generation still opened");
   });
 
   test("a tampered ciphertext fails the auth tag", () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "default", "K", "value");
+    const sealed = sealValue(dek, "default", "K", "value", 1);
     const flipped = Buffer.from(sealed.ct, "base64");
     flipped[0] ^= 0xff;
-    assert.throws(() => openValue(dek, "default", "K", { ...sealed, ct: flipped.toString("base64") }));
+    assert.throws(() => openValue(dek, "default", "K", { ...sealed, ct: flipped.toString("base64") }, 1));
   });
 
   test("DEK wrapping is per-recipient", () => {
@@ -247,7 +259,10 @@ describe("redactor", () => {
 
   test("masks two secrets when a complete match straddles the emit boundary", () => {
     // Regression: the shorter secret was emitted before the longer one closed.
-    const short = "sk_live_51ABCDEFxxxxxxxxxxxxxxxxx";
+    // Same length as a real-looking key would be, but with the alphanumeric
+    // runs broken up: a long base62 run after `sk_live_` is what a scanner
+    // (correctly) reads as a live Stripe key.
+    const short = "sk_live_51-ABCDEF-xxxxxxxxxxxxxxx";
     const long = "postgres://user:hunter2@db.internal:5432/app";
     const r = new Redactor({ STRIPE: short, DB: long });
     const out = r.push(`LEAK: ${short} ${long}\n`) + r.flush();
@@ -443,108 +458,125 @@ describe("accounts", () => {
 });
 
 describe("approval", () => {
-  test("a pending request is written, answered, then cleaned up", async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
+  /** A host with nothing to put in front of a human. */
+  const noDialog = { authenticate: async () => "unavailable" as const, platform: () => "linux" };
+
+  test("a request on a host that can show nothing is refused, and writes no answerable file", async () => {
+    // This used to drop .hush/pending/<id>.json and accept a matching
+    // <id>.answer. A file the gated process can write is not an approval, so
+    // there is no file any more: the request is refused instead.
     clearApprovalCache();
     const dir = scratch();
-
-    const pending = requestApproval(dir, {
+    const result = await requestApproval(dir, {
       action: "run",
       summary: "Run: npx vercel deploy",
       detail: ["Using accounts:  fal:personal"],
       scope: "run:default+fal/personal",
       ttlSeconds: 900,
-      timeoutMs: 5000,
-    });
+      timeoutMs: 300,
+    }, noDialog);
 
-    // The request file shows up for the human to answer.
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 40 && !seen.length; i++) {
-      seen = pendingRequests(dir);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    assert.equal(seen.length, 1);
-    assert.match(seen[0].summary, /vercel/);
-    assert.match(seen[0].code, /^\d{4}$/);
+    assert.equal(result.decision, "deny");
+    assert.equal(result.via, "none");
+    assert.match(result.note ?? "", /no prompt is available/);
+    assert.ok(!existsSync(join(dir, "pending")), "a pending-request file was written to disk");
 
-    answerRequest(dir, seen[0].id, "once");
-    const result = await pending;
-
-    assert.equal(result.decision, "once");
-    assert.equal(result.cached, false);
-    assert.deepEqual(pendingRequests(dir), [], "request files are cleaned up");
+    // And the thing that used to be the attack: plant one by hand.
+    mkdirSync(join(dir, "pending"), { recursive: true });
+    writeFileSync(join(dir, "pending", "1700000000-1234.answer"), "session");
+    const again = await requestApproval(dir, {
+      action: "run", summary: "Run: npx vercel deploy", scope: "run:default+fal/personal",
+      ttlSeconds: 900, timeoutMs: 300,
+    }, noDialog);
+    assert.equal(again.decision, "deny", "a hand-written answer file approved a gated request");
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
-  test("denial is reported as denial", async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
-    clearApprovalCache();
-    const dir = scratch();
-    const p = requestApproval(dir, {
-      action: "run", summary: "Run: rm -rf /", scope: "run:x", ttlSeconds: 900, timeoutMs: 5000,
-    });
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 40 && !seen.length; i++) {
-      seen = pendingRequests(dir);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    answerRequest(dir, seen[0].id, "deny");
-    assert.equal((await p).decision, "deny");
-    rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_APPROVAL_MODE;
-  });
-
-  test("no answer within the window times out rather than hanging", async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
+  test("the human approving once is reported as once", async () => {
     clearApprovalCache();
     const dir = scratch();
     const result = await requestApproval(dir, {
-      action: "run", summary: "unanswered", scope: "run:y", ttlSeconds: 900, timeoutMs: 700,
+      action: "reveal", summary: "Reveal STRIPE_SECRET_KEY", scope: "reveal:default",
+      ttlSeconds: 900, timeoutMs: 5000, biometry: "preferred",
+    }, { authenticate: async () => "ok" as const });
+    assert.equal(result.decision, "session");
+    assert.equal(result.via, "biometry");
+    assert.equal(result.cached, false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("denial is reported as denial", async () => {
+    clearApprovalCache();
+    const dir = scratch();
+    const r = await requestApproval(dir, {
+      action: "run", summary: "Run: rm -rf /", scope: "run:x", ttlSeconds: 900, timeoutMs: 5000,
+      biometry: "preferred",
+    }, { authenticate: async () => "denied" as const });
+    assert.equal(r.decision, "deny");
+    assert.equal(r.via, "biometry");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a request nobody answers times out rather than hanging", async () => {
+    clearApprovalCache();
+    const dir = scratch();
+    // A dialog that is shown and never clicked: the fixture sits until the
+    // timeout kills it, which is the same shape a real unanswered dialog has.
+    process.env.DISPLAY = ":0";
+    process.env.FAKE_SLEEP = "5000"; // milliseconds, and well past the timeout below
+    process.env.FAKE_EXIT = "1";
+    const result = await requestApproval(dir, {
+      action: "run", summary: "unanswered", scope: "run:y", ttlSeconds: 900, timeoutMs: 600,
+    }, {
+      authenticate: async () => "unavailable" as const,
+      platform: () => "linux",
+      resolveDialogProgram: (cmd) => (cmd === "zenity" ? ZENITY : null),
     });
     assert.equal(result.decision, "timeout");
+    delete process.env.DISPLAY;
+    delete process.env.FAKE_SLEEP;
+    delete process.env.FAKE_EXIT;
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
   test('"allow 15 min" is remembered for that scope, and only that scope', async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
-    const first = requestApproval(dir, {
+    // Approves once, then has nothing more to give: the second question for a
+    // different scope must actually be asked rather than served from the grant.
+    let calls = 0;
+    const deps = {
+      authenticate: async () => (calls++ === 0 ? ("ok" as const) : ("unavailable" as const)),
+      platform: () => "linux",
+    };
+    const first = await requestApproval(dir, {
       action: "run", summary: "first", scope: "run:default+fal/acme", ttlSeconds: 900, timeoutMs: 5000,
-    });
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 40 && !seen.length; i++) {
-      seen = pendingRequests(dir);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    answerRequest(dir, seen[0].id, "session");
-    assert.equal((await first).decision, "session");
+      biometry: "preferred",
+    }, deps);
+    assert.equal(first.decision, "session");
 
-    // Same accounts: no second prompt.
+    // Same sets: no second prompt.
     const again = await requestApproval(dir, {
       action: "run", summary: "again", scope: "run:default+fal/acme", ttlSeconds: 900, timeoutMs: 700,
-    });
+    }, deps);
     assert.equal(again.cached, true);
     assert.equal(again.decision, "session");
 
-    // A different account must ask again — this is the point of scoping.
+    // A different set must ask again — this is the point of scoping.
+    calls = 0; // the fake's "ok" is spent; the next call has nothing to offer
     const other = await requestApproval(dir, {
-      action: "run", summary: "other account", scope: "run:default+fal/client", ttlSeconds: 900, timeoutMs: 700,
-    });
+      action: "run", summary: "other set", scope: "run:default+fal/client", ttlSeconds: 900, timeoutMs: 700,
+    }, { ...deps, authenticate: async () => "unavailable" as const });
     assert.equal(other.cached, false);
-    assert.equal(other.decision, "timeout");
+    assert.equal(other.decision, "deny", "a different scope was served from an unrelated grant");
 
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 });
 
 describe("biometry gating", () => {
   test('"required" refuses when biometry is unavailable, rather than falling back', async () => {
     process.env.HUSH_BIOMETRY = "off";
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
 
@@ -562,33 +594,27 @@ describe("biometry gating", () => {
     assert.match(r.note ?? "", /requires biometry/);
     rmSync(dir, { recursive: true, force: true });
     delete process.env.HUSH_BIOMETRY;
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
-  test('"preferred" falls back to the normal prompt when biometry is unavailable', async () => {
-    process.env.HUSH_BIOMETRY = "off";
-    process.env.HUSH_APPROVAL_MODE = "file";
+  test('"preferred" falls back to the on-screen dialog when biometry is unavailable', async () => {
     clearApprovalCache();
     const dir = scratch();
 
-    const p = requestApproval(dir, {
+    process.env.DISPLAY = ":0";
+    process.env.FAKE_EXIT = "0";
+    const r = await requestApproval(dir, {
       action: "run", summary: "Run: npm test", scope: "run:dev",
       ttlSeconds: 900, timeoutMs: 5000, biometry: "preferred",
+    }, {
+      authenticate: async () => "unavailable" as const,
+      platform: () => "linux",
+      resolveDialogProgram: (cmd) => (cmd === "zenity" ? ZENITY : null),
     });
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 40 && !seen.length; i++) {
-      seen = pendingRequests(dir);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    assert.equal(seen.length, 1, "it fell back to the terminal prompt");
-    answerRequest(dir, seen[0].id, "once");
-
-    const r = await p;
     assert.equal(r.decision, "once");
-    assert.equal(r.via, "terminal");
+    assert.equal(r.via, "dialog");
+    delete process.env.DISPLAY;
+    delete process.env.FAKE_EXIT;
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_BIOMETRY;
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
   test("biometry status reports unavailable cleanly when switched off", () => {
@@ -827,32 +853,26 @@ describe("audit regressions", () => {
 
   test("an approval granted for one vault does not carry to another", async () => {
     process.env.HUSH_BIOMETRY = "off";
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const vaultA = scratch();
     const vaultB = scratch();
 
-    const p = requestApproval(vaultA, {
+    const deps = { authenticate: async () => "ok" as const, platform: () => "linux" };
+    const first = await requestApproval(vaultA, {
       action: "run", summary: "deploy", scope: "run:default", ttlSeconds: 900, timeoutMs: 5000,
-    });
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 40 && !seen.length; i++) {
-      seen = pendingRequests(vaultA);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    answerRequest(vaultA, seen[0].id, "session");
-    assert.equal((await p).decision, "session");
+      biometry: "preferred",
+    }, deps);
+    assert.equal(first.decision, "session");
 
     // Same scope string, different vault: must ask again, not reuse the grant.
     const other = await requestApproval(vaultB, {
       action: "run", summary: "deploy", scope: "run:default", ttlSeconds: 900, timeoutMs: 600,
-    });
+    }, { ...deps, authenticate: async () => "unavailable" as const });
     assert.equal(other.cached, false, "a grant leaked between vaults");
-    assert.equal(other.decision, "timeout");
+    assert.equal(other.decision, "deny");
 
     for (const d of [vaultA, vaultB]) rmSync(d, { recursive: true, force: true });
     delete process.env.HUSH_BIOMETRY;
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
   test("a failed re-seal leaves the member list unchanged", () => {
@@ -1253,6 +1273,36 @@ describe("name validation", () => {
     }
     assert.doesNotThrow(() => vault.set(owner, "prod", "K", "v"));
     assert.doesNotThrow(() => vault.set(owner, "fal/acme", "K", "v"));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a hostile key or set name in a vault file is scrubbed before it is shown", () => {
+    // Names are validated on write, but a vault is a file that arrives over git
+    // and can be hand-edited. `list()` and `sets()` are what every renderer
+    // reads, so a raw ESC there repaints the terminal instead of showing a name.
+    const dir = scratch();
+    const owner = generateIdentity();
+    const path = join(dir, "v.json");
+    const vault = Vault.create(path, "t", { name: "a", pub: owner.pub });
+    vault.set(owner, "default", "SAFE", "v");
+    vault.save();
+
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    raw.envs["\u001b[2Jprod"] = { "\u001b[31mEVIL": raw.envs.default.SAFE };
+    writeFileSync(path, JSON.stringify(raw));
+
+    const reopened = Vault.open(path);
+    const key = reopened.list("\u001b[2Jprod")[0].key;
+    assert.ok(!key.includes("\u001b"), `raw ESC reached the renderer: ${JSON.stringify(key)}`);
+    assert.equal(key, "[31mEVIL");
+
+    const name = reopened.sets().find((s) => s.keys.includes("[31mEVIL"))?.name;
+    assert.ok(name, "the hostile set dropped out of sets() entirely");
+    assert.ok(!name.includes("\u001b"), `raw ESC reached the renderer: ${JSON.stringify(name)}`);
+    assert.equal(name, "[2Jprod");
+
+    // The exact bytes stay available for identity, so the set is still usable.
+    assert.ok(reopened.hasSet("\u001b[2Jprod"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1965,35 +2015,32 @@ describe("gaps found by the broad mutation sweep", () => {
   });
 
   test('a one-off approval is not remembered, only "allow 15 min" is', async () => {
-    process.env.HUSH_BIOMETRY = "off";
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
 
-    const answer = async (decision: "once" | "session") => {
-      const p = requestApproval(dir, {
-        action: "run", summary: "x", scope: "run:same-scope", ttlSeconds: 900, timeoutMs: 5000,
-      });
-      let seen: ReturnType<typeof pendingRequests> = [];
-      for (let i = 0; i < 40 && !seen.length; i++) {
-        seen = pendingRequests(dir);
-        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-      }
-      answerRequest(dir, seen[0].id, decision);
-      return p;
-    };
+    // "Allow once" is what the dialog's default button returns; the fake
+    // desktop stands in for the human clicking it.
+    process.env.DISPLAY = ":0";
+    process.env.FAKE_EXIT = "0";
+    const once = await requestApproval(dir, {
+      action: "run", summary: "x", scope: "run:same-scope", ttlSeconds: 900, timeoutMs: 5000,
+    }, {
+      authenticate: async () => "unavailable" as const,
+      platform: () => "linux",
+      resolveDialogProgram: (cmd) => (cmd === "zenity" ? ZENITY : null),
+    });
+    assert.equal(once.decision, "once");
+    delete process.env.DISPLAY;
+    delete process.env.FAKE_EXIT;
 
-    assert.equal((await answer("once")).decision, "once");
     // A second request for the same scope must ask again.
     const second = await requestApproval(dir, {
       action: "run", summary: "x", scope: "run:same-scope", ttlSeconds: 900, timeoutMs: 600,
-    });
+    }, { authenticate: async () => "unavailable" as const, platform: () => "linux" });
     assert.equal(second.cached, false, '"allow once" was cached as if it were a session');
-    assert.equal(second.decision, "timeout");
+    assert.equal(second.decision, "deny");
 
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.HUSH_BIOMETRY;
-    delete process.env.HUSH_APPROVAL_MODE;
   });
 
   test("common configuration values are not masked as if they were secrets", () => {
@@ -2121,34 +2168,27 @@ describe("biometry: what the helper's exit status means", { skip: platform() ===
   /**
    * Stand a stub in for the compiled Swift helper.
    *
-   * `ensureHelper` accepts a cached binary when its stamp matches the digest of
-   * the source, so writing both takes the real Touch ID prompt out of the picture
-   * and lets every exit status be driven deliberately. Without it the mapping
-   * from exit status to decision is untestable: a machine either has an enrolled
-   * finger or it does not, and neither state exercises the failure arm.
+   * The seam is a parameter (`BiometryDeps.helperPath`), never an environment
+   * variable: an ambient `HUSH_TOUCHID_HELPER=/tmp/fake` would be a switch that
+   * makes every fingerprint check succeed, which anything running as you could
+   * set. Without the parameter the mapping from exit status to decision is
+   * untestable — a machine either has an enrolled finger or it does not, and
+   * neither state exercises the failure arm.
    *
-   * It is async on purpose. Restoring HUSH_HOME synchronously while the helper
-   * is still being spawned pointed the lookup back at the real home, the spawn
-   * failed, and every exit status came back "denied" — a test that looked like
-   * it was exercising the mapping while exercising nothing at all.
+   * The stub is executable and lives in its own scratch directory, which is
+   * exactly what the real helper would be after a fresh compile.
    */
-  const withStubHelper = async <T,>(script: string, fn: () => T | Promise<T>): Promise<T> => {
-    const home = mkdtempSync(join(tmpdir(), "hush-bio-"));
-    const saved = { home: process.env.HUSH_HOME, off: process.env.HUSH_BIOMETRY };
-    process.env.HUSH_HOME = home;
+  const withStubHelper = async <T,>(script: string, fn: (stub: string) => T | Promise<T>): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), "hush-bio-"));
+    const stub = join(dir, "hush-touchid");
+    writeFileSync(stub, script, { mode: 0o755 });
+    const saved = process.env.HUSH_BIOMETRY;
     delete process.env.HUSH_BIOMETRY;
     try {
-      const src = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "hush-touchid.swift");
-      const digest = createHash("sha256").update(readFileSync(src)).digest("hex").slice(0, 16);
-      const bin = join(home, "bin");
-      mkdirSync(bin, { recursive: true, mode: 0o700 });
-      writeFileSync(join(bin, "hush-touchid"), script, { mode: 0o755 });
-      writeFileSync(join(bin, "hush-touchid.stamp"), digest);
-      return await fn();
+      return await fn(stub);
     } finally {
-      if (saved.home === undefined) delete process.env.HUSH_HOME; else process.env.HUSH_HOME = saved.home;
-      if (saved.off === undefined) delete process.env.HUSH_BIOMETRY; else process.env.HUSH_BIOMETRY = saved.off;
-      rmSync(home, { recursive: true, force: true });
+      if (saved === undefined) delete process.env.HUSH_BIOMETRY; else process.env.HUSH_BIOMETRY = saved;
+      rmSync(dir, { recursive: true, force: true });
     }
   };
 
@@ -2156,31 +2196,38 @@ describe("biometry: what the helper's exit status means", { skip: platform() ===
     // Collapsing these is the dangerous direction: reading a failure as "ok"
     // turns any crash of the helper into a granted approval.
     for (const [code, expected] of [[0, "ok"], [2, "unavailable"], [1, "denied"], [9, "denied"]] as const) {
-      const got = await withStubHelper(`#!/bin/sh\nexit ${code}\n`, () => authenticate("testing", 5000));
+      const got = await withStubHelper(`#!/bin/sh\nexit ${code}\n`, (stub) =>
+        authenticate("testing", 5000, { helperPath: stub }),
+      );
       assert.equal(got, expected, `exit ${code} was read as "${got}"`);
     }
   });
 
   test("no enrolled finger is reported as unavailable, not as available", async () => {
     // "yes 1" is the enrolled answer; anything else must not tick the box.
-    const enrolled = await withStubHelper('#!/bin/sh\necho "yes 1"\n', () => biometryStatus());
+    const enrolled = await withStubHelper('#!/bin/sh\necho "yes 1"\n', (stub) => biometryStatus({ helperPath: stub }));
     assert.equal(enrolled.available, true);
     assert.equal(enrolled.kind, "Touch ID");
 
-    const faceId = await withStubHelper('#!/bin/sh\necho "yes 2"\n', () => biometryStatus());
+    const faceId = await withStubHelper('#!/bin/sh\necho "yes 2"\n', (stub) => biometryStatus({ helperPath: stub }));
     assert.equal(faceId.kind, "Face ID");
 
     for (const answer of ["no 0", "", "maybe"]) {
-      const st = await withStubHelper(`#!/bin/sh\necho "${answer}"\n`, () => biometryStatus());
+      const st = await withStubHelper(`#!/bin/sh\necho "${answer}"\n`, (stub) => biometryStatus({ helperPath: stub }));
       assert.equal(st.available, false, `"${answer}" was read as an enrolled finger`);
       assert.equal(st.kind, "none");
     }
   });
 
-  test("a helper whose source has changed is not reused", () => {
-    // The stamp is what stops a stale binary from being trusted after the Swift
-    // source is edited — including an edit that removes the prompt entirely.
-    const home = mkdtempSync(join(tmpdir(), "hush-bio-stale-"));
+  test("a helper planted at the old cache path is never executed", () => {
+    // This is the hole the parameter seam closes. The helper used to be built
+    // once into ~/.hush/bin/ and reused while a stamp matched the source hash —
+    // and ~/.hush is inside the user's home, so anything running as the user
+    // could have written its own program there, stamp and all, and answered
+    // "ok" without a finger ever touching the sensor. Nothing at that path is
+    // read now: the helper is rebuilt from hush's own source, per process, into
+    // a directory only this process can name.
+    const home = mkdtempSync(join(tmpdir(), "hush-bio-planted-"));
     const saved = { home: process.env.HUSH_HOME, off: process.env.HUSH_BIOMETRY };
     process.env.HUSH_HOME = home;
     delete process.env.HUSH_BIOMETRY;
@@ -2189,28 +2236,34 @@ describe("biometry: what the helper's exit status means", { skip: platform() ===
       const bin = join(home, "bin");
       mkdirSync(bin, { recursive: true, mode: 0o700 });
       writeFileSync(join(bin, "hush-touchid"), planted, { mode: 0o755 });
-      writeFileSync(join(bin, "hush-touchid.stamp"), "0000000000000000");
 
+      resetBiometryCache();
       const r = ensureHelper();
       if (r.ok) {
-        // It recompiled, so the binary is no longer the stub we planted.
-        assert.notEqual(readFileSync(join(bin, "hush-touchid"), "utf8"), planted);
-        assert.equal(readFileSync(join(bin, "hush-touchid.stamp"), "utf8").trim().length, 16);
+        assert.notEqual(r.path, join(bin, "hush-touchid"), "the planted program was selected");
+        assert.ok(!r.path!.startsWith(home), `the helper came from the user's home: ${r.path}`);
       } else {
-        assert.match(r.reason ?? "", /swiftc|compile/);
+        // No Xcode Command Line Tools on this machine: the honest answer is
+        // "unavailable", never "here is the planted one".
+        assert.match(r.reason ?? "", /swiftc|compile|source missing/);
       }
+      assert.equal(readFileSync(join(bin, "hush-touchid"), "utf8"), planted, "hush rewrote a planted path");
     } finally {
       if (saved.home === undefined) delete process.env.HUSH_HOME; else process.env.HUSH_HOME = saved.home;
       if (saved.off === undefined) delete process.env.HUSH_BIOMETRY; else process.env.HUSH_BIOMETRY = saved.off;
+      resetBiometryCache();
       rmSync(home, { recursive: true, force: true });
     }
   });
 
   test("HUSH_BIOMETRY=off is honoured even with a helper sitting right there", async () => {
-    const result = await withStubHelper("#!/bin/sh\nexit 0\n", async () => {
+    const result = await withStubHelper("#!/bin/sh\nexit 0\n", async (stub) => {
       process.env.HUSH_BIOMETRY = "off";
       try {
-        return { auth: await authenticate("testing", 5000), status: biometryStatus() };
+        return {
+          auth: await authenticate("testing", 5000, { helperPath: stub }),
+          status: biometryStatus({ helperPath: stub }),
+        };
       } finally {
         delete process.env.HUSH_BIOMETRY;
       }

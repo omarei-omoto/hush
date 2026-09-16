@@ -283,7 +283,14 @@ describe("facts are stated once", () => {
     // This file is ESM; require() is not available here.
     const home = mkdtempSync(join(tmpdir(), "hush-tpl-home-"));
     const proj = mkdtempSync(join(tmpdir(), "hush-tpl-proj-"));
-    const env = { ...process.env, HUSH_HOME: home, HUSH_NO_NUDGE: "1", HUSH_NO_KEYCHAIN: "1", NO_COLOR: "1" };
+    // HOME as well as HUSH_HOME: `hush install-mcp` now registers itself with
+    // whichever agents it can see, and one of those files lives in the user's
+    // home. A test that ran with the real HOME would add a section to the
+    // developer's own ~/.codex/config.toml.
+    const env = {
+      ...process.env, HOME: home, HUSH_HOME: home,
+      HUSH_NO_NUDGE: "1", HUSH_NO_KEYCHAIN: "1", NO_COLOR: "1",
+    };
     const run = (...args: string[]) =>
       execFileSync(process.execPath, [join(root, "src/cli.ts"), ...args], {
         cwd: proj, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],

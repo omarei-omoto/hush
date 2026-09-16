@@ -25,9 +25,9 @@ script), then green after the fix — the CONTRIBUTING.md bar.
 
 | # | Finding | Severity | Status |
 |---|---|---|---|
-| 1 | `grants.local.json` forgery bypasses `reveal`/`add` approval, including `biometry: "required"` | Value out / policy bypass | **Fixed** |
-| 2 | A symlinked `grants.local.json` turns a later legitimate approval into an overwrite of an arbitrary file (e.g. the policy floor) | Policy bypass (persistent) | **Fixed** |
-| 3 | Self-approval by forging `.hush/pending/<id>.answer` | Value out / policy bypass | Documented, not fixed |
+| 1 | `grants.local.json` forgery bypasses approval, including `biometry: "required"` | Value out / policy bypass | **Fixed**: grants are memory-only (2026-09-16) |
+| 2 | A symlinked `grants.local.json` turns a later legitimate approval into an overwrite of an arbitrary file (e.g. the policy floor) | Policy bypass (persistent) | **Fixed**: nothing is written there any more |
+| 3 | Self-approval by forging `.hush/pending/<id>.answer` | Value out / policy bypass | Fixed: the file queue is gone (2026-09-16) |
 | 4 | `HUSH_VAULT` pointed at a copy of `vault.json` bypasses the project's policy when no floor is configured | Policy bypass | Documented, not fixed |
 | 5 | `npx node -e ...` reaches a denied interpreter; a one-liner hex-encode defeats redaction | Hardening gap (documented) | Pinned |
 | 6 | Values under 5 characters are never redacted (`MIN_REDACTABLE`) | Hardening gap (documented, already tested) | No change — already covered |
@@ -90,6 +90,14 @@ never honoured — an agent cannot pre-approve planting its own secret"*.
 Confirmed red (value printed / key planted) with the fix reverted, green with
 it applied.
 
+**Resolved further (2026-09-16).** The carve-out for `run` was the same defect
+at lower volume: a correctly-spelled `grants.local.json` still pre-authorised a
+run, and a run is enough to get a value out through the documented redaction
+gap. So the file is gone entirely — no action is read from disk, and the
+"accepted trade-off" paragraph above no longer applies. A grant lives in the
+process the human answered, which is why a one-shot `hush` command now offers
+"Allow once" only: it cannot honestly promise longer.
+
 ---
 
 ### 2. A symlinked `grants.local.json` clobbers an arbitrary file — Fixed
@@ -142,7 +150,7 @@ with the `lstatSync` guard removed, green with it restored.
 
 ---
 
-### 3. Self-approval via a forged `.hush/pending/<id>.answer` — documented, not fixed
+### 3. Self-approval via a forged `.hush/pending/<id>.answer` — fixed 2026-09-16
 
 **Tried:** when no native dialog backend is available (any non-macOS/GNOME/KDE
 host, or `HUSH_APPROVAL_MODE=file`, which this entire red-team pass was
@@ -197,6 +205,16 @@ of which shares this failure mode). **Reproduction:**
 test`) — running it prints both the vulnerable case (`biometry: "off"`,
 value leaks) and the mitigated case (`biometry: "required"`, denied
 synchronously).
+
+**Resolved (2026-09-16).** The reasoning above was right about the file layer
+and wrong about the conclusion. There is no signal that tells a human's answer
+file apart from the agent's, so the answer was not to make the file
+trustworthy — it was to stop treating a file as an approval at all. The queue,
+`hush approve`, `/api/pending`, `/api/answer` and the `HUSH_APPROVAL_MODE`
+switch are gone. An approval now has to come from a dialog on your screen or
+your fingerprint; a host that can offer neither refuses the gated action. The
+probe above now asserts exactly that: no secret out, no pending file written,
+and a hand-written `.answer` file changes nothing.
 
 ---
 

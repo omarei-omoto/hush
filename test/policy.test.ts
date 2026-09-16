@@ -30,14 +30,36 @@ describe("runScope", () => {
   // command sharing those sets.
   test('"command" (the default) names the command\'s basename, not the whole path, plus the sets', () => {
     const policy = { ...DEFAULT_POLICY, approvalScope: "command" as const };
-    assert.equal(runScope(policy, "npm", ["default"]), "run:npm:default");
-    assert.equal(runScope(policy, "/usr/local/bin/npm", ["default", "work-fal"]), "run:npm:default+work-fal");
+    // A JSON array, not a ":"/"+"-joined string: both parts may contain the
+    // separator, and a key that two different pairs share is an approval that
+    // covers something the human never saw. See the injectivity test below.
+    assert.equal(runScope(policy, "npm", ["default"]), '["run","npm",["default"]]');
+    assert.equal(runScope(policy, "/usr/local/bin/npm", ["default", "work-fal"]), '["run","npm",["default","work-fal"]]');
   });
 
   test('"sets" reproduces the pre-existing, command-agnostic shape', () => {
     const policy = { ...DEFAULT_POLICY, approvalScope: "sets" as const };
-    assert.equal(runScope(policy, "npm", ["default"]), "run:default");
-    assert.equal(runScope(policy, "git", ["default"]), "run:default", "different commands must collide under \"sets\"");
+    assert.equal(runScope(policy, "npm", ["default"]), '["run",["default"]]');
+    assert.equal(
+      runScope(policy, "git", ["default"]),
+      '["run",["default"]]',
+      'different commands must collide under "sets"',
+    );
+  });
+
+  test("the grant key is injective: two different pairs never share one", () => {
+    // The red-team pass reasoned that a reordered sets array can only make a
+    // grant fail to match. It did not consider a command basename containing
+    // ":", nor that a library layer always carries one — so
+    // ("npm", ["global:work-fal"]) and ("./npm:global", ["work-fal"]) produced
+    // one key, and an "Allow 15 min" for the first answered the second.
+    const policy = { ...DEFAULT_POLICY, approvalScope: "command" as const };
+    assert.notEqual(
+      runScope(policy, "npm", ["global:work-fal"]),
+      runScope(policy, "./npm:global", ["work-fal"]),
+      "a colon in the basename and a colon in a library layer collide",
+    );
+    assert.notEqual(runScope(policy, "npm", ["a", "b"]), runScope(policy, "npm", ["a+b"]));
   });
 });
 

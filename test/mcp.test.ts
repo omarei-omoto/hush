@@ -12,11 +12,14 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { Vault } from "../src/vault.ts";
 import { generateIdentity, encodeSecret } from "../src/crypto.ts";
 import { saveLinks } from "../src/library.ts";
-import { pendingRequests, answerRequest } from "../src/approval.ts";
+import { runScope } from "../src/policy.ts";
+import { DEFAULT_POLICY } from "../src/mcp.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
 
@@ -70,15 +73,16 @@ function talk(
     const child = spawn(process.execPath, [CLI, "mcp"], {
       cwd: p.root,
       stdio: ["pipe", "pipe", "pipe"],
-      // HUSH_APPROVAL_MODE=file matters on macOS: without it an enforced
-      // approval opens a real osascript dialog on the developer's screen and
-      // the test sits there until someone clicks it.
+      // HUSH_NO_DIALOG matters on macOS: without it an enforced approval opens
+      // a real osascript dialog on the developer's screen and the test sits
+      // there until someone clicks it. It says "this host has no desktop", and
+      // hush answers that by refusing — which is what these tests assert.
       env: {
         ...process.env,
         HUSH_HOME: p.home,
         HUSH_IDENTITY: p.secret,
         HUSH_BIOMETRY: "off",
-        HUSH_APPROVAL_MODE: "file",
+        HUSH_NO_DIALOG: "1",
         NO_COLOR: "1",
         ...extraEnv,
       },
@@ -730,43 +734,46 @@ describe("mcp policy — the gaps mutation testing found", () => {
   test("requireApproval actually gates a run", async () => {
     // Every other test here sets requireApproval to [] so it can get on with
     // things, which left the gate itself never exercised. With no terminal and
-    // no macOS dialog to answer, an enforced gate can only time out — and a run
+    // no macOS dialog to answer, an enforced gate can only refuse — and a run
     // that was never approved must not have happened.
     const p = project({ requireApproval: ["run"], approvalTtlSeconds: 1, approvalTimeoutSeconds: 1 });
     const s = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"] })]);
     const reply = s.replies.find((r) => r.id === 1)!;
     assert.equal(reply.result?.isError, true, "an unapproved run went ahead");
-    assert.match(reply.result!.content![0].text!, /approv|denied|timed out/i);
+    assert.match(reply.result!.content![0].text!, /approv|denied|no prompt/i);
     p.cleanup();
   });
 });
 
-describe("mcp policy — approvalScope decides what a cached grant covers", () => {
-  test("a cached grant covers the command it was granted for, not every command sharing its sets", async () => {
+describe("mcp policy — a grant lives in the session that was answered, not in a file", () => {
+  test("a grant file written into the project pre-authorises nothing", async () => {
+    // This used to be the shared cache: approval.ts mirrored "Allow 15 min" to
+    // .hush/grants.local.json so the next process saw it. The project directory
+    // is exactly what an agent can write, so the file was a way to approve
+    // yourself. Nothing reads it now; the key is still spelled the same way,
+    // which is the point — a correctly-spelled forgery grants nothing either.
     const p = project({ requireApproval: ["run"], approvalTimeoutSeconds: 1 });
-    // Exactly what runScope() computes for `npm` under the default
-    // approvalScope: "command" and the plain default set.
-    writeFileSync(join(p.root, ".hush", "grants.local.json"), JSON.stringify({ "run:npm:default": Date.now() + 60_000 }));
-    const s = await talk(p, [
-      init,
-      call(1, "hush_run", { command: "npm", args: ["--version"] }),
-      call(2, "hush_run", { command: "git", args: ["--version"] }),
-    ]);
-    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /exit 0/, "the granted command was refused");
-    assert.equal(s.replies.find((r) => r.id === 2)!.result?.isError, true, "a grant for npm also covered git");
+    writeFileSync(
+      join(p.root, ".hush", "grants.local.json"),
+      JSON.stringify({ [runScope(DEFAULT_POLICY, "npm", ["default"])]: Date.now() + 60_000 }),
+    );
+    const s = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"] })]);
+    const reply = s.replies.find((r) => r.id === 1)!;
+    assert.equal(reply.result?.isError, true, "a file in the project approved a run");
+    assert.match(reply.result!.content![0].text!, /no prompt is available|denied|approv/i);
     p.cleanup();
   });
 
-  test('approvalScope: "sets" restores the pre-existing, command-agnostic grant shape', async () => {
+  test('the same forgery under approvalScope: "sets" is refused too', async () => {
     const p = project({ requireApproval: ["run"], approvalScope: "sets", approvalTimeoutSeconds: 1 });
-    writeFileSync(join(p.root, ".hush", "grants.local.json"), JSON.stringify({ "run:default": Date.now() + 60_000 }));
-    const s = await talk(p, [
-      init,
-      call(1, "hush_run", { command: "npm", args: ["--version"] }),
-      call(2, "hush_run", { command: "git", args: ["--version"] }),
-    ]);
-    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /exit 0/);
-    assert.match(s.replies.find((r) => r.id === 2)!.result!.content![0].text!, /exit 0/, '"sets" scope should cover any command using those sets');
+    writeFileSync(
+      join(p.root, ".hush", "grants.local.json"),
+      JSON.stringify({
+        [runScope({ ...DEFAULT_POLICY, approvalScope: "sets" }, "npm", ["default"])]: Date.now() + 60_000,
+      }),
+    );
+    const s = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"] })]);
+    assert.equal(s.replies.find((r) => r.id === 1)!.result?.isError, true, "a file in the project approved a run");
     p.cleanup();
   });
 });
@@ -871,50 +878,174 @@ describe("mcp — policy names sets the way the user does", () => {
 });
 
 describe("mcp — a grant is shared across surfaces, by command and sets alike", () => {
-  test("a 'session' grant recorded through the CLI for one command is honoured by the MCP server for that command, not a different one", async () => {
+  test("a grant file in the project is not honoured by the MCP server either", async () => {
     const p = project({ requireApproval: ["run"], approvalTimeoutSeconds: 5 });
     const hushDir = join(p.root, ".hush");
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      HUSH_HOME: p.home,
-      HUSH_IDENTITY: p.secret,
-      HUSH_BIOMETRY: "off",
-      HUSH_APPROVAL_MODE: "file",
-      NO_COLOR: "1",
-    };
 
-    // Record a "session" grant through the CLI, exactly the way a human would
-    // by clicking "Allow 15 min" — here answered via the file-approval path.
-    const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "npm", "--version"], {
-      cwd: p.root,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let seen: ReturnType<typeof pendingRequests> = [];
-    for (let i = 0; i < 120 && !seen.length; i++) {
-      seen = pendingRequests(hushDir);
-      if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-    }
-    assert.equal(seen.length, 1, "no pending approval appeared for the CLI run");
-    answerRequest(hushDir, seen[0].id, "session");
-    const [code] = await once(child, "exit");
-    assert.equal(code, 0, "the CLI run did not succeed after the grant was approved");
+    // The scope key is computed rather than typed, so it is exactly the one a
+    // real grant would use. It still buys nothing: grants live in the process
+    // the human answered, and this file is one the agent could have written.
+    writeFileSync(
+      join(hushDir, "grants.local.json"),
+      JSON.stringify({ [runScope(DEFAULT_POLICY, "npm", ["default"])]: Date.now() + 60_000 }),
+    );
 
-    // Same command, same sets: the MCP server must honour the CLI's grant
-    // with no fresh prompt, proving the grant is shared, not private to
-    // whichever surface created it.
     const covered = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"] })]);
     const coveredReply = covered.replies.find((r) => r.id === 1)!;
-    assert.notEqual(coveredReply.result?.isError, true, coveredReply.result?.content?.[0]?.text);
-    assert.match(coveredReply.result!.content![0].text!, /exit 0/);
+    assert.equal(
+      coveredReply.result?.isError,
+      true,
+      "the MCP server honoured a grant file written into the project",
+    );
 
-    // A different command (different basename — `--help` would share npm's
-    // basename and prove nothing) using the same sets must NOT be covered:
-    // "the grant covers the command, not just the sets" is the whole point.
-    const other = await talk(p, [init, call(1, "hush_run", { command: "git", args: ["--version"] })]);
-    const otherReply = other.replies.find((r) => r.id === 1)!;
-    assert.equal(otherReply.result?.isError, true, "a grant for npm also covered git");
+    p.cleanup();
+  });
+});
 
+describe("hush_request", () => {
+  /** A loopback target, plus a record of exactly what it received. */
+  async function withServer(
+    handler: (req: IncomingMessage) => { status: number; body: string },
+    fn: (base: string, hits: () => string[]) => Promise<void>,
+  ): Promise<void> {
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        hits.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""} ${body}`);
+        const out = handler(req);
+        res.writeHead(out.status, { "content-type": "text/plain" });
+        res.end(out.body);
+      });
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      await fn(base, () => hits);
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
+  }
+
+  test("the secret reaches the server and the tool result is masked", async () => {
+    await withServer(
+      (req) => ({ status: 200, body: `you sent: ${req.headers.authorization ?? ""}` }),
+      async (base, hits) => {
+        const p = project();
+        const s = await talk(p, [
+          init,
+          call(1, "hush_request", {
+            url: `${base}/v1/thing`,
+            method: "POST",
+            headers: { Authorization: "Bearer $API_KEY" },
+          }),
+        ]);
+        const body = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+        assert.equal(hits().length, 1, "the request never arrived");
+        assert.match(hits()[0], /Bearer super-secret-value-here/);
+        assert.match(body, /\[redacted:API_KEY\]/);
+        assert.doesNotMatch(body, /super-secret-value-here/, "the value came back to the model");
+        p.cleanup();
+      },
+    );
+  });
+
+  test("a non-2xx comes back as text the model can read, not as a tool error", async () => {
+    await withServer(
+      () => ({ status: 404, body: "no such refund" }),
+      async (base) => {
+        const p = project();
+        const s = await talk(p, [init, call(1, "hush_request", { url: `${base}/missing` })]);
+        const reply = s.replies.find((r) => r.id === 1)!;
+        assert.notEqual(reply.result?.isError, true, "a 404 was reported as a failed tool call");
+        assert.match(reply.result!.content![0].text!, /404/);
+        assert.match(reply.result!.content![0].text!, /no such refund/);
+        p.cleanup();
+      },
+    );
+  });
+
+  test("a host outside allowHosts is refused, and nothing is sent", async () => {
+    await withServer(
+      () => ({ status: 200, body: "ok" }),
+      async (base, hits) => {
+        const p = project({ allowHosts: ["api.stripe.com"] });
+        const s = await talk(p, [
+          init,
+          call(1, "hush_request", { url: `${base}/x`, headers: { Authorization: "Bearer $API_KEY" } }),
+        ]);
+        const reply = s.replies.find((r) => r.id === 1)!;
+        assert.match(reply.result!.content![0].text!, /Policy forbids requests to/);
+        assert.equal(hits().length, 0, "the request went out despite the host policy");
+        p.cleanup();
+      },
+    );
+  });
+
+  test("cleartext to a real host is refused", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_request", { url: "http://api.example.com/x", headers: { Authorization: "Bearer $API_KEY" } }),
+    ]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /cleartext/);
+    p.cleanup();
+  });
+
+  test("a header name that is not a token is refused rather than smuggled", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_request", { url: "https://api.example.com/x", headers: { "X-A: X-B": "value" } }),
+    ]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /not a valid header name/);
+    p.cleanup();
+  });
+
+  test("a missing url is a clear message, not a fetch error", async () => {
+    const p = project();
+    const s = await talk(p, [init, call(1, "hush_request"), call(2, "hush_request", { url: "not a url" })]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /needs a non-empty "url"/);
+    assert.match(s.replies.find((r) => r.id === 2)!.result!.content![0].text!, /not a URL/);
+    p.cleanup();
+  });
+
+  test("a $NAME with no matching key is refused, naming it", async () => {
+    const p = project();
+    const s = await talk(p, [
+      init,
+      call(1, "hush_request", { url: "https://api.example.com/x", headers: { Authorization: "Bearer $NOPE" } }),
+    ]);
+    assert.match(s.replies.find((r) => r.id === 1)!.result!.content![0].text!, /No such secret in these sets: NOPE/);
+    p.cleanup();
+  });
+
+  test("every tool, including this one, is advertised", async () => {
+    const p = project();
+    const s = await talk(p, [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }]);
+    const names = (s.replies.find((r) => r.id === 1)!.result as unknown as { tools: { name: string }[] }).tools.map((t) => t.name);
+    assert.ok(names.includes("hush_request"), `hush_request is not advertised: ${names.join(", ")}`);
+    assert.ok(names.includes("hush_run"), "hush_run went missing");
+    p.cleanup();
+  });
+
+  test("there is no tool that writes a secret to a file or a clipboard", async () => {
+    // `hush run --materialize` and `hush get --copy` are human commands on
+    // purpose: a caller that can put a value at a path (or on the clipboard)
+    // and then read that path has read the value, which is the one thing this
+    // surface exists not to allow.
+    const p = project();
+    const s = await talk(p, [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }]);
+    const names = (s.replies.find((r) => r.id === 1)!.result as unknown as { tools: { name: string }[] }).tools.map((t) => t.name);
+    for (const forbidden of ["materialize", "materialise", "copy", "clipboard", "reveal"]) {
+      assert.ok(
+        !names.some((n) => n.includes(forbidden)),
+        `the tool list exposes "${forbidden}": ${names.join(", ")}`,
+      );
+    }
     p.cleanup();
   });
 });

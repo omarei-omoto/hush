@@ -8,10 +8,10 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { Vault } from "./vault.ts";
+import { Vault, ValidationError } from "./vault.ts";
 import { assess, shouldNudge, recordNudge, snooze, type Posture } from "./posture.ts";
 import { loadIdentity, migrateIdentityToKeychain, publicKeyOf } from "./identity.ts";
-import { ensureHelper, biometryStatus } from "./biometry.ts";
+import { ensureHelper, biometryStatus, type BiometryDeps } from "./biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin, recipientsForIdentity } from "./age.ts";
 import { parseEnvFile } from "./scan.ts";
 import { DEFAULT_POLICY } from "./mcp.ts";
@@ -104,13 +104,65 @@ export interface SecureCtx {
   root: string | null;
 }
 
+/**
+ * `--for 30m`, `--for 1h`, `--for 900` (seconds).
+ *
+ * Bounded to the same range the app enforces, for the same reason: under a
+ * minute is a dialog per call, and over a day is "off" with extra steps.
+ */
+export function parseDuration(raw: string): number {
+  const m = /^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs)?$/i.exec(raw.trim());
+  if (!m) throw new ValidationError(`"${raw}" is not a duration. Try 30m, 1h, or a number of seconds.`);
+  const n = Number(m[1]);
+  const unit = (m[2] ?? "s").toLowerCase();
+  const seconds = unit.startsWith("h") ? n * 3600 : unit.startsWith("m") ? n * 60 : n;
+  if (seconds < 60 || seconds > 86_400) {
+    throw new ValidationError(
+      `That is ${seconds} seconds. Choose between 60 and 86400 (a minute to a day).`,
+    );
+  }
+  return seconds;
+}
+
 function setPolicy(hushDir: string, patch: Record<string, unknown>): void {
   const p = join(hushDir, "policy.json");
   const current = existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
   writeFileSync(p, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
 }
 
-export async function runSecure(ctx: SecureCtx, want?: string): Promise<void> {
+const durationPhrase = (s: number): string =>
+  s % 3600 === 0 ? `${s / 3600} hour${s === 3600 ? "" : "s"}` : `${Math.round(s / 60)} minutes`;
+
+/**
+ * Whether `biometry: "required"` can actually be enforced on this machine.
+ *
+ * Two separate questions, and the second is the one that matters: the helper
+ * has to build at all, *and* a finger has to be enrolled. Writing "required"
+ * on the strength of the first alone would lock the user out of their own
+ * vault — the next approval refuses rather than falling back — so the rung
+ * only goes on when both are true.
+ *
+ * Exported (and taking the same test seam as biometry.ts) because the second
+ * half cannot be produced on demand: a machine either has an enrolled finger
+ * or it does not.
+ */
+export function biometryReadiness(
+  deps: BiometryDeps = {},
+): { ok: true; kind: string } | { ok: false; reason: string } {
+  const helper = ensureHelper(deps.platform ? deps.platform() : undefined);
+  if (!helper.ok) return { ok: false, reason: helper.reason ?? "biometry unavailable" };
+  const st = biometryStatus({ helperPath: deps.helperPath });
+  if (!st.available) return { ok: false, reason: st.reason ?? "biometry unavailable" };
+  return { ok: true, kind: st.kind };
+}
+
+/**
+ * @param ttlSeconds  From `--for 30m`. A duration is a change to an existing
+ *   setting as much as part of turning the rung on, so passing one applies even
+ *   when approvals are already on — otherwise someone asking for a longer
+ *   window would be told "already done" and nothing would move.
+ */
+export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: number): Promise<void> {
   const p = assess(ctx.vault, ctx.hushDir, ctx.root);
   const target = want
     ? p.checks.find((x) => x.id === want)
@@ -120,7 +172,7 @@ export async function runSecure(ctx: SecureCtx, want?: string): Promise<void> {
     renderLevel(p);
     return;
   }
-  if (target.pass) {
+  if (target.pass && !(ttlSeconds !== undefined && target.id === "approval")) {
     out(`${green("✓")} already done: ${target.label}`);
     return renderLevel(assess(ctx.vault, ctx.hushDir, ctx.root));
   }
@@ -172,23 +224,25 @@ export async function runSecure(ctx: SecureCtx, want?: string): Promise<void> {
 
     case "approval": {
       if (!ctx.hushDir) return out(red("  no .hush directory here"));
+      const ttl = ttlSeconds ?? DEFAULT_POLICY.approvalTtlSeconds;
       setPolicy(ctx.hushDir, {
         requireApproval: DEFAULT_POLICY.requireApproval,
-        approvalTtlSeconds: DEFAULT_POLICY.approvalTtlSeconds,
+        approvalTtlSeconds: ttl,
       });
-      out(`  ${green("✓")} approval is now required to run, add, or reveal`);
-      out(`  ${dim("You will see a dialog naming the command, the accounts and the variables.")}`);
+      out(`  ${green("✓")} approval is now required to run, add, reveal, or send a request`);
+      out(`  ${dim("You will see a dialog naming the command, the sets and the variables.")}`);
+      out(
+        `  ${dim(`An "Allow" lasts ${durationPhrase(ttl)} — the dialog's second button says so.`)}`,
+      );
       break;
     }
 
     case "biometry": {
       if (!ctx.hushDir) return out(red("  no .hush directory here"));
-      const helper = ensureHelper();
-      if (!helper.ok) return out(`  ${red("✗")} ${helper.reason}`);
-      const st = biometryStatus();
-      if (!st.available) return out(`  ${red("✗")} ${st.reason ?? "biometry unavailable"}`);
+      const ready = biometryReadiness();
+      if (!ready.ok) return out(`  ${red("✗")} ${ready.reason}`);
       setPolicy(ctx.hushDir, { biometry: "required" });
-      out(`  ${green("✓")} ${st.kind} is now required to approve`);
+      out(`  ${green("✓")} ${ready.kind} is now required to approve`);
       out(`  ${dim("If biometry ever becomes unavailable, hush refuses rather than falling back.")}`);
       break;
     }

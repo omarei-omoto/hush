@@ -4,7 +4,7 @@
  */
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, chmodSync,
-  statSync, accessSync, constants as fsConstants,
+  statSync, accessSync, constants as fsConstants, lstatSync, unlinkSync,
 } from "node:fs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
@@ -15,16 +15,34 @@ import {
   namedVaultPath,
   audit,
   slugifyEnv,
+  safeText,
   type LinkFile,
   assertScopeName,
+  isValidKeyName,
 } from "./vault.ts";
 import { CATALOG, knownVars, serviceLabel, setNameFor } from "./services.ts";
 import { loadIdentity, createIdentity, requireIdentity, publicKeyOf, hushHome } from "./identity.ts";
 import { scanRepo, reconcile, parseEnvFile } from "./scan.ts";
 import { runWithSecrets, toEnvFile, toShellExports } from "./run.ts";
-import { preview } from "./redact.ts";
+import { preview, MIN_REDACTABLE } from "./redact.ts";
 import { serveMcp, loadPolicy, DEFAULT_POLICY, type Policy } from "./mcp.ts";
-import { checkCommand, checkScopes, runScope, approvalCoverageLine, readPolicyFile, policyWeakenings } from "./policy.ts";
+import {
+  checkCommand, checkScopes, checkHost, runScope, requestScope,
+  approvalCoverageLine, requestCoverageLine, readPolicyFile, policyWeakenings,
+} from "./policy.ts";
+import {
+  parseHeader, prepare, requestWithSecrets, renderRequest, requestSummary, statusLine,
+  requestSecretNames, type RequestInput,
+} from "./request.ts";
+import { materialize, describeMaterialize, parseMaterializeSpec } from "./materialize.ts";
+import { loadSchema, validate, unsensitiveForOutput, describeProblems } from "./schema.ts";
+import { AGENTS, renderMcp, skillDescription } from "./agents.ts";
+import { parseImport, IMPORT_FORMATS, type ImportFormat } from "./import.ts";
+import { copyToClipboard, findClipboard, clipboardNames } from "./clipboard.ts";
+import {
+  findEnvFiles, isGitignored, detectDevCommand, openingLines,
+  keySourceChoices, importRecipe, closingLines,
+} from "./start.ts";
 import { serveUi } from "./ui.ts";
 import {
   usedSets, composeSets, librarySets, loadLinks, saveLinks, openGlobal,
@@ -34,8 +52,8 @@ import {
 import { VERSION } from "./version.ts";
 import { assess } from "./posture.ts";
 import { checkAndRecord, inspect, acceptCurrent, describeRollback } from "./integrity.ts";
-import { renderLevel, runSecure, maybeNudge, snooze } from "./secure.ts";
-import { pendingRequests, answerRequest, nativeDialogsAvailable, requestApproval } from "./approval.ts";
+import { renderLevel, runSecure, maybeNudge, snooze, parseDuration } from "./secure.ts";
+import { requestApproval } from "./approval.ts";
 import { biometryStatus, ensureHelper, authenticate } from "./biometry.ts";
 import {
   ageAvailable, ageVersion, ageBinary, ageIdentityPath,
@@ -55,8 +73,19 @@ const yellow = c("33");
 const cyan = c("36");
 
 const out = (s = ""): void => void process.stdout.write(s + "\n");
+
+/** Indent every line of a multi-line block, so a pasted snippet stays aligned. */
+const indent = (s: string, pad: string): string => pad + s.split("\n").join("\n" + pad);
 const info = (s: string): void => out(s);
 const warn = (s: string): void => void process.stderr.write(yellow(`! ${s}`) + "\n");
+
+/**
+ * A vault-supplied name on its way to the terminal. Set names are an identity,
+ * not free text, so they are kept intact for lookups and only scrubbed where
+ * they are printed: an ANSI sequence in a name would otherwise repaint the
+ * lines above it rather than show up as part of the name.
+ */
+const shown = (name: string, max = 80): string => safeText(name, max) ?? "<unprintable>";
 
 function die(message: string, hint?: string): never {
   process.stderr.write(red(`✗ ${message}`) + "\n");
@@ -126,6 +155,15 @@ const list = (a: Args, name: string): string[] => {
   const v = a.flags[name];
   const raw = Array.isArray(v) ? v : typeof v === "string" ? [v] : [];
   return raw.flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean);
+};
+/**
+ * A repeatable flag whose values must not be split on commas: file paths, and
+ * `KEY=value` pairs that may legitimately contain one. `list()` is the right
+ * helper for set names and the wrong one for anything path-shaped.
+ */
+const repeat = (a: Args, name: string): string[] => {
+  const v = a.flags[name];
+  return (Array.isArray(v) ? v : typeof v === "string" ? [v] : []).map((x) => x.trim()).filter(Boolean);
 };
 const bool = (a: Args, name: string): boolean => a.flags[name] === true || a.flags[name] === "true";
 
@@ -443,7 +481,7 @@ function dieOnApproval(ap: { decision: string; note?: string }, what: string): v
  * (create one lazily if this machine has none), so the very first vault on a
  * machine can be born this way instead of only through `hush init`.
  */
-function makeProjectVault(hushDir: string, root: string): Vault {
+function makeProjectVault(hushDir: string, root: string, quiet = false): Vault {
   const id = loadIdentity() ?? createIdentity();
   const memberName = process.env.USER || "me";
   const vaultName = basename(root);
@@ -453,7 +491,10 @@ function makeProjectVault(hushDir: string, root: string): Vault {
     vaultName,
   );
   if (created) {
-    info(`${green("✓")} made this folder's own vault at ${cyan(".hush/vault.json")} — commit it`);
+    // Silent for `hush start`, which says the same thing in words the person
+    // reading it already has: a guided run should not interrupt itself to
+    // explain its own storage model halfway through a sentence.
+    if (!quiet) info(`${green("✓")} made this folder's own vault at ${cyan(".hush/vault.json")} — commit it`);
   }
   return vault;
 }
@@ -572,8 +613,13 @@ function interactiveSetup(): boolean {
 function dieNotSetUp(): never {
   const names = librarySets().map((s) => s.name);
   process.stderr.write(red("✗ This folder isn't set up for hush yet.") + "\n");
+  // The guided run goes first: the other two lines assume you already know what
+  // a set is, and someone reading this message by definition does not.
+  process.stderr.write(`  ${cyan("hush start")}             walk through it, a few questions\n`);
   if (names.length) {
-    process.stderr.write(`  ${cyan("hush use <set> …")}        pick from your library: ${names.join(", ")}\n`);
+    process.stderr.write(
+      `  ${cyan("hush use <set> …")}        pick from your library: ${names.map((n) => shown(n)).join(", ")}\n`,
+    );
   }
   process.stderr.write(`  ${cyan("hush add .env --as Dev")}  start from a .env file\n`);
   if (!names.length) {
@@ -591,12 +637,15 @@ function dieNotSetUp(): never {
  */
 async function manualPick(sets: ReturnType<typeof librarySets>): Promise<string[]> {
   info(`Which sets should this folder use? ${dim("(space-separated, enter for none)")}`);
-  if (sets.length) info(dim(`  ${sets.map((s) => s.name).join(", ")}`));
+  if (sets.length) info(dim(`  ${sets.map((s) => shown(s.name)).join(", ")}`));
   const typed = (await askLine("> ")).split(/\s+/).filter(Boolean);
   if (!typed.length) return [];
   const unknown = typed.filter((n) => !sets.some((s) => s.name === n));
   if (unknown.length) {
-    die(`No set called "${unknown[0]}".`, `you have: ${sets.map((s) => s.name).join(", ") || "none yet"}`);
+    die(
+      `No set called "${unknown[0]}".`,
+      `you have: ${sets.map((s) => shown(s.name)).join(", ") || "none yet"}`,
+    );
   }
   return typed;
 }
@@ -729,6 +778,173 @@ async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Arg
 
 // ----------------------------------------------------------------- commands
 
+/**
+ * `hush start` — the guided first run.
+ *
+ * Everything else in this file assumes you already know what a set is and why
+ * you would want one. This assumes nothing: it finds out where your keys are,
+ * gets them in, asks the one question hush always asks up front, and ends by
+ * naming the three commands worth knowing. The wording lives in src/start.ts so
+ * it can be read and tested on its own.
+ */
+async function cmdStart(a: Args): Promise<void> {
+  if (!interactiveSetup()) {
+    die(
+      "`hush start` is a conversation, so it needs a terminal.",
+      "For scripts: hush import <file> --as <name>, hush add KEY=value, hush use <name>.",
+    );
+  }
+
+  const loose = ctxLoose(a);
+  const root = loose.root;
+  // A first run can be the very first thing on the machine, so the key that
+  // makes a vault readable is created here rather than demanded.
+  const id = loadIdentity() ?? createIdentity();
+  const envFiles = findEnvFiles(root);
+  const library = librarySets();
+  const devCommand = detectDevCommand(root, packageManagerFor);
+
+  out();
+  for (const line of openingLines({ envFiles })) info(line);
+  out();
+
+  for (const choice of keySourceChoices({ envFiles, librarySetCount: library.length })) {
+    info(`  ${choice.key}. ${choice.label}${choice.note ? `  ${dim(`(${choice.note})`)}` : ""}`);
+  }
+  const source = (await askLine(`\nWhere are your keys? ${dim("[1]")} `)) || "1";
+
+  if (source === "2") {
+    const tool = (await askLine("Which one? ")).trim();
+    const label = (await askLine(`What should I call them here? ${dim("[Prod]")} `)).trim() || "Prod";
+    const recipe = importRecipe(tool, label);
+    out();
+    info(`Run this to copy them in:`);
+    out();
+    info(`  ${cyan(recipe ?? `YOUR-EXPORT-COMMAND | hush import - --as "${label}"`)}`);
+    out();
+    info(dim("Then run `hush start` again and I'll finish up."));
+    return;
+  }
+
+  if (source === "4" && library.length) {
+    for (const [i, s] of library.entries()) {
+      info(`  ${i + 1}. ${s.label}${s.keys.length ? dim(`  (${s.keys.length} key(s))`) : ""}`);
+    }
+    const chosen = library[Number((await askLine("\nWhich one? ")).trim()) - 1];
+    if (!chosen) die("That was not one of the numbers above.");
+    useHere(loose.hushDir, chosen.name, a);
+    info(`${green("✓")} this project now uses ${bold(chosen.label)}`);
+    return finishStart(loose, a, devCommand);
+  }
+
+  const setLabel =
+    (await askLine(`What should I call this group of keys? ${dim("[Production]")} `)).trim() || "Production";
+
+  if (source === "3") {
+    // One key by hand: typed into a hidden prompt, so it never appears on
+    // screen and never needs pasting into a chat window.
+    const thing = (await askLine("What's it for? " + dim("(e.g. stripe, openai, fal) "))).trim();
+    const known = thing ? CATALOG[thing.toLowerCase()] : undefined;
+    const vars = known ? knownVars(thing.toLowerCase()) : [];
+    const keyName = vars.length ? vars[0] : (await askLine("What should I call the key? ")).trim().toUpperCase();
+    if (!keyName || !isValidKeyName(keyName)) die("That is not a usable key name.", "Try something like STRIPE_KEY.");
+
+    const value = await promptSecret(`  ${keyName}`, true);
+    if (!value) die("Nothing entered, nothing changed.");
+    const slug = slugifyEnv(setLabel);
+    const { target, where } = await beginSetWrite(loose, a, {
+      asLabel: setLabel,
+      count: 1,
+      verb: "Add set",
+      target: targetFor(a),
+    });
+    importInto(target, id, slug, { [keyName]: value }, false);
+    target.describeEnv(slug, { label: setLabel });
+    target.save();
+    const warning = shortValueWarning(keyName, value);
+    if (warning) warn(warning);
+    out();
+    info(`${green("✓")} stored ${bold(keyName)} as ${bold(setLabel)} in ${where}`);
+    useHere(loose.hushDir, slug, a);
+    return finishStart(loose, a, devCommand);
+  }
+
+  // 1: from a file in this folder. The common case, and the one worth getting
+  // exactly right.
+  let file = envFiles[0];
+  if (!file) {
+    file = (await askLine(`What's the file called? ${dim("[.env]")} `)).trim() || ".env";
+    if (!existsSync(join(root, file))) {
+      die(
+        `I can't find ${file} in this folder.`,
+        "Put your keys in a file and run `hush start` again, or pick another answer.",
+      );
+    }
+  }
+
+  const parsed = parseEnvFile(readFileSync(join(root, file), "utf8"));
+  const names = Object.keys(parsed);
+  if (!names.length) die(`I didn't find any KEY=value lines in ${file}.`);
+
+  const slug = slugifyEnv(setLabel);
+  const { target, where } = await beginSetWrite(loose, a, {
+    asLabel: setLabel,
+    count: names.length,
+    verb: "Add set",
+    target: targetFor(a),
+  });
+  const { added, short } = importInto(target, id, slug, parsed, false);
+  target.describeEnv(slug, { label: setLabel, source: file });
+  target.save();
+  audit(loose.hushDir, { actor: "cli", action: "add", kind: "start", env: slug, file, added, where });
+
+  out();
+  info(`${green("✓")} stored ${bold(String(added))} key(s) as ${bold(setLabel)} in ${where}`);
+  warnShort(short);
+  // The plaintext file is the one thing that undoes the work, so say what to do
+  // about it once, plainly. Never delete it for them.
+  if (isGitignored(root, file)) {
+    info(dim(`  ${file} is already gitignored, so it cannot be committed.`));
+    info(dim("  You can delete it now: hush has everything it needs."));
+  } else {
+    warn(`${file} is not in .gitignore, so it could be committed by accident.`);
+    info(dim(`  Add it, then delete ${file}. hush has everything it needs.`));
+  }
+  useHere(loose.hushDir, slug, a);
+  return finishStart(loose, a, devCommand);
+}
+
+/** `--library` is honoured; otherwise a first run writes into this project. */
+const targetFor = (a: Args): "library" | "project" => (bool(a, "library") ? "library" : "project");
+
+/**
+ * The tail of the guided run: the one question hush always asks up front, an
+ * offer to run the thing, and the commands worth knowing.
+ */
+async function finishStart(
+  loose: ReturnType<typeof ctxLoose>,
+  a: Args,
+  devCommand: { pm: string; script: string } | null,
+): Promise<void> {
+  out();
+  await askAgentQuestion(loose.hushDir, a);
+
+  if (devCommand) {
+    const run = await askLine(`\nWant to run it now? ${dim(`(${devCommand.pm} run ${devCommand.script}) [y/N]`)} `);
+    if (/^y/i.test(run.trim())) {
+      // quiet: the "using <sets>" line has already been said in plain words.
+      await runCommand({ _: [], rest: [], flags: { ...a.flags, quiet: true } }, [
+        devCommand.pm,
+        "run",
+        devCommand.script,
+      ]);
+      return;
+    }
+  }
+
+  for (const line of closingLines({ devCommand })) info(line);
+}
+
 async function cmdInit(a: Args): Promise<void> {
   const name = a._[0] || require_basename();
   const global = bool(a, "global") || bool(a, "personal");
@@ -843,10 +1059,35 @@ async function cmdGet(a: Args): Promise<void> {
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
       });
       // --yes only skips the scrollback warning below; it never skips policy.
       dieOnApproval(ap, `revealing ${key}`);
     }
+  }
+
+  // --copy is the same reveal with less residue: the value goes to the
+  // clipboard through a pipe and is never written to stdout, so it misses the
+  // scrollback, the tmux buffer, and the session recording.
+  if (bool(a, "copy")) {
+    const found = findClipboard();
+    if (!found) {
+      die(
+        "No clipboard tool found.",
+        `Looked for: ${clipboardNames().join(", ")}. Install one, or drop --copy to print it instead.`,
+      );
+    }
+    if (!bool(a, "yes")) {
+      warn(`This puts a live credential on the clipboard, which other applications can read (via ${found.cmd}).`);
+      if (!(await confirm(`Copy ${bold(key)}?`))) return info(dim("aborted"));
+    }
+    const copied = copyToClipboard(secrets[key]);
+    if (!copied.ok) die(`Could not copy: ${copied.reason}.`);
+    audit(loose.hushDir, { actor: "cli", action: "reveal", key, layers, to: `clipboard:${copied.via}` });
+    // The length, never the value: enough to know the whole thing arrived.
+    info(`${green("✓")} copied ${bold(key)} to the clipboard ${dim(`(${secrets[key].length} characters)`)}`);
+    return;
   }
 
   if (!bool(a, "yes")) {
@@ -874,7 +1115,7 @@ async function cmdLs(a: Args): Promise<void> {
     if (!home) die(`No set called "${setName}".`);
     const meta = home.sets().find((s) => s.name === setName)!;
     if (bool(a, "json")) return out(JSON.stringify(meta, null, 2));
-    info(`${bold(meta.label)} ${dim(`(${meta.name})`)}`);
+    info(`${bold(meta.label)} ${dim(`(${shown(meta.name)})`)}`);
     if (meta.description) info(`  ${dim(meta.description)}`);
     if (meta.whenToUse) info(`  ${dim("when: " + meta.whenToUse)}`);
     info("");
@@ -905,7 +1146,7 @@ async function cmdLs(a: Args): Promise<void> {
     // The library's default is the one set with a meaning beyond its name.
     const role = where === "library" && s.name === "default" ? dim("  — your global environment, under everything") : "";
     info(
-      `  ${used.has(s.name) ? green("●") : " "} ${bold(s.label)} ${dim(`(${s.name})`)}  ${dim(`${s.keys.length} key(s)`)}${role}`,
+      `  ${used.has(s.name) ? green("●") : " "} ${bold(s.label)} ${dim(`(${shown(s.name)})`)}  ${dim(`${s.keys.length} key(s)`)}${role}`,
     );
     if (s.description) info(`      ${dim(s.description)}`);
     if (s.whenToUse) info(`      ${dim("when: " + s.whenToUse)}`);
@@ -1033,18 +1274,127 @@ function importInto(
   env: string,
   parsed: Record<string, string>,
   overwrite: boolean,
-): { added: number; skipped: number } {
+): { added: number; overwritten: number; skipped: number; short: string[] } {
   let added = 0;
+  let overwritten = 0;
   let skipped = 0;
+  const short: string[] = [];
   for (const [key, value] of Object.entries(parsed)) {
     if (vault.has(env, key) && !overwrite) {
       skipped++;
       continue;
     }
+    if (vault.has(env, key)) overwritten++;
+    else added++;
+    if (shortValueWarning(key, value)) short.push(key);
     vault.set(id, env, key, value);
-    added++;
   }
-  return { added, skipped };
+  return { added, overwritten, skipped, short };
+}
+
+/**
+ * Everything `hush add` and `hush import` must decide identically before a set
+ * is written: which vault it lands in, and whether the policy wants the `add`
+ * approval first.
+ *
+ * One function rather than two copies, for the same reason policy.ts exists:
+ * two surfaces that each decide this for themselves drift, and the drift here
+ * is either "stored somewhere the user did not expect" or "skipped the
+ * approval", which is the control that matters.
+ */
+async function beginSetWrite(
+  loose: ReturnType<typeof ctxLoose>,
+  a: Args,
+  opts: {
+    asLabel: string;
+    count: number;
+    verb: string;
+    /**
+     * Skip the "Where?" question by deciding up front. `hush start` uses this:
+     * it already asked several questions, and a first run should not also be a
+     * quiz about hush's own storage model.
+     */
+    target?: "library" | "project";
+  },
+): Promise<{ target: Vault; where: string; toLibrary: boolean }> {
+  const wantLibrary = bool(a, "library") || opts.target === "library";
+  const wantProject = bool(a, "project") || opts.target === "project";
+  if (wantLibrary && wantProject) die("Pass only one of --library or --project.");
+
+  const isTTY = Boolean(process.stdin.isTTY);
+  // Neither flag, no vault of this folder's own, and no library to fall back
+  // to: a script has nowhere sensible to land, so it fails here rather than
+  // reporting success having stored nothing. A real terminal gets the prompt.
+  if (!wantLibrary && !wantProject && !isTTY && !loose.vault && !globalVaultExists()) {
+    die(
+      "Nothing was stored: this folder has no vault yet, and you have no library either.",
+      "Pass --project to make a vault here, or hush global --create to make a library.",
+    );
+  }
+
+  let toLibrary: boolean;
+  if (wantLibrary) toLibrary = true;
+  else if (wantProject) toLibrary = false;
+  else if (isTTY) {
+    const def = globalVaultExists() ? "library" : "project";
+    const answer = (await promptLine(`Where? [library/project] (enter for ${def}) `)).trim().toLowerCase();
+    toLibrary = (answer || def) === "library";
+  } else {
+    toLibrary = globalVaultExists();
+  }
+
+  let target: Vault;
+  let where: string;
+  if (toLibrary) {
+    const g = openGlobal();
+    if (!g) die("You have no library yet.", "Make one: hush global --create");
+    target = g;
+    where = `your library (${globalVaultName()})`;
+  } else {
+    // Silent while a guided run is driving: see makeProjectVault's own note.
+    target = loose.vault ?? makeProjectVault(loose.hushDir, loose.root, opts.target !== undefined);
+    where = "this project";
+  }
+
+  const slug = slugifyEnv(opts.asLabel);
+  const policy = policyFor(loose.hushDir);
+  if (policy?.requireApproval.includes("add")) {
+    const ap = await requestApproval(loose.hushDir, {
+      action: "add",
+      summary: `${opts.verb} "${opts.asLabel}" (${opts.count} key(s)) in ${where}`,
+      scope: `add:${slug}`,
+      ttlSeconds: policy.approvalTtlSeconds,
+      timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+      biometry: policy.biometry,
+      // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+      sessionGrant: false,
+    });
+    dieOnApproval(ap, `adding ${opts.asLabel}`);
+  }
+
+  return { target, where, toLibrary };
+}
+
+/**
+ * The one thing worth saying about a value too short to mask.
+ *
+ * `redact.ts` refuses to track anything under MIN_REDACTABLE characters, on
+ * the grounds that masking a three-character value is noise. The consequence
+ * is that a short secret is injected, used, and printed in full with nothing
+ * having said so — and `hush request` sharpened it, because a response that
+ * reflects the value back is printed too.
+ */
+function shortValueWarning(key: string, value: string): string | null {
+  if (!value.length || value.length >= MIN_REDACTABLE) return null;
+  return `${key} is ${value.length} character(s): hush will not mask a value that short in command output`;
+}
+
+function warnShort(keys: string[]): void {
+  if (!keys.length) return;
+  warn(
+    `${keys.length} value(s) are shorter than ${MIN_REDACTABLE} characters, so hush will not mask them ` +
+      `in output: ${keys.join(", ")}`,
+  );
 }
 
 /**
@@ -1078,62 +1428,15 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
     if (!asLabel) die(`Nothing was stored from ${file}: no name given for the set.`);
   }
 
-  const wantLibrary = bool(a, "library");
-  const wantProject = bool(a, "project");
-  if (wantLibrary && wantProject) die("Pass only one of --library or --project.");
-  // Neither flag, no vault of this folder's own, and no library to fall back
-  // to: a script has nowhere sensible to land, so it fails the same way every
-  // other `add` form does with nothing to work with. A real terminal still
-  // gets the "Where?" prompt below, which for "project" makes the vault then
-  // and there — only a non-interactive caller with nothing to fall back on
-  // ever reaches this.
-  if (!wantLibrary && !wantProject && !isTTY && !project && !globalVaultExists()) {
-    die(
-      `Nothing was stored from ${file}: this folder has no vault yet, and you have no library either.`,
-      `hush add ${file} --as "${asLabel}" --project makes a vault here, or hush global --create makes a library.`,
-    );
-  }
-  let toLibrary: boolean;
-  if (wantLibrary) toLibrary = true;
-  else if (wantProject) toLibrary = false;
-  else if (isTTY) {
-    const def = globalVaultExists() ? "library" : "project";
-    const answer = (await promptLine(`Where? [library/project] (enter for ${def}) `)).trim().toLowerCase();
-    toLibrary = (answer || def) === "library";
-  } else {
-    toLibrary = globalVaultExists();
-  }
-
-  let target: Vault;
-  let where: string;
-  if (toLibrary) {
-    const g = openGlobal();
-    if (!g) die("You have no library yet.", "Make one: hush global --create");
-    target = g;
-    where = `your library (${globalVaultName()})`;
-  } else {
-    target = project ?? makeProjectVault(loose.hushDir, loose.root);
-    project = target;
-    where = "this project";
-  }
-
+  const { target, where, toLibrary } = await beginSetWrite(loose, a, {
+    asLabel,
+    count: names.length,
+    verb: "Add set",
+  });
+  project = toLibrary ? project : target;
   const slug = slugifyEnv(asLabel);
-  const overwrite = bool(a, "overwrite");
 
-  const policy = policyFor(loose.hushDir);
-  if (policy?.requireApproval.includes("add")) {
-    const ap = await requestApproval(loose.hushDir, {
-      action: "add",
-      summary: `Add set "${asLabel}" (${names.length} key(s)) to ${where}`,
-      scope: `add:${slug}`,
-      ttlSeconds: policy.approvalTtlSeconds,
-      timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
-      biometry: policy.biometry,
-    });
-    dieOnApproval(ap, `adding ${asLabel}`);
-  }
-
-  const { added, skipped } = importInto(target, id, slug, parsed, overwrite);
+  const { added, skipped, short } = importInto(target, id, slug, parsed, bool(a, "overwrite"));
   // A second import into the same named set is someone adding to the set they
   // already named, not re-describing it — leaving out --description here must
   // not blank out the description the first import set.
@@ -1149,6 +1452,7 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
 
   info(`${green("✓")} stored ${bold(String(added))} secret(s) as ${bold(asLabel)} ${dim(`(${slug})`)} in ${where}`);
   if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
+  warnShort(short);
   useHere(loose.hushDir, slug, a);
   info("");
   info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
@@ -1156,37 +1460,26 @@ async function cmdAddFile(a: Args, file: string): Promise<void> {
 }
 
 /**
- * `hush import` is the pre-unification name for `hush add <file>`. Kept as an
- * alias, except for `--env <name>`: that shortcut stored straight into an
- * existing literal environment with no prompt and no named set, which `hush
- * add` has no equivalent for — so it is preserved here rather than folded
- * into cmdAddFile, which would otherwise have to grow a second, conflicting
- * way to pick a target.
+ * `hush import` grew up, and its two old shapes had to go somewhere.
+ *
+ * It was the pre-unification name for `hush add <file>`, plus a `--env <name>`
+ * shortcut that stored into an existing set with no prompt. Now that the name
+ * has a real job (reading another tool's export), each old form that used to
+ * work fails with the exact replacement rather than quietly doing something
+ * else — a script that means one thing and gets another is the worst outcome.
+ *
+ * For a `.env`, `hush import <file> --as <set>` is what `hush add` already did,
+ * so the migration is one flag.
  */
 async function cmdImport(a: Args): Promise<void> {
-  const file = a._[0] || ".env";
-  warn("`hush import` is deprecated; use `hush add` instead.");
-
   if (a.flags.env !== undefined) {
-    const { vault, env, hushDir, root } = ctx(a);
-    const id = requireIdentity();
-    if (!existsSync(file)) die(`No such file: ${file}`);
-    const parsed = parseEnvFile(readFileSync(file, "utf8"));
-    if (!Object.keys(parsed).length) die(`No variables found in ${file}.`);
-    const overwrite = bool(a, "overwrite");
-    const { added, skipped } = importInto(vault, id, env, parsed, overwrite);
-    vault.save();
-    audit(hushDir, { actor: "cli", action: "import", env, file, added, skipped });
-    info(`${green("✓")} imported ${bold(String(added))} secret(s) into ${cyan(env)} from ${file}`);
-    if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
-    info("");
-    info(yellow(`  Now delete ${file} — or at least make sure it is gitignored.`));
-    info(dim(`  From here on: hush run -- <your command>`));
-    maybeNudge(vault, hushDir, root);
-    return;
+    const file = a._[0] || ".env";
+    die(
+      "`hush import --env <set>` was removed: `hush import` now reads another tool's export.",
+      `For what that did:  hush add ${file} --to ${String(a.flags.env)}`,
+    );
   }
-
-  return cmdAddFile(a, file);
+  return cmdImportExport(a);
 }
 
 /**
@@ -1243,9 +1536,63 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
   // appear in `layers`, so checkScopes() alone covers what a single base env
   // used to need a separate check for.
   const policy = policyFor(loose.hushDir);
+
+  // The schema first: a value of the wrong shape is a failure that should not
+  // reach an approval dialog, let alone a spawned process.
+  const schema = loadSchema(loose.root);
+  // A repo file may *ask* for a key to stay unmasked, but only the user's own
+  // floor (~/.hush/policy.json) can grant it — otherwise a repository could
+  // turn output masking off for a value it can never read.
+  const { omit: redactOmit, ignored: unmaskIgnored } = schema
+    ? unsensitiveForOutput(schema.rules, policy?.unmaskKeys ?? [])
+    : { omit: [] as string[], ignored: [] as string[] };
+  if (unmaskIgnored.length) {
+    warn(
+      `.env.schema asks to leave ${unmaskIgnored.join(", ")} unmasked; your floor has not allowed that, so they stay masked`,
+    );
+  }
+  if (schema && !bool(a, "no-validate")) {
+    const problems = validate(secrets, schema.rules, Object.keys(secrets));
+    if (problems.length) {
+      for (const line of describeProblems(problems)) process.stderr.write(red(`✗ ${line}`) + "\n");
+      die(
+        `.env.schema rejected ${problems.length} value(s); nothing was run.`,
+        "Fix the values, or pass --no-validate to run anyway.",
+      );
+    }
+  }
+
+  // Parsed and described before any approval, so the dialog can name the files
+  // and a bad spec fails without a prompt in the way. Nothing is written yet.
+  const specs = repeat(a, "materialize").map(parseMaterializeSpec);
+  const materializePlan = specs.length ? describeMaterialize(specs, secrets) : [];
+
   if (policy) {
     checkCommand(policy, argv[0]);
     checkScopes(policy, layers);
+    // Materialising is a reveal, not a run: it writes plaintext to a path the
+    // caller chose, which an agent holding a file-read tool could then read.
+    // Gating it on "run" would make "you may use it but never read it" false.
+    if (specs.length && policy.requireApproval.includes("reveal")) {
+      const ap = await requestApproval(loose.hushDir, {
+        action: "reveal",
+        summary: `Write ${specs.length} secret${specs.length === 1 ? "" : "s"} to disk`,
+        detail: [...materializePlan.map((l) => `writes:  ${l}`), `Directory:  ${process.cwd()}`],
+        // One grant for the whole set of paths, because keying it per key would
+        // mean a dialog each. Memory-only, like every other reveal: a file in
+        // the repo must not be able to pre-authorise writing a credential out.
+        scope: `materialize:${layers.join("+")}/${specs.map((s) => s.key).sort().join(",")}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
+      });
+      audit(loose.hushDir, {
+        actor: "cli", action: "approval", on: "materialize", decision: ap.decision, via: ap.via, code: ap.code,
+      });
+      dieOnApproval(ap, `writing ${specs.map((s) => s.key).join(", ")} to disk`);
+    }
     if (policy.requireApproval.includes("run")) {
       const ap = await requestApproval(loose.hushDir, {
         action: "run",
@@ -1263,6 +1610,8 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
       });
       audit(loose.hushDir, { actor: "cli", action: "approval", on: "run", decision: ap.decision, via: ap.via, code: ap.code });
       // Denied or timed out: exit before the child is ever spawned.
@@ -1277,14 +1626,62 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
   if (!bool(a, "quiet") && layers.length) {
     process.stderr.write(dim(`hush: using ${layers.join(", ")}\n`));
   }
-  audit(loose.hushDir, { actor: "cli", action: "run", layers, command: argv[0], injected: Object.keys(secrets).length });
+
+  // Past every gate, so the plaintext may be written now.
+  //
+  // A materialised key leaves the *environment* but stays in the *redaction
+  // set*: `env` is merged over `secrets` in runWithSecrets, so the child sees
+  // the path where the value was, while a child that prints the file still gets
+  // `[redacted:KEY]` in its output. Dropping it from `secrets` instead would
+  // have been simpler and would have made `cat "$GOOGLE_APPLICATION_CREDENTIALS"`
+  // print the credential straight into the scrollback.
+  let extraEnv: Record<string, string> = {};
+  let cleanupFiles: () => void = () => {};
+  if (specs.length) {
+    const files = materialize(specs, secrets, (m) => warn(m));
+    extraEnv = files.env;
+    cleanupFiles = files.cleanup;
+    if (!bool(a, "quiet")) {
+      for (const line of files.written) process.stderr.write(dim(`hush: wrote ${line}\n`));
+    }
+    // A hard kill cannot be caught, so this is the best-effort half; the other
+    // half is the finally around the run below, which covers every ordinary
+    // exit including a signal the child relayed.
+    process.once("exit", cleanupFiles);
+  }
+
+  audit(loose.hushDir, {
+    actor: "cli",
+    action: "run",
+    layers,
+    command: argv[0],
+    // Materialised keys are not injected; the child gets a path, not a value.
+    injected: Object.keys(secrets).filter((k) => !specs.some((s) => s.key === k)).length,
+    ...(specs.length ? { materialized: specs.map((s) => s.key) } : {}),
+  });
+
+  // `ps` shows the command line to every user on the machine, and hush has no
+  // way to pass a secret as an argument on purpose. Nothing noticed when one
+  // arrived anyway. A warning rather than a refusal: by the time argv exists
+  // the value is already in the process table, so blocking would add an
+  // obstacle without removing the exposure.
+  for (const [k, v] of Object.entries(secrets)) {
+    if (v.length < MIN_REDACTABLE) continue;
+    if (argv.some((arg) => arg.includes(v))) {
+      warn(`the value of ${k} appears in the command line, which ps shows to every user on this machine`);
+    }
+  }
 
   const result = await runWithSecrets(argv[0], argv.slice(1), {
     cwd: process.cwd(),
     secrets,
+    env: extraEnv,
     redact: !bool(a, "no-redact"),
+    redactOmit,
     capture: false,
-  }).catch((e) => die(`could not run "${argv[0]}": ${e.message}`));
+  })
+    .catch((e) => die(`could not run "${argv[0]}": ${e.message}`))
+    .finally(cleanupFiles);
 
   // Not process.exit(): it discards buffered stdout when stdout is a pipe, so
   // `hush run -- cmd | head` could lose the tail of the child's output.
@@ -1294,6 +1691,301 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
 async function cmdRun(a: Args): Promise<void> {
   const argv = a.rest.length ? a.rest : a._;
   return runCommand(a, argv);
+}
+
+/**
+ * `hush import` — read what another tool exports and store it as a set.
+ *
+ * The point is the recipes, not a plugin system: every provider can already
+ * export, so hush reads the shape rather than learning each vendor's API.
+ */
+async function cmdImportExport(a: Args): Promise<void> {
+  const loose = ctxLoose(a);
+  const id = requireIdentity();
+
+  const source = a._[0] ?? a.rest[0];
+  if (!source) {
+    die(
+      "Usage: hush import <file|-> --as <set> [--format dotenv|json|1password]",
+      "Pipe one in:  doppler secrets download --format json --no-file | hush import - --as Prod",
+    );
+  }
+  const rawFormat = str(a, "format") ?? "dotenv";
+  if (!IMPORT_FORMATS.includes(rawFormat as ImportFormat)) {
+    die(`Unknown --format "${rawFormat}".`, `Known: ${IMPORT_FORMATS.join(", ")}.`);
+  }
+  const format = rawFormat as ImportFormat;
+
+  let text: string;
+  let where: string;
+  if (source === "-") {
+    // Everything piped in, as one value: an export is a document, and splitting
+    // it into lines the way `hush set` does would corrupt any JSON.
+    text = readFileSync(0, "utf8");
+    where = "stdin";
+  } else {
+    if (!existsSync(source)) die(`No such file: ${source}`);
+    text = readFileSync(source, "utf8");
+    where = source;
+  }
+
+  const { values, notes } = parseImport(text, format, where);
+  const names = Object.keys(values);
+  if (!names.length) {
+    // The common mistake is a JSON export read as dotenv: `{"A":"1"}` has no
+    // `KEY=value` lines, so it parses to nothing and reads as an empty file.
+    const looksLikeJson = text.trimStart().startsWith("{") || text.trimStart().startsWith("[");
+    die(
+      `Nothing to import from ${where}.`,
+      format === "dotenv" && looksLikeJson
+        ? "That looks like JSON — pass --format json (or --format 1password for an op item)."
+        : `Is --format ${format} right for this input? Known: ${IMPORT_FORMATS.join(", ")}.`,
+    );
+  }
+
+  const asLabel = str(a, "as");
+  if (!asLabel) die("Give the set a name.", `hush import ${source} --as "Prod"`);
+  const slug = slugifyEnv(asLabel);
+
+  if (bool(a, "dry-run")) {
+    // Before any target is resolved on purpose: a dry run must not create a
+    // vault, make a library, prompt, or ask for an approval.
+    const would = bool(a, "library")
+      ? `your library (${globalVaultName()})`
+      : loose.vault
+        ? "this project"
+        : "this project (a vault would be created)";
+    info(bold(`${names.length} secret(s) would be stored as ${asLabel} ${dim(`(${slug})`)} in ${would}:`));
+    for (const n of names) info(`  ${n}`);
+    for (const n of notes) info(dim(`  note: ${n}`));
+    info("");
+    info(dim("Nothing was written. Drop --dry-run to store them."));
+    return;
+  }
+
+  const { target, where: landed, toLibrary } = await beginSetWrite(loose, a, {
+    asLabel,
+    count: names.length,
+    verb: "Import",
+  });
+
+  const { added, overwritten, skipped, short } = importInto(target, id, slug, values, bool(a, "overwrite"));
+  // Same rule as `hush add <file>`: a second write into the same named set is
+  // someone adding to it, not re-describing it, so an absent --description must
+  // not blank the one a previous import set.
+  const meta: Parameters<typeof target.describeEnv>[1] = { label: asLabel, source: where };
+  const description = str(a, "description");
+  const when = str(a, "when");
+  if (description !== undefined) meta.description = description;
+  if (when !== undefined) meta.whenToUse = when;
+  if (!added && !overwritten) target.ensureEnvExists(slug);
+  target.describeEnv(slug, meta);
+  target.save();
+  audit(loose.hushDir, {
+    actor: "cli",
+    action: "add",
+    kind: "import",
+    env: slug,
+    as: asLabel,
+    source: where,
+    format,
+    added,
+    overwritten,
+    skipped,
+    where: toLibrary ? "library" : "project",
+  });
+
+  info(
+    `${green("✓")} imported ${bold(String(added + overwritten))} secret(s) as ` +
+      `${bold(asLabel)} ${dim(`(${slug})`)} in ${landed}`,
+  );
+  if (overwritten) info(dim(`  ${overwritten} replaced an existing value`));
+  if (skipped) info(dim(`  ${skipped} already present (pass --overwrite to replace)`));
+  warnShort(short);
+  for (const n of notes) warn(n);
+  useHere(loose.hushDir, slug, a);
+}
+
+/**
+ * The body of `hush request`, from a flag literal or from somewhere else.
+ *
+ * `@file` exists because the interesting bodies are JSON documents and
+ * fixtures, and pasting one into an argv on a shell is how quoting bugs
+ * happen. `@-` reads stdin so `hush request ... --data @- <<< "$json"` and
+ * `... | hush request --data @-` both work.
+ */
+function requestBody(a: Args): string | undefined {
+  const raw = str(a, "data") ?? str(a, "body") ?? str(a, "json");
+  if (raw === undefined) return undefined;
+  if (raw === "@-") return readFileSync(0, "utf8");
+  if (raw.startsWith("@")) {
+    const path = raw.slice(1);
+    try {
+      return readFileSync(path, "utf8");
+    } catch (e) {
+      die(`Could not read ${path}: ${(e as Error).message}`);
+    }
+  }
+  return raw;
+}
+
+/**
+ * `hush request` — make the call here, so the credential is never handed to
+ * the caller or to a child process.
+ *
+ * `hush run` covers a program that already knows how to authenticate itself.
+ * This covers the other half: "call this endpoint with my key" when there is
+ * no such program, which previously had no answer at all — `curl` is in the
+ * deny list precisely because a shell can read the whole injected environment
+ * and post it somewhere redaction cannot see. Here the value goes vault ->
+ * this process -> the wire, and the response comes back through the redactor.
+ *
+ *   hush request POST https://api.stripe.com/v1/refunds \
+ *     --header 'Authorization: Bearer $STRIPE_KEY' \
+ *     --data '{"charge": "ch_123"}'
+ */
+async function cmdRequest(a: Args): Promise<void> {
+  const loose = ctxLoose(a);
+  const id = requireIdentity();
+
+  const rest = a._;
+  let method = str(a, "method");
+  let target: string | undefined;
+  if (rest.length === 1) target = rest[0];
+  else if (rest.length === 2) {
+    method = method ?? rest[0];
+    target = rest[1];
+  }
+  if (!target) {
+    die(
+      "Usage: hush request [METHOD] <url> [--header 'Name: value'] [--data body] [--use <set>]",
+      "Example: hush request POST https://api.stripe.com/v1/refunds --header 'Authorization: Bearer $STRIPE_KEY'",
+    );
+  }
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) {
+    die(`Not a URL: ${target}`, `Did you mean https://${target}?`);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
+    die(`Not a URL: ${target}`);
+  }
+
+  // Same refusal `hush run` makes, for the same reason: a folder nobody has
+  // told hush about must not quietly send something with nothing injected.
+  if (!isSetUp(loose)) {
+    if (!interactiveSetup()) dieNotSetUp();
+    await runSetupDialogue(loose, a);
+  }
+
+  const extra = collectExtraSets(a);
+  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
+
+  const policy = policyFor(loose.hushDir);
+  if (policy) {
+    for (const k of policy.denyKeys) delete secrets[k];
+  }
+
+  // The same schema gate as `hush run`, before a request is built or sent.
+  const schema = loadSchema(loose.root);
+  const { omit: redactOmit, ignored: unmaskIgnored } = schema
+    ? unsensitiveForOutput(schema.rules, policy?.unmaskKeys ?? [])
+    : { omit: [] as string[], ignored: [] as string[] };
+  if (unmaskIgnored.length) {
+    warn(
+      `.env.schema asks to leave ${unmaskIgnored.join(", ")} unmasked; your floor has not allowed that, so they stay masked`,
+    );
+  }
+  if (schema && !bool(a, "no-validate")) {
+    const problems = validate(secrets, schema.rules, Object.keys(secrets));
+    if (problems.length) {
+      for (const line of describeProblems(problems)) process.stderr.write(red(`✗ ${line}`) + "\n");
+      die(
+        `.env.schema rejected ${problems.length} value(s); nothing was sent.`,
+        "Fix the values, or pass --no-validate to send anyway.",
+      );
+    }
+  }
+
+  const input: RequestInput = {
+    url: target,
+    method,
+    headers: list(a, "header").map(parseHeader),
+    body: requestBody(a),
+    secrets,
+    substitute: list(a, "substitute"),
+    insecure: bool(a, "insecure"),
+    redactOmit,
+    timeoutMs: (() => {
+      const raw = str(a, "timeout");
+      if (raw === undefined) return policy?.maxRunMs ?? 30_000;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) die(`Bad --timeout "${raw}". Give milliseconds, e.g. 30000.`);
+      return n;
+    })(),
+  };
+
+  if (policy) {
+    // The command check has no analogue here — hush is the client — so the
+    // host check takes its place: it is the one thing an agent actually picks.
+    checkHost(policy, parsed);
+    checkScopes(policy, layers);
+    if (policy.requireApproval.includes("request")) {
+      // Build the request first, so a bad one (an unresolvable $NAME, a secret
+      // in the path, cleartext) is refused without a dialog in the way.
+      prepare(input);
+      const sends = requestSecretNames(input, secrets);
+      const ap = await requestApproval(loose.hushDir, {
+        action: "request",
+        summary: `Request:  ${requestSummary(input, secrets)}`,
+        detail: [
+          `Sends:  ${sends.join(", ") || "(no secret)"}`,
+          `Using sets:  ${layers.join(", ") || "(none)"}`,
+          `Directory:  ${process.cwd()}`,
+          requestCoverageLine(policy, parsed.host, layers),
+        ],
+        scope: requestScope(policy, parsed.host, layers),
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
+      });
+      audit(loose.hushDir, { actor: "cli", action: "approval", on: "request", decision: ap.decision, via: ap.via, code: ap.code });
+      dieOnApproval(ap, `requesting ${parsed.host}`);
+    }
+  }
+
+  if (missing.length) {
+    warn(`This project uses ${missing.join(", ")}, which your library does not have.`);
+  }
+
+  const result = await requestWithSecrets(input).catch((e) => die((e as Error).message));
+
+  if (bool(a, "include")) {
+    out(renderRequest(result, { includeHeaders: true }));
+  } else if (result.body) {
+    process.stdout.write(result.body.endsWith("\n") ? result.body : result.body + "\n");
+  }
+  // The status line always goes somewhere a human can see it: a 404 with a
+  // body that happens to be empty would otherwise look like success.
+  if (!bool(a, "quiet")) process.stderr.write(dim(`hush: ${statusLine(result)}\n`));
+
+  audit(loose.hushDir, {
+    actor: "cli",
+    action: "request",
+    url: result.url,
+    method: result.method,
+    status: result.status,
+    layers,
+    sent: result.used,
+    redactions: result.redactions,
+  });
+
+  // curl's shape: a completed response is not a failed command unless asked.
+  if (bool(a, "fail") && result.status >= 400) process.exitCode = 1;
 }
 
 /**
@@ -1400,6 +2092,8 @@ async function cmdExport(a: Args): Promise<void> {
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
       });
       dieOnApproval(ap, "export");
     }
@@ -1419,6 +2113,20 @@ async function cmdExport(a: Args): Promise<void> {
   audit(loose.hushDir, { actor: "cli", action: "export", layers, format, to: outFile ?? "stdout" });
 
   if (outFile) {
+    // writeFileSync and chmodSync both follow a symlink at the destination, so
+    // a link planted in the repo (git stores them, and .env is a plausible
+    // target) would send the whole plaintext set to a file outside the project
+    // and re-permission that file. Refuse anything that is not a regular file;
+    // a regular file is still overwritten on purpose, which is the 0600
+    // re-mode below. The same "never write through a symlink" refusal the
+    // grants file used to need — it is gone, this one is not.
+    const existingOut = lstatSync(outFile, { throwIfNoEntry: false });
+    if (existingOut && !existingOut.isFile()) {
+      die(
+        `${outFile}: not a regular file — hush will not write plaintext through a ` +
+          `symlink or special file placed at that path.`,
+      );
+    }
     writeFileSync(outFile, body, { mode: 0o600 });
     // writeFileSync only applies mode on creation; an existing file keeps its
     // old permissions, which for a stray .env is usually 0644.
@@ -1472,7 +2180,7 @@ async function cmdTeam(a: Args): Promise<void> {
 
   if (!sub || sub === "ls" || sub === "list") {
     const members = vault.members();
-    info(`${bold(vault.data.name)}  ${dim(`DEK generation ${vault.data.dek.generation}`)}`);
+    info(`${bold(shown(vault.data.name))}  ${dim(`DEK generation ${vault.data.dek.generation}`)}`);
     const width = Math.max(...members.map((m) => m.name.length));
     for (const m of members) {
       info(
@@ -1720,11 +2428,6 @@ async function cmdInstallMcp(a: Args): Promise<void> {
   // install-mcp when you're ready" is printed by setup in a vault-less folder.
   const { root } = ctxLoose(a);
   const cliPath = resolvePath(new URL(import.meta.url).pathname);
-  const target = join(root, ".mcp.json");
-  const existing = existsSync(target) ? JSON.parse(readFileSync(target, "utf8")) : {};
-  existing.mcpServers ??= {};
-  existing.mcpServers.hush = { command: "node", args: [cliPath, "mcp"] };
-  writeFileSync(target, JSON.stringify(existing, null, 2) + "\n");
 
   const policyPath = join(root, ".hush", "policy.json");
   if (!existsSync(policyPath)) {
@@ -1732,16 +2435,68 @@ async function cmdInstallMcp(a: Args): Promise<void> {
     // copy that used to live here is how a setting that no longer exists
     // (`allowReveal`) kept being written into every new project.
     const template = { ...DEFAULT_POLICY, denyCommands: [] };
+    // A folder with no `.hush/` yet is exactly the case this command is for,
+    // and this used to die with ENOENT before writing anything.
+    mkdirSync(dirname(policyPath), { recursive: true });
     writeFileSync(policyPath, JSON.stringify(template, null, 2) + "\n");
     info(`${green("✓")} wrote ${cyan(".hush/policy.json")} ${dim("(what the agent may run)")}`);
   }
 
-  info(`${green("✓")} registered hush in ${cyan(".mcp.json")}`);
-  info("");
+  // One file is not enough any more: Claude Code, Codex and Cursor each read a
+  // different one, and writing the wrong one produced a tick with nothing behind
+  // it. See src/agents.ts.
+ info("");
+  const forced = str(a, "for");
+  const candidates = forced ? AGENTS.filter((g) => g.id === forced) : AGENTS.filter((g) => g.present(root, process.env, existsSync));
+  if (forced && !candidates.length) die(`Unknown agent "${forced}".`, `known: ${AGENTS.map((g) => g.id).join(", ")}`);
+
+  let registered = 0;
+  for (const agent of candidates) {
+    const file = agent.mcp.path(root, process.env);
+    const before = existsSync(file) ? readFileSync(file, "utf8") : null;
+    const merged = renderMcp(agent.mcp.format, before, "hush", { command: "node", args: [cliPath, "mcp"] });
+    if (!merged.ok) {
+      warn(`${agent.name}: leaving ${file} alone — ${merged.reason}.`);
+      info(dim(indent(`  paste this yourself: ${agent.manual(cliPath, root)}`, "  ")));
+      continue;
+    }
+    if (!merged.changed) {
+      info(`${green("✓")} ${agent.name}: hush is already registered in ${cyan(file)}`);
+      registered++;
+      continue;
+    }
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, merged.text);
+    info(`${green("✓")} ${agent.name}: registered hush in ${cyan(file)}`);
+    registered++;
+  }
+
+  if (!candidates.length) {
+    // Nothing recognised. Say so, and hand over the two lines that work, rather
+    // than writing a file no agent reads and calling it done.
+    warn(`No coding agent detected here (looked for ${AGENTS.map((g) => g.name).join(", ")}).`);
+    info("");
+    info(`  To register hush by hand, either of these is enough:`);
+    for (const agent of AGENTS.filter((g) => g.id !== "cursor")) {
+      info(indent(`    ${agent.name}: ${cyan(agent.manual(cliPath, root))}`, "    "));
+    }
+    info(dim(`  Force one anyway with: hush install-mcp --for codex`));
+  } else if (forced) {
+    info(dim(`  --for ${forced}: wrote the file whether or not it looked installed`));
+  } else {
+    // Named rather than listed as a flag menu: someone who has one agent does
+    // not need to read the ids of the two they do not have.
+    const others = AGENTS.filter((g) => !candidates.includes(g));
+    if (others.length) {
+      info(dim(`  Not on this machine: ${others.map((g) => g.name).join(", ")} — register one with --for <id>`));
+    }
+  }
+
   info("Your agent can now:");
   info(`  ${dim("·")} see which secrets exist`);
   info(`  ${dim("·")} run commands with them injected`);
   info(`  ${dim("·")} ${bold("not")} read a single value`);
+  if (!registered) info(dim("  (once it is registered, that is)"));
 }
 
 async function cmdHook(a: Args): Promise<void> {
@@ -1855,13 +2610,24 @@ async function cmdDoctor(_a: Args): Promise<void> {
   );
 
   const root = loc.hushDir.replace(/[/\\]\.hush$/, "");
-  const mcp = join(root, ".mcp.json");
-  check(existsSync(mcp), "MCP registered", existsSync(mcp) ? mcp : "run `hush install-mcp`");
+  // Asked of every agent hush knows, not just Claude Code: on a Codex machine
+  // the old check looked for `.mcp.json`, did not find it, and told someone with
+  // a working setup to run the installer again.
+  const registered = AGENTS.map((g) => ({ agent: g, file: g.mcp.path(root, process.env) })).filter((x) =>
+    existsSync(x.file),
+  );
+  check(
+    registered.length > 0,
+    "MCP registered",
+    registered.length
+      ? registered.map((x) => `${x.agent.name}: ${x.file}`).join(", ")
+      : "run `hush install-mcp`",
+  );
 
-  const skill = join(root, ".claude", "skills", "hush", "SKILL.md");
-  const globalSkill = join(process.env.HOME ?? "~", ".claude", "skills", "hush", "SKILL.md");
-  const hasSkill = existsSync(skill) || existsSync(globalSkill);
-  check(hasSkill, "agent skill", hasSkill ? (existsSync(skill) ? "this project" : "global") : "run `hush install-skill`");
+  const skills = AGENTS.flatMap((g) =>
+    [g.skill.project(root), g.skill.global?.(process.env)].filter((p): p is string => !!p && existsSync(p)),
+  );
+  check(skills.length > 0, "agent skill", skills.length ? skills.join(", ") : "run `hush install-skill`");
 
   // What the agent is actually allowed to do, rather than what it could be.
   const policy = loadPolicy(loc.hushDir);
@@ -1879,6 +2645,27 @@ async function cmdDoctor(_a: Args): Promise<void> {
   check(existsSync(floorPath), "policy floor", existsSync(floorPath) ? floorPath : "none — only .hush/policy.json gates this project");
   const weakenings = policyWeakenings(readPolicyFile(floorPath), readPolicyFile(join(loc.hushDir, "policy.json")));
   for (const w of weakenings) info(`    ${dim(w)}`);
+
+  // `.env.schema`, when the project has one. This is the only check anywhere
+  // that says whether a value is the *right shape*; everything above is about
+  // where it lives and who can read it.
+  const schema = loadSchema(root);
+  if (!schema) {
+    check(true, ".env.schema", dim("none — add one to have value shapes checked"));
+  } else {
+    let problems: ReturnType<typeof validate> = [];
+    try {
+      problems = validate(composeSets(vault, id, loc.hushDir, []).secrets, schema.rules);
+    } catch {
+      /* nothing resolves yet; the set checks above already said so */
+    }
+    check(
+      problems.length === 0,
+      ".env.schema",
+      problems.length ? `${problems.length} value(s) do not match` : `${schema.rules.length} rule(s)`,
+    );
+    for (const line of describeProblems(problems)) info(`    ${dim(line)}`);
+  }
 
   const bio = biometryStatus();
   const enforcing = policy.biometry === "required" && bio.available;
@@ -1994,6 +2781,8 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
+        // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+        sessionGrant: false,
       });
       dieOnApproval(ap, `setting ${key}`);
     }
@@ -2001,6 +2790,8 @@ async function cmdAddKeyValue(a: Args): Promise<void> {
     const existed = vault.has(slug, key);
     vault.set(id, slug, key, value, str(a, "note"));
     vault.save();
+    const short = shortValueWarning(key, value);
+    if (short) warn(short);
     audit(loose.hushDir, { actor: "cli", action: existed ? "update" : "create", env: slug, key, where });
     info(`${green("✓")} ${existed ? "updated" : "added"} ${bold(key)} in ${cyan(slug)}  ${dim(preview(value))}`);
   }
@@ -2059,6 +2850,8 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
       ttlSeconds: policy.approvalTtlSeconds,
       timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
       biometry: policy.biometry,
+      // One-shot: a grant cannot outlive this command (approval.ts sessionGrant).
+      sessionGrant: false,
     });
     dieOnApproval(ap, `adding ${slug}`);
   }
@@ -2069,6 +2862,7 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
 
   let stored = 0;
   const skipped: string[] = [];
+  const short: string[] = [];
   for (const v of vars) {
     const had = vault.has(slug, v);
     const value = await promptSecret(`  ${v}${had ? dim(" (set — enter to keep)") : ""}`);
@@ -2077,6 +2871,7 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
       continue;
     }
     vault.set(id, slug, v, value);
+    if (shortValueWarning(v, value)) short.push(v);
     stored++;
   }
 
@@ -2099,6 +2894,7 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
   if (skipped.length) {
     warn(`Left unset: ${skipped.join(", ")}${process.stdin.isTTY ? "" : " (stdin ran out of lines)"}`);
   }
+  warnShort(short);
 
   if (!accountAlias) vault.describeEnv(slug, { label: asLabel });
   vault.save();
@@ -2184,27 +2980,6 @@ async function cmdUse(a: Args): Promise<void> {
   saveLinks(loose.hushDir, [...loadLinks(loose.hushDir), ...names]);
   for (const n of names) info(`${green("✓")} this project now uses ${bold(n)}`);
   info(dim("\n  recorded in .hush/envs.json — commit it so the team resolves the same sets"));
-}
-
-/** `hush approve` — answer requests when native dialogs aren't available. */
-async function cmdApprove(a: Args): Promise<void> {
-  const { hushDir } = ctx(a);
-  const pending = pendingRequests(hushDir);
-  if (!pending.length) {
-    info(dim("Nothing waiting for approval."));
-    if (nativeDialogsAvailable()) {
-      info(dim("On macOS, approvals appear as a dialog on screen instead."));
-    }
-    return;
-  }
-  for (const r of pending) {
-    info("");
-    info(`${bold(r.summary)}   ${dim("code " + r.code)}`);
-    for (const d of r.detail) info(`  ${dim(d)}`);
-    const yes = await confirm("  Allow?");
-    answerRequest(hushDir, r.id, yes ? (bool(a, "session") ? "session" : "once") : "deny");
-    info(yes ? `  ${green("✓")} allowed` : `  ${red("✗")} denied`);
-  }
 }
 
 /**
@@ -2355,7 +3130,18 @@ async function cmdSecure(a: Args): Promise<void> {
 
   const explicit = ["biometry", "hardware", "approval", "keychain", "no-plaintext"]
     .find((id) => bool(a, id)) ?? a._[0];
-  await runSecure({ vault, hushDir: loc?.hushDir ?? null, root }, explicit);
+  // `--for 30m` sets how long an "Allow" lasts, which is also how someone with
+  // approvals already on asks for a longer window.
+  const forRaw = str(a, "for");
+  let ttlSeconds: number | undefined;
+  if (forRaw !== undefined) {
+    try {
+      ttlSeconds = parseDuration(forRaw);
+    } catch (e) {
+      die((e as Error).message);
+    }
+  }
+  await runSecure({ vault, hushDir: loc?.hushDir ?? null, root }, explicit, ttlSeconds);
 }
 
 /** `hush biometry` — set up, check, or try the Touch ID gate. */
@@ -2365,7 +3151,20 @@ async function cmdBiometry(a: Args): Promise<void> {
   if (sub === "setup") {
     const r = ensureHelper();
     if (!r.ok) die(`Can't set up biometry: ${r.reason}`);
-    info(`${green("✓")} helper compiled at ${cyan(r.path!)}`);
+    // Nothing is installed: the helper is built fresh for each process that
+    // needs it, so there is no path worth naming here.
+    info(`${green("✓")} the Touch ID helper builds and runs on this machine`);
+
+    // What an older hush left in `~/.hush/bin/` is dead weight that looks
+    // authoritative. Nothing reads it any more; clear it so the only copy in
+    // play is one this machine built for itself.
+    const stale = ["hush-touchid", "hush-touchid.stamp"]
+      .map((f) => join(hushHome(), "bin", f))
+      .filter((f) => existsSync(f));
+    for (const f of stale) {
+      try { unlinkSync(f); } catch { /* leave it: it is ignored either way */ }
+    }
+    if (stale.length) info(dim(`  removed the old cached copy in ~/.hush/bin (no longer used)`));
   }
 
   const st = biometryStatus();
@@ -2398,21 +3197,49 @@ async function cmdInstallSkill(a: Args): Promise<void> {
   const src = resolvePath(new URL("../skills/hush/SKILL.md", import.meta.url).pathname);
   if (!existsSync(src)) die(`Skill template missing at ${src}`);
 
-  const base = global
-    ? join(process.env.HOME ?? "~", ".claude", "skills", "hush")
-    : join(ctxLoose(a).root, ".claude", "skills", "hush");
-  mkdirSync(base, { recursive: true });
-  const dest = join(base, "SKILL.md");
-  writeFileSync(dest, readFileSync(src, "utf8"));
+  const root = ctxLoose(a).root;
+  const markdown = readFileSync(src, "utf8");
+  const forced = str(a, "for");
+  const targets = forced
+    ? AGENTS.filter((g) => g.id === forced)
+    : AGENTS.filter((g) => g.present(root, process.env, existsSync));
+  if (forced && !targets.length) die(`Unknown agent "${forced}".`, `known: ${AGENTS.map((g) => g.id).join(", ")}`);
 
-  info(`${green("✓")} skill installed at ${cyan(dest)}`);
+  const written: string[] = [];
+  for (const agent of targets) {
+    const dest = global ? agent.skill.global?.(process.env) : agent.skill.project(root);
+    if (!dest) {
+      warn(`${agent.name}: no ${global ? "global " : ""}skill location — nothing written for it.`);
+      continue;
+    }
+    const body = agent.skill.transform ? agent.skill.transform(markdown, skillDescription(markdown)) : markdown;
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, body);
+    info(`${green("✓")} ${agent.name}: ${cyan(dest)}`);
+    written.push(dest);
+  }
+
+  if (!targets.length) {
+    info("");
+    info(`  No coding agent detected here (looked for ${AGENTS.map((g) => g.name).join(", ")}).`);
+    info(`  The skill is one file; put it wherever your agent reads instructions from:`);
+    for (const agent of AGENTS) {
+      const dest = global ? agent.skill.global?.(process.env) : agent.skill.project(root);
+      if (dest) info(`    ${agent.name}: ${cyan(dest)}`);
+    }
+    info(dim(`  Force one anyway with: hush install-skill --for codex`));
+  }
+
   info("");
-  info("Your coding agent now knows to:");
+  if (written.length) info("Your coding agent now knows to:");
+  else info("Once it is in place, your coding agent will know to:");
   info(`  ${dim("·")} never ask you to paste a key into the chat`);
   info(`  ${dim("·")} open a secure prompt on your screen instead`);
   info(`  ${dim("·")} pick the right account when you name one`);
   info("");
-  info(dim(global ? "  applies to every project" : "  applies to this project — pass --global for all of them"));
+  if (written.length) {
+    info(dim(global ? "  applies to every project" : "  applies to this project — pass --global for all of them"));
+  }
 }
 
 // --------------------------------------------------------------------- help
@@ -2439,16 +3266,21 @@ const SHORT_HELP = `${bold("hush")} ${dim(VERSION)}
 const FULL_HELP = `${bold("hush")} ${dim(VERSION)} — envelope-encrypted team secrets your agent can use but never read
 
 ${bold("daily")}
+  hush start                               never used this? a few questions, and you're set up
   hush add <file>                          save a .env-shaped file as a named set
   hush add KEY=value [KEY=value…]          save one or more values directly
   hush add <service>                       e.g. hush add fal — prompted, hidden input
+  hush import <file|-> --as <set>           bring in another tool's export (dotenv, json, 1password)
   hush use <set> [<set>…]                  this project uses these sets, in order (later wins)
   hush use                                 show what this project uses, and where from
   hush use --not <set>                     stop using it here
   hush run [--use <set>…] -- <cmd>         run with them injected, output redacted
+  hush run --materialize KEY -- <cmd>      write that secret to a file; the child gets the path
   ${dim("(pass-through: npm run dev, python app.py, … run the same way)")}
   ${dim("(in a folder that isn't set up yet, hush asks which of your sets it should use)")}
   hush dev [script]                        find package.json, run it with them injected
+  hush request [METHOD] <url> [--header 'Name: $VAR'] [--data @file]
+                                           call an API with a secret injected, response redacted
   hush ls [<set>]                          library, project, what is used — or one set's keys
   hush rm <KEY> [--from <set>]             remove a key
   hush rm <set> [--yes]                    remove a whole set
@@ -2471,6 +3303,7 @@ ${bold("sharing")}
 ${bold("hardening")}
   hush level                    where you are on the security ladder
   hush secure                   climb the next rung
+  hush secure approval --for 30m  ask before anything uses a key; 30m is how long an "Allow" lasts
   hush biometry [setup|test]    gate approvals behind Touch ID
   hush age                      use a YubiKey / Secure Enclave / TPM via age
   hush verify                   check the vault decrypts and has not been rolled back
@@ -2479,7 +3312,6 @@ ${bold("hardening")}
 ${bold("agents")}
   hush install-mcp              register hush with your coding agent
   hush install-skill            teach the agent the rules (--global for all projects)
-  hush approve                  answer a pending approval (non-macOS)
 
 ${bold("other")}
   hush init [name]               create a vault here (.hush/vault.json — commit it)
@@ -2492,9 +3324,16 @@ ${bold("other")}
 
 ${bold("flags")}
   --use <set>     an extra set for this run only (repeatable; --env is an alias)
+  --materialize   (run) KEY or KEY=/path: write that secret to a file, hand the
+                  child the path, remove it afterwards. Needs "reveal", not "run".
+  --header        (request) 'Name: value'; put $KEY where the secret goes (repeatable)
+  --data          (request) the body, or @file / @- to read one
+  --substitute    (request) extra places for $KEY: body, query (headers are always allowed)
+  --include       (request) print the status line and response headers too
+  --for <30m|1h>  (secure approval) how long the dialog's "Allow" lasts
   --json          machine-readable output where it makes sense
 
-${dim("Deprecated, still work — each prints a one-line notice: hush set, hush import,")}
+${dim("Deprecated, still work — each prints a one-line notice: hush set,")}
 ${dim("hush accounts, hush env ls / env / env use / env drop / env new, --with a:b, use a=b.")}
 
 ${dim("Vault files hold only ciphertext and public keys. Your private key never leaves this machine.")}
@@ -2507,6 +3346,8 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   id: cmdId,
   set: cmdSet,
   add: cmdAdd,
+  start: cmdStart,
+  import: cmdImport,
   accounts: cmdAccounts,
   account: cmdAccounts,
   use: cmdUse,
@@ -2515,10 +3356,10 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   list: cmdLs,
   rm: cmdRm,
   remove: cmdRm,
-  import: cmdImport,
   export: cmdExport,
   run: cmdRun,
   exec: cmdRun,
+  request: cmdRequest,
   dev: cmdDev,
   scan: cmdScan,
   team: cmdTeam,
@@ -2529,7 +3370,6 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   global: cmdGlobal,
   "install-mcp": cmdInstallMcp,
   "install-skill": cmdInstallSkill,
-  approve: cmdApprove,
   biometry: cmdBiometry,
   level: cmdLevel,
   verify: cmdVerify,
@@ -2545,7 +3385,21 @@ async function main(): Promise<void> {
   const command = argv[0];
 
   if (!command || command === "--help" || command === "-h") {
-    process.stdout.write(SHORT_HELP);
+    // In a folder nobody has set up, the eight-command screen is still a wall
+    // of text to someone who has never used this. One line that names the way
+    // in, and only there: once a folder is set up the pointer is noise.
+    let fresh = false;
+    try {
+      const loc = resolveVaultPath(process.cwd());
+      fresh = !loc || (!existsSync(loc.vaultPath) && !existsSync(join(loc.hushDir, "envs.json")));
+    } catch {
+      fresh = false;
+    }
+    process.stdout.write(
+      fresh
+        ? `${bold("New here?")} Run ${cyan("hush start")} and it walks you through it.\n\n${SHORT_HELP}`
+        : SHORT_HELP,
+    );
     return;
   }
   if (command === "help") {

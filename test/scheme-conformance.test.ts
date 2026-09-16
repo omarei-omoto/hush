@@ -76,11 +76,18 @@ async function unwrapIndependently(wrap: Wrap, id: Identity): Promise<Buffer> {
   return openGcm(kek, b64(wrap.iv), b64(wrap.ct), b64(wrap.tag), id.pub);
 }
 
-/** Independent value open, per the spec. */
-const openValueIndependently = (dek: Buffer, env: string, key: string, s: Sealed) =>
-  openGcm(dek, b64(s.iv), b64(s.ct), b64(s.tag), Buffer.from(`hush/v1|${env}|${key}`, "utf8"));
+/**
+ * Independent value open, per the spec.
+ *
+ * The AAD is `hush/v2|<generation>|<env>|<key>`: the generation is bound into
+ * the tag so a vault file whose plaintext generation was edited no longer
+ * decrypts. (The key wrap keeps the v1 KDF context, which is why "hush/v1/kek"
+ * still appears below.)
+ */
+const openValueIndependently = (dek: Buffer, env: string, key: string, s: Sealed, generation: number) =>
+  openGcm(dek, b64(s.iv), b64(s.ct), b64(s.tag), Buffer.from(`hush/v2|${generation}|${env}|${key}`, "utf8"));
 
-describe("hush/v1 conformance (independent WebCrypto implementation)", () => {
+describe("hush/v2 value AAD conformance (independent WebCrypto implementation)", () => {
   test("an independent implementation unwraps a data key hush produced", async () => {
     const id = generateIdentity();
     const dek = newDek();
@@ -90,8 +97,8 @@ describe("hush/v1 conformance (independent WebCrypto implementation)", () => {
 
   test("an independent implementation opens a value hush sealed", async () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "prod", "STRIPE_SECRET_KEY", "sk_live_conformance");
-    const out = await openValueIndependently(dek, "prod", "STRIPE_SECRET_KEY", sealed);
+    const sealed = sealValue(dek, "prod", "STRIPE_SECRET_KEY", "sk_live_conformance", 1);
+    const out = await openValueIndependently(dek, "prod", "STRIPE_SECRET_KEY", sealed, 1);
     assert.equal(out.toString("utf8"), "sk_live_conformance");
   });
 
@@ -99,19 +106,22 @@ describe("hush/v1 conformance (independent WebCrypto implementation)", () => {
     const id = generateIdentity();
     const dek = newDek();
     const wrap = wrapDek(dek, id.pub);
-    const sealed = sealValue(dek, "default", "DATABASE_URL", "postgres://u:p@h/db");
+    const sealed = sealValue(dek, "default", "DATABASE_URL", "postgres://u:p@h/db", 2);
 
     const recoveredDek = await unwrapIndependently(wrap, id);
-    const value = await openValueIndependently(recoveredDek, "default", "DATABASE_URL", sealed);
+    const value = await openValueIndependently(recoveredDek, "default", "DATABASE_URL", sealed, 2);
     assert.equal(value.toString("utf8"), "postgres://u:p@h/db");
   });
 
   test("the AAD binding is part of the spec, not an accident of one library", async () => {
     const dek = newDek();
-    const sealed = sealValue(dek, "staging", "K", "v");
+    const sealed = sealValue(dek, "staging", "K", "v", 1);
     // The independent implementation must also refuse the wrong slot.
-    await assert.rejects(() => openValueIndependently(dek, "prod", "K", sealed));
-    await assert.rejects(() => openValueIndependently(dek, "staging", "OTHER", sealed));
+    await assert.rejects(() => openValueIndependently(dek, "prod", "K", sealed, 1));
+    await assert.rejects(() => openValueIndependently(dek, "staging", "OTHER", sealed, 1));
+    // And the generation is part of the binding: raising it must fail here too,
+    // which is what makes the rollback warning impossible to silence quietly.
+    await assert.rejects(() => openValueIndependently(dek, "staging", "K", sealed, 9));
   });
 
   test("the KDF salt really is ephemeralPub || recipientPub", async () => {
@@ -151,7 +161,7 @@ describe("hush/v1 conformance (independent WebCrypto implementation)", () => {
     );
     assert.deepEqual(nodeHkdf, wcHkdf, "HKDF-SHA256 differs between implementations");
 
-    const key = randomBytes(32), iv = randomBytes(12), aad = Buffer.from("hush/v1|prod|K");
+    const key = randomBytes(32), iv = randomBytes(12), aad = Buffer.from("hush/v2|1|prod|K");
     const c = createCipheriv("aes-256-gcm", key, iv);
     c.setAAD(aad);
     const nodeSealed = Buffer.concat([c.update(Buffer.from("value")), c.final(), c.getAuthTag()]);

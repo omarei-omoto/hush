@@ -174,6 +174,7 @@ describe("fuzz: suggestSets", () => {
 describe("fuzz: mergePolicies / policyWeakenings", () => {
   const COMMANDS = ["node", "bash", "npm", "curl", "./script.sh", "git"] as const;
   const ENVS = ["dev", "staging", "prod", "fal/acme"] as const;
+  const HOSTS = ["api.stripe.com", "*.example.com", "localhost:3000", "api.github.com"] as const;
   const KEYS = ["API_KEY", "DB_URL", "TOKEN"] as const;
   const ACTIONS = ["run", "add", "reveal", "export"] as const;
   const BIOMETRY_RANK: Record<Policy["biometry"], number> = { off: 0, preferred: 1, required: 2 };
@@ -185,6 +186,7 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
     if (chance(r, 0.7)) p.denyCommands = randomSubset(r, COMMANDS);
     if (chance(r, 0.7)) p.unsafeAllowCommands = randomSubset(r, COMMANDS);
     if (chance(r, 0.7)) p.allowEnvs = randomSubset(r, ENVS);
+    if (chance(r, 0.7)) p.allowHosts = randomSubset(r, HOSTS);
     if (chance(r, 0.7)) p.denyKeys = randomSubset(r, KEYS);
     if (chance(r, 0.7)) p.maxRunMs = Math.floor(r() * 300_000);
     if (chance(r, 0.7)) p.approvalTtlSeconds = Math.floor(r() * 3600);
@@ -198,7 +200,7 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
   /** "Weaker than floor", defined per field exactly as the doc comment does. */
   function weakerThanFloor(floor: Partial<Policy>, effective: Policy): string[] {
     const bad: string[] = [];
-    for (const field of ["allowCommands", "allowEnvs"] as const) {
+    for (const field of ["allowCommands", "allowEnvs", "allowHosts"] as const) {
       const fl = floor[field];
       if (fl && fl.length && effective[field].some((x) => !fl.includes(x))) bad.push(field);
     }
@@ -233,6 +235,7 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
       allowCommands: repo.allowCommands ?? base.allowCommands,
       denyCommands: uniq([...base.denyCommands, ...(repo.denyCommands ?? [])]),
       allowEnvs: repo.allowEnvs ?? base.allowEnvs,
+      allowHosts: repo.allowHosts ?? base.allowHosts,
       denyKeys: uniq([...base.denyKeys, ...(repo.denyKeys ?? [])]),
       maxRunMs: repo.maxRunMs ?? base.maxRunMs,
       requireApproval: repo.requireApproval ?? base.requireApproval,
@@ -240,13 +243,14 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
       approvalTimeoutSeconds: repo.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
       biometry: repo.biometry ?? base.biometry,
       approvalScope: repo.approvalScope ?? base.approvalScope,
+      unmaskKeys: base.unmaskKeys ?? [],
     };
   }
 
   /** "Asked for something wider than the floor", derived independently, per field. */
   function askedWider(floor: Partial<Policy>, repo: Partial<Policy>): boolean {
     if ((repo.unsafeAllowCommands ?? []).some((c) => !(floor.unsafeAllowCommands ?? []).includes(c))) return true;
-    for (const field of ["allowCommands", "allowEnvs"] as const) {
+    for (const field of ["allowCommands", "allowEnvs", "allowHosts"] as const) {
       const fl = floor[field];
       const rl = repo[field];
       if (fl?.length && rl?.length && rl.some((x) => !fl.includes(x))) return true;

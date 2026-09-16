@@ -14,10 +14,24 @@ export interface RunOptions {
   cwd?: string;
   /** Secrets to inject. */
   secrets: Record<string, string>;
+  /**
+   * Extra environment for the child that is *not* a secret and must not be
+   * redacted — the path of a materialised file, say. Kept apart from `secrets`
+   * precisely so it stays out of the redactor: masking a path in a child's
+   * output only makes the output harder to read.
+   */
+  env?: Record<string, string>;
   /** Pass through the parent environment too. Default true. */
   inherit?: boolean;
   /** Mask secret values in the child's output. Default true. Never disable for agents. */
   redact?: boolean;
+  /**
+   * Keys to leave unmasked: what `.env.schema` marked `@sensitive=false`.
+   * Still injected, still encrypted at rest — this is a statement about output,
+   * which is what the redactor is for. `NODE_ENV=production` producing
+   * `[redacted:…]` on every line is how people learn to ignore the mask.
+   */
+  redactOmit?: string[];
   /** Collect output instead of streaming it to this process's stdio. */
   capture?: boolean;
   timeoutMs?: number;
@@ -43,8 +57,12 @@ export function runWithSecrets(
   opts: RunOptions,
 ): Promise<RunResult> {
   const redact = opts.redact !== false;
-  const outRedactor = new Redactor(redact ? opts.secrets : {});
-  const errRedactor = new Redactor(redact ? opts.secrets : {});
+  const omit = opts.redactOmit ?? [];
+  const redactable = omit.length
+    ? Object.fromEntries(Object.entries(opts.secrets).filter(([k]) => !omit.includes(k)))
+    : opts.secrets;
+  const outRedactor = new Redactor(redact ? redactable : {});
+  const errRedactor = new Redactor(redact ? redactable : {});
 
   // Strip the whole HUSH_* namespace from what we inherit. Leaking any one of
   // HUSH_IDENTITY, HUSH_IDENTITY_FILE, HUSH_AGE_IDENTITY, HUSH_VAULT or
@@ -57,7 +75,12 @@ export function runWithSecrets(
 
   // Secrets are merged after the strip, so a vault entry deliberately named
   // HUSH_* is still delivered — that is the user's call, not ambient config.
-  const env: NodeJS.ProcessEnv = { ...inherited, ...opts.secrets, HUSH_ACTIVE: "1" };
+  const env: NodeJS.ProcessEnv = {
+    ...inherited,
+    ...opts.secrets,
+    ...(opts.env ?? {}),
+    HUSH_ACTIVE: "1",
+  };
 
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {

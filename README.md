@@ -54,7 +54,8 @@ hush team rm sam                # re-keys the vault, re-seals every value
 ## Contents
 
 - [Install](#install) · [Quick start](#quick-start) · [Why this exists](#why-this-exists)
-- **Using it** — [Sets](#sets) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [The app](#the-app)
+- **Using it** — [Sets](#sets) · [Coming from another tool](#coming-from-another-tool) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [Credentials that are a file](#credentials-that-are-a-file) · [The app](#the-app)
+- **Checking config** — [What a value should look like](#what-a-value-should-look-like) · [Finding what a codebase needs](#finding-what-a-codebase-needs)
 - **Agents** — [What your agent gets](#what-your-agent-gets) · [Adding a key off-transcript](#adding-a-key-without-pasting-it-into-the-chat) · [Approvals](#approving-what-runs) · [Policy](#what-the-agent-may-run)
 - **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [CI](#ci)
 - **Hardening** — [The security ladder](#the-security-ladder) · [Touch ID](#touch-id) · [Hardware keys](#hardware-keys)
@@ -93,6 +94,16 @@ and an install behave identically. Still zero runtime dependencies.
 
 ```bash
 cd your-project
+hush start
+```
+
+That is the whole thing. It looks for your keys, gets them in, asks whether an
+AI assistant will be near them, and offers to run your project. A few questions,
+nothing you have to know already.
+
+Prefer to see every step yourself? The same thing, by hand:
+
+```bash
 hush init                    # creates your key + a vault, safe to commit
 hush add .env --as "Dev"     # what you already have, encrypted, as a set called dev
 rm .env                      # you don't need it any more
@@ -210,6 +221,32 @@ name. Nothing is left pointing at a name that no longer exists.
 Values are cryptographically bound to their set: a `staging` ciphertext cannot
 be moved into the `prod` slot, even by someone editing the JSON by hand.
 
+## Coming from another tool
+
+`hush add` reads a `.env`. For everything else there is `hush import`, which
+reads what your current tool already exports — no accounts, no API tokens, no
+vendor SDK:
+
+```bash
+# Doppler
+doppler secrets download --format json --no-file | hush import - --as "Prod"
+
+# AWS Secrets Manager (the SecretString envelope is unwrapped for you)
+aws secretsmanager get-secret-value --secret-id app/prod --query SecretString \
+  --output text | hush import - --as "Prod"
+
+# 1Password
+op item get "Stripe" --format json | hush import - --format 1password --as "Work"
+
+# any JSON file, checked before anything is stored
+hush import secrets.json --format json --as "Prod" --dry-run
+```
+
+`--dry-run` lists the names it would write and stores nothing. Nothing prints a
+value, in any mode. `--format` is `dotenv` (the default), `json`, or
+`1password`; a field whose value is not a string is skipped and counted rather
+than stringified into a variable.
+
 ## Several keys for one service
 
 The thing you hit every day: a personal key for a service, another for work,
@@ -262,6 +299,32 @@ Output is redacted: an injected value that shows up in stdout or stderr comes
 out as `[redacted:KEY]`. A hush command always wins over a same-named program,
 so `hush ls` is hush's `ls`, never `/bin/ls`.
 
+## Credentials that are a file
+
+Some tools do not read a secret from the environment at all. They read a
+*path*: `GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`, a `.p12` keystore, a
+client certificate. `hush export` is the wrong answer to that — it writes every
+value in the vault to disk and leaves it there.
+
+`--materialize` writes the one file that was asked for, hands the child the
+path, and removes it afterwards:
+
+```bash
+hush run --materialize GOOGLE_APPLICATION_CREDENTIALS -- node app.js
+hush run --materialize KUBECONFIG=/tmp/kube.config -- kubectl get pods
+```
+
+With no `=` hush chooses a private path (a `0700` directory, removed with the
+file). With a path, that path is used exactly. Either way the file is `0600`,
+created with `wx` so an existing file or a planted symlink is a refusal rather
+than a write through it, and removed even when the command fails. The value
+stays masked in the child's output: reading the file back does not print it.
+
+Because this writes plaintext somewhere the caller chose, it is gated on
+**`reveal`**, not on `run` — it is the same class of act as `hush get`. There is
+no MCP tool for it, and there never will be: an agent that can materialise a
+value to a path and read that path has read the value.
+
 ## The app
 
 Don't want to type commands? Don't.
@@ -309,6 +372,22 @@ plaintext stays server-side until you import.
 hush install-mcp
 ```
 
+It looks for the coding agents on this machine and registers hush with each one
+it finds, in the file that agent actually reads: **Codex**
+(`~/.codex/config.toml`), **Claude Code** (`.mcp.json`), **Cursor**
+(`.cursor/mcp.json`). It never rewrites an entry you already have, and when it
+cannot write one it prints the line to paste instead of a tick that means
+nothing.
+
+If hush cannot see your agent (a fresh machine, an unusual setup):
+
+```bash
+hush install-mcp --for codex        # or: claude-code, cursor
+```
+
+An existing entry is left alone; to point it at a different hush, edit that
+file yourself.
+
 ## What your agent gets
 
 | Tool | What the agent can do |
@@ -320,6 +399,7 @@ hush install-mcp
 | `hush_provision` | Prepare a CLI to run with the right set. |
 | `hush_add_secret` | **Have you type a new key on your screen**, never in the chat. |
 | `hush_run` | **Run a command with secrets injected.** Sees output, not values. |
+| `hush_request` | **Make an authenticated API call.** The secret goes in on the wire; the response comes back masked. |
 
 There is no `hush_get_secret`, and no flag that adds one. That is the whole
 design.
@@ -332,6 +412,33 @@ Agent: hush_run { command: "node", args: ["-e", "…connect to DB…"] }
 ```
 
 The agent got its answer. The credential never entered the transcript.
+
+### Calling an API that has no CLI
+
+`hush_run` covers a program that already knows how to authenticate itself —
+`vercel`, `gh`, `psql`. When there is no such program and something just needs
+to hit an endpoint, `curl` is the wrong answer twice over: it is denied by
+default, and a shell holding the value can post it anywhere redaction cannot
+follow.
+
+`hush request` makes the call itself. The value goes from the vault into a
+header *inside the hush process* and onto the wire; you and your agent only see
+the response, with any reflected value masked:
+
+```bash
+hush request POST https://api.stripe.com/v1/refunds \
+  --header 'Authorization: Bearer $STRIPE_KEY' \
+  --data '{"charge": "ch_123"}'
+```
+
+`--header` is repeatable, `--data` takes a literal, `@file`, or `@-` for stdin,
+and `--include` adds the status line and response headers. Secrets are
+substituted into **header values only** unless you name another surface with
+`--substitute body` or `--substitute query`. https is required — loopback is
+excepted so a local dev server works — redirects to a *different* host are
+refused rather than followed, and the response is capped and redacted before
+anything is printed. For an agent this is the `hush_request` tool, with the same
+rules and the same approval prompt.
 
 ## Adding a key without pasting it into the chat
 
@@ -377,22 +484,33 @@ Anything that injects a live credential asks first:
 ```
 
 The code also comes back in the agent's tool result, so the transcript and your
-screen can be checked against each other. "Allow 15 min" is scoped to *that list
-of sets* — switching to a different client's key asks again, which is the
-point.
+screen can be checked against each other. "Allow 15 min" is scoped to *that
+command and that list of sets*, and it lasts for as long as the thing that asked
+is running — a long agent session keeps the window, a fresh `hush` command asks
+again. Nothing about an approval is stored in your project: a file the agent
+could write is not an approval, so there is no such file.
+
+The prompt does not disappear on you. Clicking outside it cannot dismiss it or
+answer it, and if it ends up behind another window it comes back to the front
+every 45 seconds with the same request and the same code, until you answer or
+the wait runs out (two minutes by default). It also says how long is left, so a
+prompt that lapses on its own is never a surprise. Nothing is allowed if it
+lapses: you get a refusal, not a quiet yes.
 
 ```json
 {
-  "requireApproval": ["run", "add", "reveal"],
+  "requireApproval": ["run", "add", "reveal", "request"],
   "approvalTtlSeconds": 900,
   "approvalTimeoutSeconds": 120
 }
 ```
 
 Set `"requireApproval": []` to turn it off. On a Linux desktop the dialog is
-`zenity` or `kdialog`, whichever is installed (`HUSH_DIALOG` picks one). With no
-desktop at all — a server, CI — requests queue and you answer them with
-`hush approve` in your own terminal.
+`zenity` or `kdialog`, whichever is installed. With no desktop at all — a
+server, CI — there is nothing to put the request in front of you, so an
+approval-gated action is refused rather than waved through; set `biometry` to
+`"required"` on a machine with a fingerprint reader, or leave the gated
+actions out of that machine's policy.
 
 ## What the agent may run
 
@@ -403,7 +521,11 @@ hush install-skill --global   # every project
 
 Installs a skill telling your agent never to ask for a pasted key, to use
 `hush_run` rather than reading values, and how to pick a set when you name
-one. Without it the tools still work — you just have to say so each time.
+one. It goes where each agent looks for instructions: Codex reads
+`.agents/skills/hush/SKILL.md` (and `~/.agents/skills/…` for `--global`),
+Claude Code reads `.claude/skills/hush/SKILL.md`, and Cursor gets a rule at
+`.cursor/rules/hush.mdc`. Without it the tools still work — the tool
+descriptions explain themselves — you just have to say so each time.
 
 `.hush/policy.json` controls what it may run — through the MCP tools *and*
 through the CLI, so an agent that shells out to `hush run` or `hush export`
@@ -418,6 +540,7 @@ to a file that output redaction never sees:
   "denyCommands": ["your-own-additions"],
   "unsafeAllowCommands": [],
   "allowEnvs": ["default", "work-fal"],
+  "allowHosts": ["api.stripe.com", "*.github.com"],
   "denyKeys": ["STRIPE_LIVE_KEY"],
   "maxRunMs": 120000,
   "approvalScope": "command"
@@ -432,20 +555,88 @@ to a file that output redaction never sees:
 - **`allowEnvs`** names the sets an agent may use — by the name you gave them,
   wherever they live — so `["default", "work-fal"]` keeps an agent out of
   `client-fal`.
+- **`allowHosts`** bounds where `hush request` and `hush_request` may send a
+  credential. Empty means any host over https. Entries are a bare host
+  (`api.stripe.com`), a host with a port (`localhost:3000`), or a subdomain
+  glob (`*.example.com`, which does not match the apex). It is the one control
+  that decides *where* a secret goes, which no command or set rule can express:
+  without it, a set allowed for `api.stripe.com` is equally allowed for an
+  attacker's collector.
 - **`allowCommands`**, if non-empty, is an allowlist — the only command control
   that actually holds. Prefer it for anything sensitive.
+- **`requireApproval`** lists what a human must approve on screen: `run`, `add`,
+  `reveal`, and `request`. `--materialize` is gated by `reveal`, not `run`,
+  because it writes plaintext to a path the caller chose.
 - **`approvalScope`** is what "Allow 15 min" covers: `"command"` (the default)
   means that command with those sets; `"sets"` means any allowed command with
   those sets, if you find the prompts too frequent.
+- **`approvalTtlSeconds`** is how long an "Allow" lasts (default 900 = 15
+  minutes), counted inside the process that asked — the MCP server and the app
+  keep it, a one-shot `hush` command does not. Change it in the app's Agent
+  section, or with
+  `hush secure approval --for 30m`, rather than by hand.
 
 **Your floor.** `policy.json` is a file in the repo, so an agent with write
 access can edit it. `~/.hush/policy.json` — same shape, outside every repo —
-is your floor: a repo's policy can only *tighten* relative to it. `allowCommands`
-and `allowEnvs` can only narrow, `requireApproval` and `denyKeys` can only grow,
-`biometry` and `approvalScope` can only get stricter, and
+is your floor: a repo's policy can only *tighten* relative to it. `allowCommands`,
+`allowEnvs` and `allowHosts` can only narrow, `requireApproval` and `denyKeys`
+can only grow, `biometry` and `approvalScope` can only get stricter, and
 `unsafeAllowCommands` only takes effect when your floor lists the same command
-— the repo asks, you permit. `hush doctor` shows every place a repo policy
-tried to go below your floor.
+— the repo asks, you permit. `unmaskKeys` is floor-only as well: it is the list
+of keys you have allowed to print unmasked, and a repository cannot add to it.
+`hush doctor` shows every place a repo policy tried to go below your floor.
+
+An allow list your floor sets keeps applying even when a repo's `policy.json`
+does not mention it. A repo file that omits `allowCommands` inherits your floor's
+list rather than replacing it with "no restriction"; a repo file that names only
+entries outside your floor is ignored as a whole. Both cases are reported by
+`hush doctor`, so a floor that is doing nothing is never silent.
+
+## What a value should look like
+
+The most common failure is not a leak, it is a wrong value: the test key in the
+production set, a truncated paste, a key whose prefix the SDK checks before it
+will talk to the API. A `.env.schema` declares the shape, in the same
+`@env-spec` syntax Varlock reads, so a schema you already have works here
+unchanged:
+
+```bash
+# @required @type=url
+API_URL=
+
+# @type=string(startsWith=sk-) @required
+STRIPE_SECRET_KEY=
+
+# @type=enum(development, preview, production) @sensitive=false
+APP_ENV=development
+
+# @type=port
+PORT=3000
+```
+
+`@sensitive=false` is a *request*, not a permission. It asks for a key to be
+printed unmasked (useful for `NODE_ENV` or a `PORT`, which otherwise show as
+`[redacted:…]` on every line). Because the schema is a file in the repo, hush
+honours it only for keys you have listed in your own floor's `unmaskKeys`; every
+other request is ignored and named in a warning on the run. Without that, a
+repository could turn output masking off for a credential it can never read.
+
+Supported: `@required`, `@type=` `string`/`number`/`boolean`/`url`/`port`/
+`email`/`enum(...)`, `@type=string(startsWith=…, minLength=…, maxLength=…)`,
+`@pattern=`, and `@sensitive=false`. The placeholder after `=` is ignored:
+hush reads this file for *rules*, and the vault is the only source of values.
+`@default` is deliberately not implemented, because an injected default would
+make "the vault is the source of truth" quietly false.
+
+`hush run` and `hush request` check the keys they are about to use and refuse
+before anything is spawned or sent (`--no-validate` overrides; an agent cannot).
+Only the keys in play are checked, so a production rule cannot block a dev
+command that never touches it. `hush doctor` reports everything. A failure
+names the key, the rule, and the length — never the value.
+
+`@sensitive=false` means "do not mask this in output", which is what the mask is
+for: `NODE_ENV=production` arriving as `[redacted:NODE_ENV]` on every line is
+how people learn to ignore it. The value is still encrypted at rest.
 
 ## Finding what a codebase needs
 
@@ -663,7 +854,6 @@ hardening
 agents
   hush install-mcp              register hush with your coding agent
   hush install-skill            teach the agent the rules (--global for all projects)
-  hush approve                  answer a pending approval (non-macOS)
 
 other
   hush init [name]               create a vault here (.hush/vault.json — commit it)
@@ -678,7 +868,7 @@ flags
   --use <set>     an extra set for this run only (repeatable; --env is an alias)
   --json          machine-readable output where it makes sense
 
-Deprecated, still work — each prints a one-line notice: hush set, hush import,
+Deprecated, still work — each prints a one-line notice: hush set,
 hush accounts, hush env ls / env / env use / env drop / env new, --with a:b, use a=b.
 
 Vault files hold only ciphertext and public keys. Your private key never leaves this machine.

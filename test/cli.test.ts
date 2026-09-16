@@ -8,26 +8,37 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, statSync, chmodSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync, rmSync, statSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join, dirname } from "node:path";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { Vault } from "../src/vault.ts";
 import { generateIdentity, encodeSecret, encodePub } from "../src/crypto.ts";
 import { biometryStatus } from "../src/biometry.ts";
+import { biometryReadiness } from "../src/secure.ts";
 import { ageAvailable } from "../src/age.ts";
-import { pendingRequests, answerRequest } from "../src/approval.ts";
+import { requestApproval, clearApprovalCache } from "../src/approval.ts";
+import { runScope } from "../src/policy.ts";
+import { DEFAULT_POLICY } from "../src/mcp.ts";
 import { execFileSync } from "node:child_process";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+/** The stand-in desktop dialog, for the approval paths these tests drive in-process. */
+const ZENITY = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "zenity");
+/** The same "human clicks Allow 15 min" the CLI subprocess tests cannot fake. */
+const clickingAllow = {
+  authenticate: async () => "unavailable" as const,
+  platform: () => "linux",
+  resolveDialogProgram: (cmd: "osascript" | "zenity" | "kdialog") => (cmd === "zenity" ? ZENITY : null),
+};
 
 /**
- * @param envOverride  Merged over the base env — e.g. `{ HUSH_APPROVAL_MODE: "file" }`
- * so a test that turns on `requireApproval` does not hang on a real macOS
- * dialog it has no way to answer.
+ * @param envOverride  Merged over the base env, for the few tests that need to
+ * change something about how the CLI is invoked.
  */
 function project(envOverride: NodeJS.ProcessEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), "hush-cli-home-"));
@@ -37,11 +48,17 @@ function project(envOverride: NodeJS.ProcessEnv = {}) {
   const vault = Vault.create(join(root, ".hush", "vault.json"), "clitest", { name: "tester", pub: id.pub });
   vault.set(id, "default", "STRIPE_SECRET_KEY", "sk_live_cli");
   vault.save();
-  const env = {
+  // Typed as the full environment, not the literal object, so a test can point
+  // HOME at a scratch directory before running (`run` closes over this object).
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     HUSH_HOME: home,
     HUSH_IDENTITY: encodeSecret(id),
     HUSH_BIOMETRY: "off",
+    // No desktop: on macOS an enforced approval would otherwise open a real
+    // osascript dialog on the developer's screen and hang the run. This is the
+    // narrowing switch — it can only make an approval fail, never succeed.
+    HUSH_NO_DIALOG: "1",
     HUSH_NO_NUDGE: "1",
     NO_COLOR: "1",
     ...envOverride,
@@ -108,12 +125,45 @@ describe("hush level", () => {
 });
 
 describe("hush secure", () => {
+  test("--for sets how long an Allow lasts, and works when approvals are already on", () => {
+    const p = project();
+    try {
+      const on = p.run(["secure", "approval", "--for", "30m"]);
+      assert.equal(on.code, 0, on.out);
+      const written = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8"));
+      assert.equal(written.approvalTtlSeconds, 1800);
+      assert.match(on.out, /An "Allow" lasts 30 minutes/);
+
+      // The second time is the interesting one: approvals are already on, and
+      // "already done" would leave the duration where it was.
+      const longer = p.run(["secure", "approval", "--for", "4h"]);
+      assert.equal(longer.code, 0, longer.out);
+      assert.equal(JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")).approvalTtlSeconds, 14400);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--for refuses a duration outside a minute to a day", () => {
+    const p = project();
+    try {
+      const r = p.run(["secure", "approval", "--for", "5s"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /between 60 and 86400/);
+      const nonsense = p.run(["secure", "approval", "--for", "soon"]);
+      assert.equal(nonsense.code, 1, nonsense.out);
+      assert.match(nonsense.out, /not a duration/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("turning on approval actually rewrites the policy", () => {
     const p = project();
     writeFileSync(join(p.root, ".hush", "policy.json"), JSON.stringify({ requireApproval: [] }));
     p.run(["secure", "approval"]);
     const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")) as { requireApproval: string[] };
-    assert.deepEqual(policy.requireApproval.sort(), ["add", "reveal", "run"]);
+    assert.deepEqual(policy.requireApproval.sort(), ["add", "request", "reveal", "run"]);
     p.cleanup();
   });
 
@@ -218,7 +268,7 @@ describe("hush doctor reports the whole setup", () => {
 
   test("it reports the policy actually in force", () => {
     const p = project();
-    assert.match(p.run(["doctor"]).out, /approval required\s+run, add, reveal/);
+    assert.match(p.run(["doctor"]).out, /approval required\s+run, add, reveal, request/);
     writeFileSync(join(p.root, ".hush", "policy.json"), JSON.stringify({ requireApproval: [] }));
     assert.match(p.run(["doctor"]).out, /nothing is gated/);
     p.cleanup();
@@ -342,6 +392,550 @@ describe("hush add", () => {
   });
 });
 
+describe("hush start", () => {
+  /** A folder with a .env and nothing else, which is where most people are. */
+  function folderWithEnv(body = "STRIPE_SECRET_KEY=sk_live_from_env\nAPI_URL=https://api.example.com\n") {
+    const p = project({ HUSH_INTERACTIVE: "1" });
+    writeFileSync(join(p.root, ".env"), body);
+    return p;
+  }
+
+  test("off a terminal it says so, rather than reading answers nobody gave", () => {
+    const p = project();
+    try {
+      const r = p.run(["start"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /needs a terminal/);
+      assert.match(r.out, /hush import <file> --as <name>/, "it does not name the non-interactive path");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the .env path: finds the file, stores it, says what to do with the file", () => {
+    const p = folderWithEnv();
+    try {
+      // Answers: where are your keys (1), what to call them, will an agent use
+      // them (n). No dev script here, so nothing is offered to run.
+      const r = p.run(["start"], "1\nProd\nn\n");
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /I can see \.env in this folder/);
+      assert.match(r.out, /stored 2 key\(s\) as Prod/);
+      assert.match(r.out, /not in \.gitignore/, "it did not warn about the plaintext file");
+      assert.doesNotMatch(r.out, /sk_live_from_env/, "a value was printed");
+      // The ending is three commands, not the command list.
+      assert.match(r.out, /three commands you'll actually use/);
+      assert.match(r.out, /hush ls/);
+
+      // The keys really are in the vault, and the set is used here.
+      assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_live_from_env/);
+      assert.match(p.run(["ls"]).out, /● /);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("it says when the file is already ignored, and never deletes it", () => {
+    const p = folderWithEnv();
+    try {
+      writeFileSync(join(p.root, ".gitignore"), ".env\n");
+      const r = p.run(["start"], "1\nProd\nn\n");
+      assert.match(r.out, /already gitignored/);
+      assert.match(r.out, /You can delete it now/);
+      assert.equal(existsSync(join(p.root, ".env")), true, "hush deleted the file for them");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the agent question is asked here too, and answering yes gates things", () => {
+    const p = folderWithEnv();
+    try {
+      const r = p.run(["start"], "1\nProd\ny\n");
+      assert.match(r.out, /Will an AI agent use secrets here/);
+      const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8"));
+      assert.ok(policy.requireApproval.includes("run"), "answering yes did not turn approvals on");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("'in another tool' prints one command and stores nothing", () => {
+    const p = project({ HUSH_INTERACTIVE: "1" });
+    try {
+      const r = p.run(["start"], "2\ndoppler\nProd\n");
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /doppler secrets download --format json --no-file \| hush import - --as "Prod"/);
+      assert.match(r.out, /Then run `hush start` again/);
+      assert.equal(existsSync(join(p.root, ".hush", "envs.json")), false, "it set something up anyway");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("'add one now' takes the value hidden, and stores it", () => {
+    const p = project({ HUSH_INTERACTIVE: "1" });
+    try {
+      // The secret is piped last because the hidden prompt reads the rest of
+      // stdin as one value (a multi-line key has to survive that).
+      const r = p.run(["start"], "3\nProd\nstripe\nsk_test_1234567890\n");
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /stored STRIPE_SECRET_KEY as Prod/);
+      assert.doesNotMatch(r.out, /sk_test_1234567890/, "the value was echoed");
+      assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_test_1234567890/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("with a package.json it offers to run the dev script, and does not run it unasked", () => {
+    const p = folderWithEnv();
+    try {
+      writeFileSync(join(p.root, "package.json"), JSON.stringify({ scripts: { dev: "echo DEV-RAN" } }));
+      // Answering nothing to the run question means no: a piped run must never
+      // start a dev server by accident.
+      const r = p.run(["start"], "1\nProd\nn\n");
+      assert.match(r.out, /Want to run it now\?/);
+      assert.match(r.out, /hush dev/, "the ending did not name hush dev");
+      assert.doesNotMatch(r.out, /DEV-RAN/, "it ran the dev script without being asked");
+
+      const yes = p.run(["start"], "1\nProd\nn\ny\n");
+      assert.match(yes.out, /DEV-RAN/, "answering yes did not run it");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a folder with no .env asks for the file name and refuses to guess", () => {
+    const p = project({ HUSH_INTERACTIVE: "1" });
+    try {
+      const r = p.run(["start"], "1\nProd\nnope.env\n");
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /I can't find nope\.env/);
+      assert.match(r.out, /pick another answer/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the pointer appears in a folder nobody has set up, and not after", () => {
+    const fresh = project({ HUSH_INTERACTIVE: "1" });
+    try {
+      writeFileSync(join(fresh.root, ".env"), "A_KEY=value\n");
+      rmSync(join(fresh.root, ".hush"), { recursive: true, force: true });
+      const before = fresh.run([]);
+      assert.match(before.out, /New here\? Run hush start/);
+
+      const ran = fresh.run(["start"], "1\nProd\nn\n");
+      assert.equal(ran.code, 0, ran.out);
+      assert.ok(existsSync(join(fresh.root, ".hush", "envs.json")), "start did not set the folder up");
+
+      // Now that the folder is set up, the eight-command screen is the screen.
+      const after = fresh.run([]);
+      assert.doesNotMatch(after.out, /New here\?/);
+    } finally {
+      fresh.cleanup();
+    }
+  });
+
+  test("the not-set-up error points at the guided run first", () => {
+    const p = project();
+    try {
+      rmSync(join(p.root, ".hush"), { recursive: true, force: true });
+      const r = p.run(["run", "--", "echo", "hi"]);
+      assert.match(r.out, /isn't set up for hush yet/);
+      assert.match(r.out, /hush start/, "the error does not mention the guided run");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush get --copy", () => {
+  /**
+   * The platform's first clipboard candidate, symlinked to the stub. Doing it
+   * per-platform keeps the test honest on macOS and on CI's ubuntu alike.
+   */
+  function clipboardEnv(): { env: NodeJS.ProcessEnv; read: () => string; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), "hush-clip-"));
+    const name = platform() === "darwin" ? "pbcopy" : "wl-copy";
+    symlinkSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "clipboard-stub"), join(dir, name));
+    const out = join(dir, "copied.txt");
+    return {
+      dir,
+      env: { PATH: `${dir}:${process.env.PATH ?? ""}`, HUSH_TEST_CLIPBOARD: out },
+      read: () => (existsSync(out) ? readFileSync(out, "utf8") : ""),
+    };
+  }
+
+  test("the value goes to the clipboard and never to stdout", () => {
+    const clip = clipboardEnv();
+    const p = project({ ...clip.env });
+    try {
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--copy", "--yes"]);
+      assert.equal(r.code, 0, r.out);
+      assert.equal(clip.read(), "sk_live_cli", "the clipboard did not receive the value");
+      assert.doesNotMatch(r.out, /sk_live_cli/, "the value was printed as well as copied");
+      assert.match(r.out, /copied STRIPE_SECRET_KEY to the clipboard/);
+      assert.match(r.out, /11 characters/, "the confirmation should say how much was copied");
+    } finally {
+      p.cleanup();
+      rmSync(clip.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a clipboard tool that fails is reported, not silently ignored", () => {
+    const clip = clipboardEnv();
+    const p = project({ ...clip.env, HUSH_TEST_CLIPBOARD_EXIT: "3" });
+    try {
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--copy", "--yes"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Could not copy/);
+      assert.doesNotMatch(r.out, /sk_live_cli/);
+    } finally {
+      p.cleanup();
+      rmSync(clip.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("with no clipboard tool at all, it says which ones it looked for", () => {
+    const empty = mkdtempSync(join(tmpdir(), "hush-nopath-"));
+    const p = project({ PATH: empty });
+    try {
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--copy", "--yes"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /No clipboard tool found/);
+      assert.match(r.out, /pbcopy|wl-copy/, "the error does not name anything to install");
+      assert.match(r.out, /drop --copy/, "the error does not offer the alternative");
+    } finally {
+      p.cleanup();
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  test("printing still works, and still warns about the scrollback", () => {
+    const p = project();
+    try {
+      const r = p.run(["get", "STRIPE_SECRET_KEY", "--yes"]);
+      assert.match(r.out, /sk_live_cli/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("exposure warnings", () => {
+  test("a value too short to mask is called out when it is stored", () => {
+    const p = project();
+    try {
+      const r = p.run(["add", "PIN=1234", "--as", "Short", "--project"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /PIN is 4 character\(s\)/);
+      assert.match(r.out, /will not mask a value that short/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a value long enough to mask is not warned about", () => {
+    const p = project();
+    try {
+      const r = p.run(["add", "TOKEN=long-enough-value", "--as", "Fine", "--project"]);
+      assert.equal(r.code, 0, r.out);
+      assert.doesNotMatch(r.out, /character\(s\)/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the warning at import time is one line naming every short key", () => {
+    const p = project();
+    try {
+      const file = join(p.root, "short.json");
+      writeFileSync(file, JSON.stringify({ PIN: "1234", CODE: "12", TOKEN: "long-enough" }));
+      const r = p.run(["import", file, "--as", "Mixed", "--project", "--format", "json"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /2 value\(s\) are shorter than 5 characters/);
+      assert.match(r.out, /PIN, CODE/);
+      assert.doesNotMatch(r.out, /TOKEN/, "a long enough value was named in the warning");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a secret value in the command line is called out, by key and not by value", () => {
+    const p = project();
+    try {
+      // The value is in argv rather than in the environment, which is what `ps`
+      // would show to every other user on the machine.
+      const r = p.run(["run", "--", "echo", "sk_live_cli"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /the value of STRIPE_SECRET_KEY appears in the command line/);
+      assert.match(r.out, /ps shows/);
+      // The warning names the key; the output still masks the value.
+      assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("an argument that merely mentions a key does not warn", () => {
+    const p = project();
+    try {
+      const r = p.run(["run", "--", "echo", "STRIPE_SECRET_KEY"]);
+      assert.equal(r.code, 0, r.out);
+      assert.doesNotMatch(r.out, /appears in the command line/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush import", () => {
+  const SECRET = "sk_live_adopted_1234567890";
+
+  function jsonFile(p: ReturnType<typeof project>, name: string, body: unknown): string {
+    const path = join(p.root, name);
+    writeFileSync(path, JSON.stringify(body));
+    return path;
+  }
+
+  test("a JSON export becomes a set, and the values are not printed", () => {
+    const p = project();
+    try {
+      const file = jsonFile(p, "doppler.json", { API_KEY: SECRET, PORT: 3000, DEBUG: true });
+      const r = p.run(["import", file, "--as", "Prod", "--project", "--format", "json"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /imported 3 secret\(s\) as Prod/);
+      assert.doesNotMatch(r.out, new RegExp(SECRET), "the import printed a value");
+
+      // The names are listed, and one value round-trips.
+      assert.match(p.run(["ls", "prod"]).out, /API_KEY/);
+      const got = p.run(["get", "API_KEY", "--yes", "--use", "prod"]);
+      assert.match(got.out, new RegExp(SECRET));
+      // Numbers and booleans arrive as the strings an environment holds.
+      assert.match(p.run(["get", "PORT", "--yes", "--use", "prod"]).out, /3000/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("reads from stdin, which is how a provider's CLI is piped in", () => {
+    const p = project();
+    try {
+      const r = p.run(["import", "-", "--as", "Piped", "--project", "--format", "json"], JSON.stringify({ PIPED_KEY: "v" }));
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /imported 1 secret\(s\) as Piped/);
+      assert.match(p.run(["ls", "piped"]).out, /PIPED_KEY/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--format 1password reads an op item", () => {
+    const p = project();
+    try {
+      const item = { title: "Stripe", fields: [{ label: "secret key", value: SECRET }] };
+      const r = p.run(["import", "-", "--as", "Work", "--project", "--format", "1password"], JSON.stringify(item));
+      assert.equal(r.code, 0, r.out);
+      assert.match(p.run(["ls", "work"]).out, /SECRET_KEY/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--dry-run lists what would be stored and writes nothing", () => {
+    const p = project();
+    try {
+      const file = jsonFile(p, "dry.json", { DRY_KEY: SECRET });
+      const r = p.run(["import", file, "--as", "Dry", "--dry-run", "--format", "json"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /1 secret\(s\) would be stored/);
+      assert.match(r.out, /DRY_KEY/);
+      assert.match(r.out, /Nothing was written/);
+      assert.doesNotMatch(r.out, new RegExp(SECRET));
+      // It really did not write: the key cannot be fetched afterwards.
+      assert.equal(p.run(["get", "DRY_KEY", "--yes"]).code, 1, "a dry run stored something");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a name is required, and its absence says so rather than guessing", () => {
+    const p = project();
+    try {
+      const file = jsonFile(p, "unnamed.json", { A: "1" });
+      const r = p.run(["import", file, "--format", "json"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Give the set a name/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("an unknown format is refused, naming the ones that exist", () => {
+    const p = project();
+    try {
+      const file = jsonFile(p, "x.json", { A: "1" });
+      const r = p.run(["import", file, "--as", "X", "--format", "vault"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Unknown --format "vault".*dotenv, json, 1password/s);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("notes about skipped and collided fields reach the user", () => {
+    const p = project();
+    try {
+      const file = jsonFile(p, "messy.json", { GOOD: "1", VENDOR: { nested: true } });
+      const r = p.run(["import", file, "--as", "Messy", "--project", "--format", "json"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /skipped VENDOR/);
+      assert.match(r.out, /imported 1 secret\(s\)/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("with no --as it asks for a name rather than guessing", () => {
+    const p = project();
+    try {
+      const file = join(p.root, "unnamed2.json");
+      writeFileSync(file, JSON.stringify({ A: "1" }));
+      const r = p.run(["import", file, "--format", "json"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /Give the set a name/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush run and .env.schema", () => {
+  function echoScript(p: ReturnType<typeof project>, body = 'echo "val=$STRIPE_SECRET_KEY"'): string {
+    const path = join(p.root, "echo.sh");
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return "./echo.sh";
+  }
+
+  test("a value of the wrong shape stops the run before anything is spawned", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @type=string(startsWith=pk-)\nSTRIPE_SECRET_KEY=\n");
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /STRIPE_SECRET_KEY does not start with "pk-"/);
+      assert.match(r.out, /\.env\.schema rejected 1 value/);
+      assert.doesNotMatch(r.out, /val=/, "the command ran despite the schema");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a schema that accepts the value does not get in the way", () => {
+    const p = project();
+    try {
+      // The fixture value is sk_live_cli, so the accepted prefix is sk_.
+      writeFileSync(join(p.root, ".env.schema"), "# @type=string(startsWith=sk_)\nSTRIPE_SECRET_KEY=\n");
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("--no-validate runs anyway, because it is the user's own schema", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @type=string(startsWith=pk-)\nSTRIPE_SECRET_KEY=\n");
+      const r = p.run(["run", "--no-validate", "--", echoScript(p)]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a repo-supplied @sensitive=false cannot unmask a value on its own", () => {
+    // The masking decision is the user's, not the repository's. Before this,
+    // one line in a committed .env.schema took a key out of the redactor, so a
+    // repo (or an agent with repo write access) could read a value it was only
+    // supposed to be able to use.
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @sensitive=false\nSTRIPE_SECRET_KEY=\n");
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/, "a repo-supplied @sensitive=false unmasked a value");
+      assert.match(r.out, /asks to leave STRIPE_SECRET_KEY unmasked/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the user's own floor can allow an unmask", () => {
+    // The bit still exists for what it was for: NODE_ENV=production showing as
+    // [redacted:…] on every line is how people learn to ignore the mask.
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @sensitive=false\nSTRIPE_SECRET_KEY=\n");
+      writeFileSync(join(p.home, "policy.json"), JSON.stringify({ unmaskKeys: ["STRIPE_SECRET_KEY"] }));
+      // The project asks for no approvals, so the run itself is not gated; the
+      // floor's unmaskKeys is the thing under test, not the approval path.
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /val=sk_live_cli/, "the user's own unmaskKeys entry was ignored");
+      assert.doesNotMatch(r.out, /redacted/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a schema violation in a key this run never uses does not block it", () => {
+    const p = project();
+    try {
+      writeFileSync(
+        join(p.root, ".env.schema"),
+        "# @type=string(startsWith=sk_)\nSTRIPE_SECRET_KEY=\n\n# @type=url @required\nPROD_ONLY=\n",
+      );
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 0, r.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("doctor reports the schema, and names the values that do not match", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @type=string(startsWith=pk-)\nSTRIPE_SECRET_KEY=\n");
+      const r = p.run(["doctor"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /\.env\.schema\s+1 value\(s\) do not match/);
+      assert.match(r.out, /STRIPE_SECRET_KEY does not start with "pk-"/);
+      assert.doesNotMatch(r.out, /sk_live_cli/, "doctor printed the value");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a malformed schema is an error with a line number, not a silent no-op", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.root, ".env.schema"), "# @type=url\n# @required\n");
+      const r = p.run(["run", "--", echoScript(p)]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /not attached to any variable/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
 describe("hush get / import / run — the gaps mutation testing found", () => {
   test("`hush get` will not print a live credential without --yes", () => {
     // Non-interactive, so the confirmation can only decline. Removing the
@@ -365,17 +959,14 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     try {
       writeFileSync(join(p.root, ".env.in"), "STRIPE_SECRET_KEY=a_different_value\nNEW_ONE=brand_new_value\n");
 
-      // A bare `hush import` (no --as, no --env) now requires --as, like `hush
-      // add <file>` — the alias's --env shortcut is the one path that still
-      // stores straight into an existing literal environment with no name.
-      const first = p.run(["import", ".env.in", "--env", "default"]);
+      const first = p.run(["import", ".env.in", "--as", "default"]);
       assert.equal(first.code, 0, first.out);
-      assert.match(first.out, /1 already present/);
+      assert.match(first.out, /1 secret\(s\)|1 already present/);
       assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /sk_live_cli/, "the existing value was replaced");
       assert.match(p.run(["get", "NEW_ONE", "--yes"]).out, /brand_new_value/);
 
       // --overwrite is the opt-in, and it must actually do it.
-      const second = p.run(["import", ".env.in", "--overwrite", "--env", "default"]);
+      const second = p.run(["import", ".env.in", "--as", "default", "--overwrite"]);
       assert.equal(second.code, 0, second.out);
       assert.match(p.run(["get", "STRIPE_SECRET_KEY", "--yes"]).out, /a_different_value/, "--overwrite did nothing");
     } finally {
@@ -431,17 +1022,20 @@ describe("hush get / import / run — the gaps mutation testing found", () => {
     }
   });
 
-  test("`hush import --env` is unchanged: no prompt, no --as tip", () => {
+  test("the removed `--env` shortcut fails, naming the exact replacement", () => {
+    // The name was given a real job, so the old shortcut must not quietly come
+    // to mean something else: a script that means one thing and gets another is
+    // worse than one that stops and says what to type instead.
     const p = project();
     try {
       writeFileSync(join(p.root, ".env.in"), "PROD_ONE=v1\n");
       const r = p.run(["import", ".env.in", "--env", "prod"]);
-      assert.equal(r.code, 0, r.out);
-      assert.ok(!r.out.includes("--as"), `--env still printed the --as tip:\n${r.out}`);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /--env <set>` was removed/);
+      assert.match(r.out, /hush add \.env\.in --to prod/, "the error does not name the replacement");
 
       const vault = Vault.open(join(p.root, ".hush", "vault.json"));
-      const set = vault.sets().find((s) => s.name === "prod");
-      assert.ok(set && set.keys.includes("PROD_ONE"), "key did not land in the named --env");
+      assert.ok(!vault.sets().some((s) => s.name === "prod"), "the removed form stored something anyway");
     } finally {
       p.cleanup();
     }
@@ -577,7 +1171,7 @@ describe("hush secure — the gaps mutation testing found", () => {
       assert.equal(p.run(["secure", "approval"]).code, 0);
 
       const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")) as Record<string, unknown>;
-      assert.deepEqual((policy.requireApproval as string[]).sort(), ["add", "reveal", "run"]);
+      assert.deepEqual((policy.requireApproval as string[]).sort(), ["add", "request", "reveal", "run"]);
       assert.deepEqual(policy.allowEnvs, ["default"], "an unrelated setting was discarded");
       assert.deepEqual(policy.unsafeAllowCommands, ["jq"], "an unrelated setting was discarded");
       assert.equal(policy.maxRunMs, 5000, "an unrelated setting was discarded");
@@ -764,54 +1358,32 @@ describe("hush export / use / run — the rest of the CLI gaps", () => {
 });
 
 describe("hush secure --biometry will not promise what the hardware cannot do", () => {
+  /**
+   * A stub helper, handed in through the parameter seam rather than planted at
+   * a path hush would read. Planting one used to be how these tests worked —
+   * which is precisely the hole that made this seam necessary: anything running
+   * as the user could have written a helper that answers "ok".
+   */
+  const stub = (script: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "hush-bio-stub-"));
+    const path = join(dir, "hush-touchid");
+    writeFileSync(path, script, { mode: 0o755 });
+    return path;
+  };
+
   test(
     "a working helper with no enrolled finger is still refused",
     { skip: platform() === "darwin" ? false : "macOS only" },
     () => {
-      // The existing refusal test gets there through `ensureHelper` failing,
-      // which leaves the *second* check — "the helper works, but nobody has
-      // enrolled a finger" — never reached. That is the case that matters: hush
-      // must not write `biometry: required` into a policy it cannot enforce,
-      // because the next approval would then refuse rather than fall back, and
-      // the user would be locked out by a protection they thought they had.
-      const p = project();
-      try {
-        // A helper whose stamp matches, so ensureHelper accepts it, and which
-        // answers --check with "no".
-        const src = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "hush-touchid.swift");
-        const digest = createHash("sha256").update(readFileSync(src)).digest("hex").slice(0, 16);
-        const bin = join(p.home, "bin");
-        mkdirSync(bin, { recursive: true, mode: 0o700 });
-        writeFileSync(join(bin, "hush-touchid"), '#!/bin/sh\necho "no 0"\nexit 1\n', { mode: 0o755 });
-        writeFileSync(join(bin, "hush-touchid.stamp"), digest);
-
-        const env: NodeJS.ProcessEnv = {
-          ...process.env,
-          HUSH_HOME: p.home,
-          HUSH_NO_NUDGE: "1",
-          HUSH_NO_KEYCHAIN: "1",
-          NO_COLOR: "1",
-        };
-        delete env.HUSH_BIOMETRY; // let the real check run against the stub
-
-        const r = spawnSync(process.execPath, [CLI, "secure", "biometry"], {
-          cwd: p.root, env, encoding: "utf8",
-        });
-        const out = (r.stdout ?? "") + (r.stderr ?? "");
-        assert.match(out, /enrolled|unavailable|✗/, `it did not refuse:\n${out}`);
-
-        const policyPath = join(p.root, ".hush", "policy.json");
-        if (existsSync(policyPath)) {
-          const policy = JSON.parse(readFileSync(policyPath, "utf8")) as { biometry?: string };
-          assert.notEqual(
-            policy.biometry,
-            "required",
-            "it required a fingerprint that nobody has enrolled — the next approval would refuse outright",
-          );
-        }
-      } finally {
-        p.cleanup();
-      }
+      // The case that matters: the helper builds and runs, but nobody has
+      // enrolled a finger. hush must not write `biometry: required` on the
+      // strength of the first half alone, because the next approval would then
+      // refuse rather than fall back and the user would be locked out of their
+      // own vault by a protection they thought they had.
+      const path = stub('#!/bin/sh\necho "no 0"\nexit 1\n');
+      const ready = biometryReadiness({ helperPath: path });
+      assert.equal(ready.ok, false);
+      assert.match(ready.ok === false ? ready.reason : "", /no fingerprint enrolled/);
     },
   );
 
@@ -820,47 +1392,55 @@ describe("hush secure --biometry will not promise what the hardware cannot do", 
     { skip: platform() === "darwin" ? false : "macOS only" },
     () => {
       // The other side, so the refusal above is not just "it always refuses".
-      const p = project();
-      try {
-        const src = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "hush-touchid.swift");
-        const digest = createHash("sha256").update(readFileSync(src)).digest("hex").slice(0, 16);
-        const bin = join(p.home, "bin");
-        mkdirSync(bin, { recursive: true, mode: 0o700 });
-        writeFileSync(join(bin, "hush-touchid"), '#!/bin/sh\necho "yes 1"\nexit 0\n', { mode: 0o755 });
-        writeFileSync(join(bin, "hush-touchid.stamp"), digest);
-
-        const env: NodeJS.ProcessEnv = {
-          ...process.env,
-          HUSH_HOME: p.home,
-          HUSH_NO_NUDGE: "1",
-          HUSH_NO_KEYCHAIN: "1",
-          NO_COLOR: "1",
-        };
-        delete env.HUSH_BIOMETRY;
-
-        const r = spawnSync(process.execPath, [CLI, "secure", "biometry"], {
-          cwd: p.root, env, encoding: "utf8",
-        });
-        const out = (r.stdout ?? "") + (r.stderr ?? "");
-        assert.match(out, /Touch ID is now required|now required to approve/, `it did not enable it:\n${out}`);
-
-        const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")) as { biometry?: string };
-        assert.equal(policy.biometry, "required");
-      } finally {
-        p.cleanup();
-      }
+      const ready = biometryReadiness({ helperPath: stub('#!/bin/sh\necho "yes 1"\nexit 0\n') });
+      assert.equal(ready.ok, true);
+      assert.equal(ready.ok === true ? ready.kind : "", "Touch ID");
     },
   );
+
+  test("and the command refuses out loud when biometry is switched off", () => {
+    // The wiring, end to end: `hush secure biometry` asks the same question and
+    // refuses without writing the policy. Driven through the opt-out because a
+    // subprocess cannot be handed a stub helper — by design.
+    const p = project();
+    try {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        HUSH_HOME: p.home,
+        HUSH_BIOMETRY: "off",
+        HUSH_NO_NUDGE: "1",
+        HUSH_NO_KEYCHAIN: "1",
+        NO_COLOR: "1",
+      };
+      const r = spawnSync(process.execPath, [CLI, "secure", "biometry"], {
+        cwd: p.root, env, encoding: "utf8",
+      });
+      const out = (r.stdout ?? "") + (r.stderr ?? "");
+      assert.match(out, /✗/, `it did not refuse:\n${out}`);
+
+      const policyPath = join(p.root, ".hush", "policy.json");
+      if (existsSync(policyPath)) {
+        const policy = JSON.parse(readFileSync(policyPath, "utf8")) as { biometry?: string };
+        assert.notEqual(
+          policy.biometry,
+          "required",
+          "it required a fingerprint it had just said it could not check",
+        );
+      }
+    } finally {
+      p.cleanup();
+    }
+  });
 });
 
 describe("the CLI enforces .hush/policy.json — an agent's shell must not bypass what the MCP server enforces", () => {
-  // Every test in this block that turns on requireApproval also sets
-  // HUSH_APPROVAL_MODE=file and a short approvalTimeoutSeconds: on macOS,
-  // an enforced approval with neither would open a real osascript dialog and
-  // hang the test forever.
+  // The project fixture runs with HUSH_NO_DIALOG=1, so an enforced approval has
+  // nothing to show and is refused outright. That is the point of most of these
+  // tests — the gate holds with no human present — and it is also why none of
+  // them can pop a real macOS dialog on the developer's screen.
 
   test("reveal denied by biometry: `hush get --yes` still refuses", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(
         join(p.hushDir, "policy.json"),
@@ -886,7 +1466,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   // fix is that "reveal" (hands back plaintext) and "add" (writes a secret
   // the agent itself supplied, unreviewed) never consult it.
   test("a forged reveal grant on disk is never honoured, even with biometry required", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(
         join(p.hushDir, "policy.json"),
@@ -908,7 +1488,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   // Bites: with run grants read from disk regardless of biometry, the forged
   // entry below lets the command run with no fingerprint and no prompt.
   test("with biometry required, a forged run grant on disk is never honoured either", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(
         join(p.hushDir, "policy.json"),
@@ -927,7 +1507,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   });
 
   test("a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(
         join(p.hushDir, "policy.json"),
@@ -949,7 +1529,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   });
 
   test("export is gated as reveal; --names is not, because it reveals nothing", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(
         join(p.hushDir, "policy.json"),
@@ -1031,7 +1611,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   });
 
   test("run gated by requireApproval times out with nothing spawned", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
       const r = p.run(["run", "--", "echo", "RAN"]);
@@ -1042,25 +1622,26 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
-  test("a grant persisted by an earlier process is honoured, and its expiry is respected", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+  test("a grant written by an earlier process is not honoured", () => {
+    // "Allow 15 min" used to be mirrored into .hush/grants.local.json so the
+    // next `hush` process could reuse it. That file sits in the project, which
+    // an agent can write, so it was a way to approve yourself. Nothing reads
+    // it now — the key below is spelled exactly as the real one would be, and
+    // it changes nothing.
+    const p = project();
     try {
       writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
       const grantsPath = join(p.hushDir, "grants.local.json");
 
-      // "run:echo:default" is exactly what runScope() computes for a plain,
-      // default-env `echo` run under the default approvalScope: "command" —
-      // the same shape mcp.ts's hush_run builds, so a grant either surface
-      // hands out is honoured by the other for the same command and sets.
-      writeFileSync(grantsPath, JSON.stringify({ "run:echo:default": Date.now() + 60_000 }));
-      const granted = p.run(["run", "--", "echo", "RAN"]);
-      assert.equal(granted.code, 0, granted.out);
-      assert.match(granted.out, /RAN/);
-
-      writeFileSync(grantsPath, JSON.stringify({ "run:echo:default": Date.now() - 1000 }));
-      const expired = p.run(["run", "--", "echo", "RAN"]);
-      assert.equal(expired.code, 1, expired.out);
-      assert.ok(!expired.out.includes("RAN"), `an expired grant was honoured:\n${expired.out}`);
+      // Exactly what runScope() computes for a plain, default-env `echo` run
+      // under the default approvalScope: "command" — the same key mcp.ts's
+      // hush_run builds. Computed rather than typed, so the test cannot drift
+      // from the implementation.
+      const echoScope = runScope(DEFAULT_POLICY, "echo", ["default"]);
+      writeFileSync(grantsPath, JSON.stringify({ [echoScope]: Date.now() + 60_000 }));
+      const live = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(live.code, 1, live.out);
+      assert.ok(!live.out.includes("RAN"), `a project file pre-authorised a run:\n${live.out}`);
     } finally {
       p.cleanup();
     }
@@ -1080,7 +1661,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("a user-level policy floor alone gates `hush run`, with no repo policy.json at all", () => {
     // The whole point of a floor outside the repo: it must work even for a
     // project that has never opted into .hush/policy.json.
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+    const p = project();
     try {
       assert.ok(!existsSync(join(p.hushDir, "policy.json")), "test fixture drifted: a repo policy file exists");
       writeFileSync(join(p.home, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
@@ -1092,154 +1673,114 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
-  test("a session grant covers the command it was granted for, not every command sharing its sets", () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+  test("a grant file cannot stand in for an approval, whatever scope shape it uses", () => {
+    // Both shapes are exercised here: the default "command" scope and the
+    // wider "sets" one. Neither is read from disk any more — the scope-shape
+    // itself is covered by policy.test.ts's runScope tests.
+    for (const approvalScope of ["command", "sets"] as const) {
+      const p = project();
+      try {
+        writeFileSync(
+          join(p.hushDir, "policy.json"),
+          JSON.stringify({ requireApproval: ["run"], approvalScope, approvalTimeoutSeconds: 1 }),
+        );
+        writeFileSync(
+          join(p.hushDir, "grants.local.json"),
+          JSON.stringify({
+            [runScope({ ...DEFAULT_POLICY, approvalScope }, "npm", ["default"])]: Date.now() + 60_000,
+          }),
+        );
+        const r = p.run(["run", "--", "npm", "--version"]);
+        assert.equal(r.code, 1, `approvalScope ${approvalScope}: a grant file pre-authorised a run\n${r.out}`);
+      } finally {
+        p.cleanup();
+      }
+    }
+  });
+
+  test("a run with requireApproval on and nothing to answer it does not run", () => {
+    const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
-      const grantsPath = join(p.hushDir, "grants.local.json");
-      // Exactly what runScope() computes for `npm ...` under the default
-      // approvalScope: "command" and the plain default set.
-      writeFileSync(grantsPath, JSON.stringify({ "run:npm:default": Date.now() + 60_000 }));
-
-      const covered = p.run(["run", "--", "npm", "--version"]);
-      assert.equal(covered.code, 0, covered.out);
-
-      // Same sets, a different command: npm's grant must not reach it.
-      const other = p.run(["run", "--", "git", "--version"]);
-      assert.equal(other.code, 1, other.out);
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"] }));
+      const r = p.run(["run", "--", "echo", "RAN"]);
+      assert.equal(r.code, 1, r.out);
+      assert.ok(!r.out.includes("RAN"), `the command ran without an approval:\n${r.out}`);
     } finally {
       p.cleanup();
     }
   });
 
-  test('approvalScope: "sets" opts back into the pre-existing, command-agnostic grant shape', () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+  test("an approval writes no grants file at all, in any location", async () => {
+    // The file this test used to check the permissions of is gone. It lived in
+    // the project, which an agent can write, so "keep it 0600" was the wrong
+    // fix: the answer is that there is nothing there to read or steal. A
+    // session approval now lasts exactly as long as this process does.
+    clearApprovalCache();
+    const dir = mkdtempSync(join(tmpdir(), "hush-cli-grants-"));
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["run"], approvalScope: "sets", approvalTimeoutSeconds: 1 }),
+      process.env.DISPLAY = ":0";
+      process.env.FAKE_EXIT = "1"; // zenity's extra button: "Allow 15 min"
+      process.env.FAKE_STDOUT = "Allow 15 min";
+      const r = await requestApproval(dir, {
+        action: "run", summary: "Run: echo RAN", scope: runScope(DEFAULT_POLICY, "echo", ["default"]),
+        ttlSeconds: 900, timeoutMs: 5000,
+      }, clickingAllow);
+      assert.equal(r.decision, "session", "the fixture dialog did not return a session approval");
+
+      assert.deepEqual(
+        readdirSync(dir),
+        [],
+        "an approval left something behind in the directory it was asked from",
       );
-      const grantsPath = join(p.hushDir, "grants.local.json");
-      writeFileSync(grantsPath, JSON.stringify({ "run:default": Date.now() + 60_000 }));
-
-      assert.equal(p.run(["run", "--", "npm", "--version"]).code, 0);
-      assert.equal(p.run(["run", "--", "git", "--version"]).code, 0, "\"sets\" scope should cover any command using those sets");
+      // And the grant is in memory only, so a second process would ask again.
+      clearApprovalCache(); // what a fresh `hush` process sees: nothing
+      const restarted = await requestApproval(dir, {
+        action: "run", summary: "Run: echo RAN", scope: runScope(DEFAULT_POLICY, "echo", ["default"]),
+        ttlSeconds: 900, timeoutMs: 200,
+      }, { authenticate: async () => "unavailable" as const, platform: () => "linux" });
+      assert.equal(restarted.cached, false, "a grant survived its process");
     } finally {
-      p.cleanup();
+      delete process.env.DISPLAY;
+      delete process.env.FAKE_EXIT;
+      delete process.env.FAKE_STDOUT;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('the approval prompt names exactly what "Allow 15 min" would cover', async () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
+  // Red team, 2026-09-12: grants.local.json lived inside .hush/, which an
+  // agent confined to the project can write to, and writeFileSync/chmodSync
+  // follow symlinks by default — so a symlink planted there turned the next
+  // legitimate approval into a rewrite of the user's policy floor. The write
+  // is gone (see the test above), and this pins that a session approval still
+  // touches nothing at that path, symlink or not.
+  test("an approval writes nothing where grants.local.json used to be, even as a symlink", async () => {
+    clearApprovalCache();
+    const dir = mkdtempSync(join(tmpdir(), "hush-cli-symlink-"));
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
-
-      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "npm", "--version"], {
-        cwd: p.root, env: p.env, stdio: ["ignore", "pipe", "pipe"],
-      });
-      let seen: ReturnType<typeof pendingRequests> = [];
-      for (let i = 0; i < 80 && !seen.length; i++) {
-        seen = pendingRequests(p.hushDir);
-        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-      }
-      assert.equal(seen.length, 1, "no pending approval request appeared");
-      assert.match(seen[0].detail.join("\n"), /Allow 15 min covers:\s+npm with default/);
-
-      answerRequest(p.hushDir, seen[0].id, "deny");
-      const [code] = await once(child, "exit");
-      assert.equal(code, 1, "a denied run should not exit 0");
-    } finally {
-      p.cleanup();
-    }
-  });
-
-  test("a session grant is written to a file only its owner can read", async () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
-    try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
-
-      // Pre-seeded world-readable, the way a stray file (or an earlier hush
-      // version) might leave it: writeFileSync only applies `mode` when it
-      // creates the file, so this is the case that actually exercises the fix
-      // rather than accidentally passing because the file happened to be new.
-      const grantsPath = join(p.hushDir, "grants.local.json");
-      writeFileSync(grantsPath, "{}", { mode: 0o644 });
-      chmodSync(grantsPath, 0o644);
-      assert.equal(statSync(grantsPath).mode & 0o777, 0o644, "fixture is not world-readable");
-
-      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "echo", "RAN"], {
-        cwd: p.root,
-        env: p.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      child.stdout?.on("data", (d) => (stdout += String(d)));
-      let stderr = "";
-      child.stderr?.on("data", (d) => (stderr += String(d)));
-
-      let seen: ReturnType<typeof pendingRequests> = [];
-      for (let i = 0; i < 80 && !seen.length; i++) {
-        seen = pendingRequests(p.hushDir);
-        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-      }
-      assert.equal(seen.length, 1, `no pending approval request appeared:\n${stdout}${stderr}`);
-      answerRequest(p.hushDir, seen[0].id, "session");
-
-      const [code] = await once(child, "exit");
-      assert.equal(code, 0, stdout + stderr);
-
-      assert.ok(existsSync(grantsPath), "no grants file was written for the session approval");
-      assert.equal(statSync(grantsPath).mode & 0o777, 0o600);
-    } finally {
-      p.cleanup();
-    }
-  });
-
-  // Red team, 2026-09-12: grants.local.json lives inside .hush/, which an
-  // agent confined to the project can write to. writeFileSync/chmodSync
-  // follow symlinks by default, so an agent that plants grants.local.json as
-  // a symlink to the user's ~/.hush/policy.json floor gets a free ride on the
-  // next legitimate approval: the human clicks "Allow 15 min" for something
-  // ordinary, and hush's own write silently replaces the floor's content
-  // with grant JSON — destroying every requireApproval/denyKeys/biometry
-  // requirement the floor held, permanently, for every project on the
-  // machine. The agent never touches the floor path itself; it only sets up
-  // where a later, legitimate write lands.
-  test("a symlinked grants.local.json cannot be used to clobber the user's policy floor", async () => {
-    const p = project({ HUSH_APPROVAL_MODE: "file" });
-    try {
-      const floorPath = join(p.home, "policy.json");
+      const floorPath = join(dir, "floor.json");
       const floorBefore = JSON.stringify({ requireApproval: ["run", "add", "reveal"], denyCommands: ["node", "bash"] });
       writeFileSync(floorPath, floorBefore);
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 30 }));
 
-      const grantsPath = join(p.hushDir, "grants.local.json");
+      const grantsPath = join(dir, "grants.local.json");
       symlinkSync(floorPath, grantsPath);
 
-      const child = spawn(process.execPath, [CLI, "run", "--quiet", "--", "echo", "RAN"], {
-        cwd: p.root, env: p.env, stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "";
-      child.stdout?.on("data", (d) => (stdout += String(d)));
-      let stderr = "";
-      child.stderr?.on("data", (d) => (stderr += String(d)));
-
-      let seen: ReturnType<typeof pendingRequests> = [];
-      for (let i = 0; i < 80 && !seen.length; i++) {
-        seen = pendingRequests(p.hushDir);
-        if (!seen.length) await new Promise((r) => setTimeout(r, 25));
-      }
-      assert.equal(seen.length, 1, `no pending approval request appeared:\n${stdout}${stderr}`);
       // The human legitimately approves — this is not the attack, it is the
       // ordinary path a real session grant is written through.
-      answerRequest(p.hushDir, seen[0].id, "session");
-
-      const [code] = await once(child, "exit");
-      assert.equal(code, 0, stdout + stderr);
+      process.env.DISPLAY = ":0";
+      process.env.FAKE_EXIT = "1";
+      process.env.FAKE_STDOUT = "Allow 15 min";
+      const r = await requestApproval(dir, {
+        action: "run", summary: "Run: echo RAN", scope: runScope(DEFAULT_POLICY, "echo", ["default"]),
+        ttlSeconds: 900, timeoutMs: 5000,
+      }, clickingAllow);
+      assert.equal(r.decision, "session");
 
       assert.equal(readFileSync(floorPath, "utf8"), floorBefore, "a legitimate approval clobbered the user's policy floor through a symlink");
     } finally {
-      p.cleanup();
+      delete process.env.DISPLAY;
+      delete process.env.FAKE_EXIT;
+      delete process.env.FAKE_STDOUT;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -1831,6 +2372,10 @@ function bareFolder(envOverride: NodeJS.ProcessEnv = {}) {
     HUSH_HOME: home,
     HUSH_IDENTITY: encodeSecret(id),
     HUSH_BIOMETRY: "off",
+    // No desktop: on macOS an enforced approval would otherwise open a real
+    // osascript dialog on the developer's screen. This is the narrowing switch
+    // — it can only make an approval fail, never succeed.
+    HUSH_NO_DIALOG: "1",
     HUSH_NO_NUDGE: "1",
     NO_COLOR: "1",
     ...envOverride,
@@ -1997,7 +2542,7 @@ describe("a folder that isn't set up yet", () => {
       const r = p.run(["use"], "y\ny\n");
       assert.equal(r.code, 0, r.out);
       const policy = JSON.parse(readFileSync(join(p.hushDir, "policy.json"), "utf8")) as { requireApproval: string[] };
-      assert.deepEqual(policy.requireApproval.sort(), ["add", "reveal", "run"]);
+      assert.deepEqual(policy.requireApproval.sort(), ["add", "request", "reveal", "run"]);
     } finally {
       p.cleanup();
     }
@@ -2040,7 +2585,7 @@ describe("a folder that isn't set up yet", () => {
       const r = spawnSync(process.execPath, [CLI, "init", "agenttest", "--agent"], { cwd: proj, env, encoding: "utf8" });
       assert.equal(r.status, 0, (r.stdout ?? "") + (r.stderr ?? ""));
       const policy = JSON.parse(readFileSync(join(proj, ".hush", "policy.json"), "utf8")) as { requireApproval: string[] };
-      assert.deepEqual(policy.requireApproval.sort(), ["add", "reveal", "run"]);
+      assert.deepEqual(policy.requireApproval.sort(), ["add", "request", "reveal", "run"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(proj, { recursive: true, force: true });
@@ -2184,8 +2729,16 @@ describe("agent registration in a folder that only uses library sets", () => {
   // Bites: install-mcp/install-skill on the strict ctx() refuse with the
   // "no vault of its own yet" message instead of writing anything.
   test("install-mcp and install-skill work with envs.json and no vault", () => {
+    // HOME is pointed at a scratch directory for every test in this describe:
+    // registering an agent writes to files that live in the user's home
+    // (`~/.codex/config.toml`, `~/.claude/…`), and a test run must never touch
+    // the developer's real ones.
     const p = project();
     try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+      p.env.HOME = fakeHome;
+      p.env.PATH = "";
       rmSync(join(p.hushDir, "vault.json"));
       writeFileSync(join(p.hushDir, "envs.json"), JSON.stringify({ use: [] }));
       const mcp = p.run(["install-mcp"]);
@@ -2194,6 +2747,88 @@ describe("agent registration in a folder that only uses library sets", () => {
       const skill = p.run(["install-skill"]);
       assert.equal(skill.code, 0, skill.out);
       assert.ok(existsSync(join(p.root, ".claude", "skills", "hush", "SKILL.md")), "the skill was not written");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a Codex session gets Codex's file, not Claude Code's", () => {
+    // The bug this pins: install-mcp wrote `.mcp.json` unconditionally and
+    // printed a tick. In a Codex session that file is never read, so a new user
+    // was told they were set up while their agent knew nothing about hush.
+    const p = project();
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+      p.env.HOME = fakeHome;
+      p.env.PATH = ""; // nothing on PATH, so detection is the directory alone
+
+      const mcp = p.run(["install-mcp"]);
+      assert.equal(mcp.code, 0, mcp.out);
+      assert.match(mcp.out, /Codex/);
+
+      const config = readFileSync(join(fakeHome, ".codex", "config.toml"), "utf8");
+      assert.match(config, /^\[mcp_servers\.hush\]$/m, "no hush section was written for Codex");
+      assert.match(config, /^command = "node"$/m);
+      assert.match(config, /^args = \[".*cli\.ts", "mcp"\]$/m);
+      assert.ok(
+        !existsSync(join(p.root, ".mcp.json")),
+        "wrote Claude Code's file for a Codex-only machine — the tick would mean nothing",
+      );
+
+      const skill = p.run(["install-skill"]);
+      assert.equal(skill.code, 0, skill.out);
+      const dest = join(p.root, ".agents", "skills", "hush", "SKILL.md");
+      assert.ok(existsSync(dest), `the skill did not go where Codex reads it (${dest})`);
+      assert.match(readFileSync(dest, "utf8"), /Never ask the user to paste a credential into the chat/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("neither agent here: it says so and prints the line to paste", () => {
+    const p = project();
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(fakeHome, { recursive: true });
+      p.env.HOME = fakeHome;
+      p.env.PATH = "";
+
+      const r = p.run(["install-mcp"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /No coding agent detected/);
+      assert.match(r.out, /codex mcp add hush -- node/);
+      assert.ok(!existsSync(join(p.root, ".mcp.json")), "wrote a file no agent reads");
+      assert.ok(!existsSync(join(fakeHome, ".codex", "config.toml")), "wrote a config for an agent that is not here");
+
+      // --for is how someone registers an agent hush could not see.
+      const forced = p.run(["install-mcp", "--for", "cursor"]);
+      assert.equal(forced.code, 0, forced.out);
+      const cursor = JSON.parse(readFileSync(join(p.root, ".cursor", "mcp.json"), "utf8")) as {
+        mcpServers: { hush: { command: string; args: string[] } };
+      };
+      assert.equal(cursor.mcpServers.hush.command, "node");
+      assert.deepEqual(cursor.mcpServers.hush.args.slice(1), ["mcp"]);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("an entry that is already there is left alone", () => {
+    const p = project();
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+      const configPath = join(fakeHome, ".codex", "config.toml");
+      const mine = `[mcp_servers.hush]\ncommand = "my-own-wrapper"\nargs = []\n`;
+      writeFileSync(configPath, mine);
+      p.env.HOME = fakeHome;
+      p.env.PATH = "";
+
+      const r = p.run(["install-mcp"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /already registered/);
+      assert.equal(readFileSync(configPath, "utf8"), mine, "an existing entry was rewritten");
     } finally {
       p.cleanup();
     }
@@ -2213,6 +2848,343 @@ describe("hush doctor in a folder that only uses library sets", () => {
       assert.match(r.out, /no vault yet/, r.out);
       assert.match(r.out, /policy floor/, "the checks after the vault were skipped");
       assert.doesNotMatch(r.out, /ENOENT|vault readable/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush request", () => {
+  /**
+   * A loopback server the CLI can actually talk to. http is allowed here
+   * without --insecure precisely because it never leaves the machine, which is
+   * the rule the transport check encodes.
+   *
+   * Anything that has to reach it runs through runAsync: the sync runner blocks
+   * the test's event loop, so the server living in this same process can never
+   * answer and every such call would time out.
+   */
+  async function withServer(
+    handler: (req: IncomingMessage) => { status: number; body: string; headers?: Record<string, string> },
+    fn: (base: string, hits: () => string[]) => Promise<void>,
+  ): Promise<void> {
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        hits.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""} ${body}`);
+        const out = handler(req);
+        res.writeHead(out.status, { "content-type": "text/plain", ...(out.headers ?? {}) });
+        res.end(out.body);
+      });
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      await fn(base, () => hits);
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
+  }
+
+  /** The same thing project().run does, without blocking the event loop. */
+  function runAsync(p: ReturnType<typeof project>, args: string[]): Promise<{ code: number; out: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [CLI, ...args], {
+        cwd: p.root,
+        env: p.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      child.stdout?.on("data", (d) => (out += String(d)));
+      child.stderr?.on("data", (d) => (out += String(d)));
+      child.on("exit", (code) => resolve({ code: code ?? 1, out }));
+    });
+  }
+
+  test("the secret reaches the server and comes back masked", async () => {
+    await withServer(
+      (req) => ({ status: 200, body: `you sent: ${req.headers.authorization ?? ""}` }),
+      async (base, hits) => {
+        const p = project();
+        try {
+          const r = await runAsync(p, [
+            "request", "POST", `${base}/v1/thing`,
+            "--header", "Authorization: Bearer $STRIPE_SECRET_KEY",
+          ]);
+          assert.equal(r.code, 0, r.out);
+          assert.equal(hits().length, 1, "the request never arrived");
+          // The wire carried the real value...
+          assert.match(hits()[0], /Bearer sk_live_cli/);
+          // ...and the caller only ever saw it masked.
+          assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/);
+          assert.doesNotMatch(r.out, /sk_live_cli/, "the value came back in the output");
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+
+  test("a non-2xx is a normal result; --fail turns it into a non-zero exit", async () => {
+    await withServer(
+      () => ({ status: 404, body: "no such thing" }),
+      async (base) => {
+        const p = project();
+        try {
+          const plain = await runAsync(p, ["request", `${base}/missing`]);
+          assert.equal(plain.code, 0, "a 404 exit code broke curl-like piping by default");
+          assert.match(plain.out, /no such thing/);
+
+          const failed = await runAsync(p, ["request", "--fail", `${base}/missing`]);
+          assert.equal(failed.code, 1, "--fail did not set the exit code");
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+
+  test("the body is not substituted unless --substitute body says so", async () => {
+    await withServer(
+      () => ({ status: 200, body: "ok" }),
+      async (base, hits) => {
+        const p = project();
+        try {
+          const literal = await runAsync(p, ["request", "POST", `${base}/x`, "--data", "key=$STRIPE_SECRET_KEY"]);
+          assert.equal(literal.code, 0, literal.out);
+          assert.match(hits()[0], /key=\$STRIPE_SECRET_KEY/, "the body was substituted without being asked");
+
+          const opted = await runAsync(p, [
+            "request", "POST", `${base}/x`, "--data", "key=$STRIPE_SECRET_KEY", "--substitute", "body",
+          ]);
+          assert.equal(opted.code, 0, opted.out);
+          assert.match(hits()[1], /key=sk_live_cli/);
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+
+  test("cleartext to a real host is refused before anything is sent", () => {
+    const p = project();
+    try {
+      const r = p.run(["request", "http://api.example.com/x", "--header", "Authorization: Bearer $STRIPE_SECRET_KEY"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /cleartext/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a secret cannot be put in the URL path", () => {
+    const p = project();
+    try {
+      const r = p.run(["request", "https://api.example.com/v1/$STRIPE_SECRET_KEY/x"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /would go in the URL path/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a placeholder with no matching key is refused, naming it", () => {
+    const p = project();
+    try {
+      const r = p.run(["request", "https://api.example.com/x", "--header", "Authorization: Bearer $TYPO"]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /No such secret in these sets: TYPO/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a host outside allowHosts is refused, and the server is never contacted", async () => {
+    await withServer(
+      () => ({ status: 200, body: "ok" }),
+      async (base, hits) => {
+        const p = project();
+        try {
+          writeFileSync(
+            join(p.hushDir, "policy.json"),
+            JSON.stringify({ allowHosts: ["api.stripe.com"], requireApproval: [] }),
+          );
+          const r = p.run(["request", `${base}/x`, "--header", "Authorization: Bearer $STRIPE_SECRET_KEY"]);
+          assert.equal(r.code, 1, r.out);
+          assert.match(r.out, /Policy forbids requests to/);
+          assert.equal(hits().length, 0, "the request went out despite the host policy");
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+
+  test("requireApproval stops the request going out when nothing can ask a human", async () => {
+    await withServer(
+      () => ({ status: 200, body: "ok" }),
+      async (base, hits) => {
+        const p = project();
+        try {
+          writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["request"] }));
+          const r = p.run([
+            "request", `${base}/x`, "--header", "Authorization: Bearer $STRIPE_SECRET_KEY",
+          ]);
+          assert.equal(r.code, 1, r.out);
+          // The whole point: a credential did not leave the machine because a
+          // human was not there to approve it.
+          assert.equal(hits().length, 0, "the gated request was sent anyway");
+          assert.ok(!r.out.includes("sk_live_cli"), `the credential leaked into the output:\n${r.out}`);
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+
+  // The whole reason `request` is not in approval.ts's on-disk grant set. A
+  // forged grants.local.json is a file an agent with ordinary write access to
+  // the project can create; for `run` that buys a redacted child process on
+  // this machine, but for `request` it would buy a credential sent to whatever
+  // host the scope names. So a request grant is never read from disk at all.
+  test("a forged grants.local.json cannot pre-authorise a request", async () => {
+    await withServer(
+      () => ({ status: 200, body: "ok" }),
+      async (base, hits) => {
+        const p = project();
+        try {
+          writeFileSync(
+            join(p.hushDir, "policy.json"),
+            JSON.stringify({ requireApproval: ["request"], approvalTimeoutSeconds: 1 }),
+          );
+          const host = new URL(base).host;
+          // Exactly the scope requestScope() computes for this call.
+          writeFileSync(
+            join(p.hushDir, "grants.local.json"),
+            JSON.stringify({ [`request:${host}:default`]: Date.now() + 60_000 }),
+          );
+
+          const r = p.run(["request", `${base}/x`, "--header", "Authorization: Bearer $STRIPE_SECRET_KEY"]);
+          assert.equal(r.code, 1, `a forged grant was honoured:\n${r.out}`);
+          assert.equal(hits().length, 0, "the request went out on a forged grant");
+        } finally {
+          p.cleanup();
+        }
+      },
+    );
+  });
+});
+
+describe("hush run --materialize", () => {
+  /**
+   * A script rather than `node -e`: with a policy file present the interpreter
+   * deny list applies, and the documented way through it is a script, which is
+   * also what a real project would have.
+   */
+  function script(p: ReturnType<typeof project>): string {
+    const path = join(p.root, "show.sh");
+    writeFileSync(path, '#!/bin/sh\necho "path=$STRIPE_SECRET_KEY"\ncat "$STRIPE_SECRET_KEY"\n');
+    chmodSync(path, 0o755);
+    return "./show.sh";
+  }
+
+  test("the child gets the path, the file holds the value, and it is gone afterwards", () => {
+    const p = project();
+    try {
+      const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
+      assert.equal(r.code, 0, r.out);
+      // The child saw a path, not the value...
+      const shown = r.out.match(/path=(\S+)/);
+      assert.ok(shown, `the script never printed the path:\n${r.out}`);
+      assert.match(shown[1], /hush-/);
+      // ...and the value stays masked in the output, because the key remained
+      // in the redaction set even though it left the environment.
+      assert.doesNotMatch(r.out, /service_account/, "reading the file leaked the value into output");
+      assert.match(r.out, /\[redacted:STRIPE_SECRET_KEY\]/);
+      assert.equal(existsSync(shown[1]), false, "the materialised file outlived the command");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("the file is removed even when the child fails", () => {
+    const p = project();
+    try {
+      const path = join(p.root, "boom.sh");
+      writeFileSync(path, '#!/bin/sh\necho "path=$STRIPE_SECRET_KEY"\nexit 3\n');
+      chmodSync(path, 0o755);
+      const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", "./boom.sh"]);
+      assert.equal(r.code, 3, r.out);
+      const shown = r.out.match(/path=(\S+)/);
+      assert.ok(shown, r.out);
+      assert.equal(existsSync(shown[1]), false, "a failed command left the credential on disk");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("an explicit path is used as given, and refused if something is there", () => {
+    const p = project();
+    try {
+      const target = join(p.root, "sa.json");
+
+      const ok = p.run(["run", "--materialize", `STRIPE_SECRET_KEY=${target}`, "--", script(p)]);
+      assert.equal(ok.code, 0, ok.out);
+      assert.equal(existsSync(target), false, "the explicit file was not cleaned up");
+
+      writeFileSync(target, "DO NOT TOUCH");
+      const clash = p.run(["run", "--materialize", `STRIPE_SECRET_KEY=${target}`, "--", script(p)]);
+      assert.equal(clash.code, 1, clash.out);
+      assert.match(clash.out, /something is already there/);
+      assert.equal(readFileSync(target, "utf8"), "DO NOT TOUCH", "an existing file was overwritten");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("a key that is not in the sets is refused before anything runs", () => {
+    const p = project();
+    try {
+      const r = p.run(["run", "--materialize", "NOPE", "--", script(p)]);
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /--materialize NOPE: no such secret/);
+      assert.doesNotMatch(r.out, /path=/, "the command ran anyway");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("materialising is gated on reveal, not on run", () => {
+    // The whole design decision: this writes plaintext to a path the caller
+    // chose, so it needs the approval `hush get` needs, not the one `hush run`
+    // needs. A policy that gates only `run` must not be enough.
+    const p = project();
+    try {
+      writeFileSync(
+        join(p.hushDir, "policy.json"),
+        JSON.stringify({ requireApproval: ["reveal"], approvalTimeoutSeconds: 1 }),
+      );
+      const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
+      assert.equal(r.code, 1, `a reveal-gated materialise ran unattended:\n${r.out}`);
+      assert.doesNotMatch(r.out, /path=/, "the command ran despite the reveal gate");
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("with no gate at all, it runs unattended like any other run", () => {
+    // The other direction of the same decision, so the gate cannot silently
+    // become "everything" or "nothing".
+    const p = project();
+    try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /path=/);
     } finally {
       p.cleanup();
     }

@@ -92,12 +92,17 @@ describe("repo scan", () => {
 
 describe("approval", () => {
   const base = { action: "run", summary: "Run: deploy.sh", scope: "run:prod", timeoutMs: 400 };
+  /**
+   * A host with no dialog: an approval that is not answered by the injected
+   * fingerprint is refused, so no test here can reach the machine's real
+   * osascript and put a dialog on the screen of whoever is running the suite.
+   */
   const bio = (result: "ok" | "denied" | "unavailable"): ApprovalDeps => ({
     authenticate: () => Promise.resolve(result),
+    platform: () => "linux",
   });
 
   test("a session grant that has lapsed is not honoured", async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
     try {
@@ -108,11 +113,11 @@ describe("approval", () => {
 
       await new Promise((r) => setTimeout(r, 5));
 
-      // Nothing answers this one, so it can only end in "timeout" — unless the
+      // Nothing answers this one, so it can only be refused — unless the
       // expired grant was served from the cache, which is the bug.
       const second = await requestApproval(dir, { ...base, ttlSeconds: 0 }, bio("unavailable"));
       assert.equal(second.cached, false, "an expired grant was served from the cache");
-      assert.equal(second.decision, "timeout");
+      assert.equal(second.decision, "deny");
 
       // A live grant, by contrast, is reused.
       clearApprovalCache();
@@ -122,12 +127,10 @@ describe("approval", () => {
       assert.equal(reused.cached, true, "a live grant was not reused");
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      delete process.env.HUSH_APPROVAL_MODE;
     }
   });
 
   test("a fingerprint that says no is final — there is no second chance at a dialog", async () => {
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
     try {
@@ -143,14 +146,12 @@ describe("approval", () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      delete process.env.HUSH_APPROVAL_MODE;
     }
   });
 
   test("a fingerprint that says yes grants without ever opening a dialog", async () => {
     // The machine running this has no enrolled finger, so the only way to cover
     // the success path at all is to inject the prompt.
-    process.env.HUSH_APPROVAL_MODE = "file";
     clearApprovalCache();
     const dir = scratch();
     try {
@@ -160,7 +161,6 @@ describe("approval", () => {
       assert.equal(r.cached, false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      delete process.env.HUSH_APPROVAL_MODE;
     }
   });
 });

@@ -12,14 +12,26 @@
  * display at all — see test/approval.test.ts.
  */
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { delimiter, join as joinPath } from "node:path";
+import { statSync } from "node:fs";
+import { join as joinPath } from "node:path";
 import type { Decision, SecretEntryResult } from "./approval.ts";
 
+/** The dialog toolkits hush knows how to drive. */
+export type BackendName = "osascript" | "zenity" | "kdialog";
+
 export interface DialogBackend {
-  name: "osascript" | "zenity" | "kdialog";
+  name: BackendName;
+  /**
+   * The absolute path of the program this backend starts.
+   *
+   * Absolute on purpose. `execFile` resolves a bare name through the PATH of
+   * the process doing the exec, and that process is spawned by whoever asked
+   * for the approval — an agent can put a file called `osascript` first on PATH
+   * and answer its own gate. See systemProgram().
+   */
+  program: string;
   approve(
-    req: { summary: string; detail: string[]; code: string; ttlLabel: string },
+    req: { summary: string; detail: string[]; code: string; ttlLabel: string | null },
     timeoutMs: number,
   ): Promise<Decision>;
   enterSecret(
@@ -55,17 +67,45 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<RunResult>
 }
 
 /**
- * Is `cmd` an executable file somewhere on `pathEnv`? A hand-rolled lookup
- * rather than shelling out to `which` — which is not itself guaranteed to
- * exist — and one that reads its PATH from a parameter rather than
- * `process.env` directly, so `detectBackend` stays a pure function tests can
- * drive with a fake PATH without mutating the real environment.
+ * Where a dialog program is allowed to live.
+ *
+ * Fixed, OS-owned directories only. A dialog program looked up on the caller's
+ * PATH is a program the caller can supply, and the caller is the process being
+ * gated.
  */
-function onPath(cmd: string, pathEnv: string | undefined): boolean {
-  for (const dir of (pathEnv ?? "").split(delimiter)) {
-    if (dir && existsSync(joinPath(dir, cmd))) return true;
+const SYSTEM_BIN_DIRS = ["/usr/bin", "/bin", "/usr/local/bin"] as const;
+
+/**
+ * Resolve a dialog program to a path this process can trust, or null.
+ *
+ * An approval is only worth anything if the thing that collects it cannot be
+ * chosen by the principal it constrains. A bare name is resolved through PATH,
+ * which the gated caller controls, so:
+ *
+ *   - the lookup is confined to fixed OS-owned directories,
+ *   - the file must be a regular file owned by root and not writable by group
+ *     or others (so it is not something the user, or the agent running as the
+ *     user, could have replaced), and
+ *   - it is always executed by absolute path.
+ *
+ * Anything else returns null, which means "no dialog": the request falls
+ * through to the pending-request queue the human answers in their own terminal.
+ * That is a worse experience and a much better boundary.
+ */
+function systemProgram(cmd: BackendName): string | null {
+  for (const dir of SYSTEM_BIN_DIRS) {
+    const path = joinPath(dir, cmd);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      if (st.uid !== 0) continue;
+      if ((st.mode & 0o022) !== 0) continue;
+      return path;
+    } catch {
+      /* not installed in this directory */
+    }
   }
-  return false;
+  return null;
 }
 
 /** AppleScript string literal escaping. */
@@ -80,24 +120,73 @@ const asStr = (s: string): string => `"${s.replace(/\\/g, "\\\\").replace(/"/g, 
 // text now would be a silent behaviour change to the one backend that was
 // already shipped, not a fix.
 
-const osascriptBackend: DialogBackend = {
-  name: "osascript",
-  async approve(req, timeoutMs) {
-    const body = [req.summary, "", ...req.detail, "", `Approval code: ${req.code}`].join("\n");
-    const script =
-      `display dialog ${asStr(body)} with title ${asStr("hush — approve this?")} ` +
-      `buttons {"Deny", "Allow once", "Allow 15 min"} default button "Allow once" ` +
-      `with icon caution giving up after ${Math.floor(timeoutMs / 1000)}`;
+/**
+ * How long a single macOS dialog is shown before it is re-presented.
+ *
+ * A dialog reports "gave up" when its own timer expires with nobody having
+ * picked a button, and then the script ends. Re-presenting it is what keeps
+ * the prompt in front of the human: `display dialog` is app-modal (a click
+ * outside never answers it, and never dismisses it) but another window can
+ * still cover it, and a prompt quietly behind something is a prompt nobody
+ * sees. Each presentation is a fresh window that comes to the front, with the
+ * same request, the same code and the same remaining time, so an answer to
+ * any of them is the answer.
+ */
+const RE_RAISE_MS = 45_000;
 
-    const { ok, out } = await run("osascript", ["-e", script], timeoutMs + 2000);
-    if (!ok) return "timeout";
-    if (/gave up:true/.test(out)) return "timeout";
-    if (/button returned:Allow 15 min/.test(out)) return "session";
-    if (/button returned:Allow once/.test(out)) return "once";
-    return "deny";
+/** "1 min 30 s" — how much longer the human has, for the dialog's own text. */
+export function waitingFor(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return s === 1 ? "1 second" : `${s} seconds`;
+  if (s % 60 === 0) return `${s / 60} minute${s / 60 === 1 ? "" : "s"}`;
+  return `${Math.floor(s / 60)} min ${s % 60} s`;
+}
+
+const makeOsascriptBackend = (program: string, reRaiseMs = RE_RAISE_MS): DialogBackend => ({
+  name: "osascript",
+  program,
+  async approve(req, timeoutMs) {
+    // A one-shot caller (sessionGrant false) gets two buttons: offering a
+    // longer window it cannot honour would be a lie, not a convenience.
+    const buttons = req.ttlLabel
+      ? `{"Deny", "Allow once", "Allow 15 min"}`
+      : `{"Deny", "Allow once"}`;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const left = deadline - Date.now();
+      const slice = Math.min(reRaiseMs, left);
+      const body = [
+        req.summary, "", ...req.detail, "",
+        `Approval code: ${req.code}`,
+        `Waiting for you — this request lapses in ${waitingFor(left)}.`,
+      ].join("\n");
+      const script =
+        `display dialog ${asStr(body)} with title ${asStr("hush — approve this?")} ` +
+        `buttons ${buttons} default button "Allow once" ` +
+        `with icon caution giving up after ${Math.max(1, Math.ceil(slice / 1000))}`;
+
+      const { ok, killed, out } = await run(program, ["-e", script], slice + 2000);
+      if (ok) {
+        // The window expired on its own and nobody has answered, so put it back
+        // in front of them rather than letting it disappear.
+        if (/gave up:true/.test(out)) continue;
+        if (req.ttlLabel && /button returned:Allow 15 min/.test(out)) return "session";
+        if (/button returned:Allow once/.test(out)) return "once";
+        return "deny";
+      }
+      // Our own kill of a dialog that outlived its slice: show it again.
+      if (killed) continue;
+      // osascript itself could not run — no dialog can be shown at all.
+      return "timeout";
+    }
+    return "timeout";
   },
 
   async enterSecret(req, timeoutMs) {
+    // Deliberately not sliced like the approval dialog above: this one is a
+    // blank field the human types into, and re-presenting it would throw away
+    // whatever they had already entered. One long window is the safe shape.
     const body = [...req.lines, "", `Paste the value for ${req.label}:`].join("\n");
     const script =
       `display dialog ${asStr(body)} with title ${asStr(req.title)} ` +
@@ -105,7 +194,7 @@ const osascriptBackend: DialogBackend = {
       `buttons {"Cancel", "Save"} default button "Save" with icon note ` +
       `giving up after ${Math.floor(timeoutMs / 1000)}`;
 
-    const { ok, out } = await run("osascript", ["-e", script], timeoutMs + 2000);
+    const { ok, out } = await run(program, ["-e", script], timeoutMs + 2000);
     if (!ok || /gave up:true/.test(out) || /button returned:Cancel/.test(out)) {
       return { value: null, cancelled: true };
     }
@@ -114,7 +203,7 @@ const osascriptBackend: DialogBackend = {
     const value = m ? m[1] : "";
     return { value: value || null, cancelled: !value };
   },
-};
+});
 
 // ----------------------------------------------------------------- zenity
 //
@@ -125,8 +214,9 @@ const osascriptBackend: DialogBackend = {
 // plain Deny is that the extra button's own label is written to stdout before
 // it exits, so that is what distinguishes the two exit-1 cases below.
 
-const zenityBackend: DialogBackend = {
+const makeZenityBackend = (program: string): DialogBackend => ({
   name: "zenity",
+  program,
   async approve(req, timeoutMs) {
     const body = [req.summary, "", ...req.detail, "", `Approval code: ${req.code}`].join("\n");
     const args = [
@@ -135,13 +225,13 @@ const zenityBackend: DialogBackend = {
       "--text", body,
       "--ok-label", "Allow once",
       "--cancel-label", "Deny",
-      "--extra-button", req.ttlLabel,
+      ...(req.ttlLabel ? ["--extra-button", req.ttlLabel] : []),
       "--timeout", String(Math.max(1, Math.floor(timeoutMs / 1000))),
     ];
-    const { killed, code, out } = await run("zenity", args, timeoutMs + 2000);
+    const { killed, code, out } = await run(program, args, timeoutMs + 2000);
     if (killed || code === 5) return "timeout";
     if (code === 0) return "once";
-    if (code === 1 && out === req.ttlLabel) return "session";
+    if (req.ttlLabel && code === 1 && out === req.ttlLabel) return "session";
     return "deny";
   },
 
@@ -153,11 +243,11 @@ const zenityBackend: DialogBackend = {
       "--text", body,
       "--timeout", String(Math.max(1, Math.floor(timeoutMs / 1000))),
     ];
-    const { ok, killed, out } = await run("zenity", args, timeoutMs + 2000);
+    const { ok, killed, out } = await run(program, args, timeoutMs + 2000);
     if (killed || !ok) return { value: null, cancelled: true };
     return { value: out || null, cancelled: !out };
   },
-};
+});
 
 // ---------------------------------------------------------------- kdialog
 //
@@ -167,64 +257,90 @@ const zenityBackend: DialogBackend = {
 // `--passivepopup`, a non-interactive notification, takes one) so a timeout
 // here can only ever be node's own `timeout` killing the process.
 
-const kdialogBackend: DialogBackend = {
+const makeKdialogBackend = (program: string): DialogBackend => ({
   name: "kdialog",
+  program,
   async approve(req, timeoutMs) {
     const body = [req.summary, "", ...req.detail, "", `Approval code: ${req.code}`].join("\n");
     const args = [
       "--title", "hush — approve this?",
       "--yesnocancel", body,
       "--yes-label", "Allow once",
-      "--no-label", req.ttlLabel,
+      "--no-label", req.ttlLabel ?? "Deny",
       "--cancel-label", "Deny",
     ];
-    const { killed, code } = await run("kdialog", args, timeoutMs);
+    const { killed, code } = await run(program, args, timeoutMs);
     if (killed) return "timeout";
     if (code === 0) return "once";
-    if (code === 1) return "session";
+    if (code === 1) return req.ttlLabel ? "session" : "deny";
     return "deny"; // code 2 (Cancel), or anything else kdialog might ever return
   },
 
   async enterSecret(req, timeoutMs) {
     const body = [...req.lines, "", `Paste the value for ${req.label}:`].join("\n");
     const args = ["--title", req.title, "--password", body];
-    const { ok, killed, out } = await run("kdialog", args, timeoutMs);
+    const { ok, killed, out } = await run(program, args, timeoutMs);
     if (killed || !ok) return { value: null, cancelled: true };
     return { value: out || null, cancelled: !out };
   },
-};
-
-const BACKENDS = { osascript: osascriptBackend, zenity: zenityBackend, kdialog: kdialogBackend } as const;
+});
 
 /** The real-world facts `detectBackend` needs, each supplied by the caller rather than read globally — see the file header. */
 export interface DialogEnv {
   env: NodeJS.ProcessEnv;
   platform: () => string;
+  /**
+   * Seam for tests, never for production: resolve a program name to a trusted
+   * absolute path.
+   *
+   * A parameter rather than an environment variable on purpose. `HUSH_DIALOG`
+   * used to force a backend, which meant `HUSH_DIALOG=zenity` plus a planted
+   * file on PATH was enough for the gated process to answer its own approval —
+   * an ambient switch that anything running as the user, an agent included,
+   * could set. Tests can still drive every branch by passing this in.
+   */
+  resolveProgram?: (cmd: BackendName) => string | null;
+  /**
+   * Seam for tests: how long one macOS presentation lasts before it is shown
+   * again. Production uses RE_RAISE_MS.
+   */
+  reRaiseMs?: number;
 }
 
 /**
- * Which backend answers a dialog request, or null for the file queue.
+ * Which backend answers a dialog request, or null for "nothing can".
  *
- * `HUSH_DIALOG` forcing a backend that turns out not to be on PATH falls
- * through to the platform default rather than straight to the queue: a typo'd
- * or half-installed override should degrade, not strand someone who could
- * otherwise still get a dialog.
+ * The program is resolved by `systemProgram` (or by the injected test seam), so
+ * a caller-supplied PATH entry or binary can never be the thing that draws the
+ * approval dialog. When no trusted program exists the answer is null, and
+ * approval.ts refuses the request: there is no second channel that could prove
+ * a human was there, and a file the gated process can write is not one.
  */
 export function detectBackend(opts: DialogEnv): DialogBackend | null {
   const { env } = opts;
-  if (env.HUSH_APPROVAL_MODE === "file") return null;
 
-  const forced = env.HUSH_DIALOG;
-  if ((forced === "osascript" || forced === "zenity" || forced === "kdialog") && onPath(forced, env.PATH)) {
-    return BACKENDS[forced];
-  }
+  // HUSH_APPROVAL_MODE=file used to live here, and it was a bypass: the only
+  // process that can set the environment is the one being gated, so "force the
+  // terminal flow" meant "swap the dialog for a file I can answer myself".
+  //
+  // What replaces it narrows rather than widens. HUSH_NO_DIALOG says "this host
+  // has no desktop": hush then has nothing to put in front of a human and
+  // refuses the request. Setting it can only make an approval fail, never
+  // succeed, which is the property HUSH_APPROVAL_MODE never had.
+  if (env.HUSH_NO_DIALOG === "1") return null;
 
+  const resolve = opts.resolveProgram ?? systemProgram;
   const plat = opts.platform();
-  if (plat === "darwin") return osascriptBackend;
+  if (plat === "darwin") {
+    const program = resolve("osascript");
+    return program ? makeOsascriptBackend(program, opts.reRaiseMs) : null;
+  }
   if (plat === "linux") {
     if (!(env.DISPLAY || env.WAYLAND_DISPLAY)) return null;
-    if (onPath("zenity", env.PATH)) return zenityBackend;
-    if (onPath("kdialog", env.PATH)) return kdialogBackend;
+    const zenity = resolve("zenity");
+    if (zenity) return makeZenityBackend(zenity);
+    const kdialog = resolve("kdialog");
+    if (kdialog) return makeKdialogBackend(kdialog);
     return null;
   }
   return null;

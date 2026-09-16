@@ -59,6 +59,72 @@ export function checkCommand(policy: Policy, command: string): void {
   }
 }
 
+/**
+ * Does this host match the policy's allow list?
+ *
+ * An empty list means "no host restriction", the same way an empty
+ * allowCommands means "no command restriction" — the list only ever narrows.
+ *
+ * An entry may carry a port (`localhost:3000`), in which case the whole
+ * `host:port` has to match, or may be bare (`api.stripe.com`), in which case
+ * it matches on hostname whatever the port. `*.example.com` matches a
+ * subdomain but never the apex: a wildcard should not quietly widen to the
+ * registered domain someone else's tenant lives on.
+ */
+export function hostAllowed(patterns: string[], hostname: string, host: string): boolean {
+  if (!patterns.length) return true;
+  const h = hostname.toLowerCase();
+  const hp = host.toLowerCase();
+  return patterns.some((raw) => {
+    const p = raw.trim().toLowerCase();
+    if (!p) return false;
+    if (p.startsWith("*.")) {
+      const suffix = p.slice(1); // ".example.com"
+      return h.endsWith(suffix) && h.length > suffix.length;
+    }
+    return p.includes(":") ? hp === p : h === p;
+  });
+}
+
+/**
+ * The host half of the gate for `hush request`.
+ *
+ * `checkCommand` cannot express this: the "command" being run is hush's own
+ * fetch, so the thing an agent actually picks is the destination. Without a
+ * host check, a set that is allowed for `api.stripe.com` is equally allowed
+ * for an attacker's collector.
+ */
+export function checkHost(policy: Policy, url: URL): void {
+  if (hostAllowed(policy.allowHosts, url.hostname, url.host)) return;
+  throw new ValidationError(
+    `Policy forbids requests to "${url.host}". Allowed: ${policy.allowHosts.join(", ")}.`,
+  );
+}
+
+/**
+ * The grant key an "Allow 15 min" approval for a request is cached under.
+ *
+ * Same idea as runScope, with the host in the command's place: a grant made
+ * for one destination must not authorise the same sets going somewhere else,
+ * because that is the whole shape of the attack this gate exists to stop.
+ */
+export function requestScope(policy: Policy, host: string, layers: string[]): string {
+  // A JSON array, not a ":"-joined string: a host may carry ":" (host:port)
+  // and a library layer always does ("<vault>:<set>"), so the joined form was
+  // not injective — two different (host, sets) pairs produced one key and one
+  // approval covered both.
+  return policy.approvalScope === "sets"
+    ? JSON.stringify(["request", layers])
+    : JSON.stringify(["request", host, layers]);
+}
+
+/** The request-shaped sibling of approvalCoverageLine(). */
+export function requestCoverageLine(policy: Policy, host: string, layers: string[]): string {
+  const sets = layers.join(", ") || "(none)";
+  const what = policy.approvalScope === "sets" ? "any host" : host;
+  return `${ttlLabel(policy.approvalTtlSeconds)} covers:  ${what} with ${sets}`;
+}
+
 /** Same rule checkCommand() uses: the part after the last "/", not the whole invocation. */
 const basenameOf = (command: string): string => command.split("/").pop() ?? command;
 
@@ -74,8 +140,14 @@ const basenameOf = (command: string): string => command.split("/").pop() ?? comm
  * unless a policy opts back into the wider shape with `approvalScope: "sets"`.
  */
 export function runScope(policy: Policy, command: string, layers: string[]): string {
-  const sets = layers.join("+");
-  return policy.approvalScope === "sets" ? `run:${sets}` : `run:${basenameOf(command)}:${sets}`;
+  // Same reasoning as requestScope(): a command basename may itself contain
+  // ":" and a library layer always does, so `run:${basename}:${sets}` let
+  // ("npm", ["global:work-fal"]) and ("./npm:global", ["work-fal"]) share one
+  // key, and an "Allow 15 min" grant approved for the first pair answered the
+  // second with no dialog.
+  return policy.approvalScope === "sets"
+    ? JSON.stringify(["run", layers])
+    : JSON.stringify(["run", basenameOf(command), layers]);
 }
 
 /**
@@ -123,10 +195,23 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
   // "Narrow, not widen" fields: allowCommands/allowEnvs have always treated an
   // empty list as "no restriction", so a floor that does not set one leaves
   // the repo's own choice untouched — exactly today's behaviour.
-  const narrow = (field: "allowCommands" | "allowEnvs"): string[] => {
+  const narrow = (field: "allowCommands" | "allowEnvs" | "allowHosts"): string[] => {
     const floorList = floor[field];
-    const repoList = repo[field] ?? base[field];
-    return floorList && floorList.length ? intersect(floorList, repoList) : repoList;
+    const repoList = repo[field];
+    // An absent or empty floor is "no opinion": the repo's own list applies
+    // untouched, exactly the two-way merge this replaces.
+    if (!floorList?.length) return repoList ?? base[field];
+    // Repo silence must inherit the floor, not the built-in empty list. The
+    // old `repo[field] ?? base[field]` fell back to `[]`, and an empty list
+    // means "no restriction" at every consumer, so a repo that said nothing
+    // widened the floor to nothing — the exact inversion the floor exists to
+    // prevent, and the shape hush's own setup writes.
+    if (!repoList?.length) return floorList;
+    const overlap = intersect(floorList, repoList);
+    // An empty overlap cannot be represented — `[]` reads as "no restriction"
+    // — so a repo list that lies entirely outside the floor is ignored as a
+    // whole, which is what policyWeakenings() already reports.
+    return overlap.length ? overlap : floorList;
   };
 
   const denyCommandsUnion = union(base.denyCommands, floor.denyCommands, repo.denyCommands);
@@ -154,6 +239,7 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
 
   return {
     allowCommands: narrow("allowCommands"),
+    allowHosts: narrow("allowHosts"),
     denyCommands,
     unsafeAllowCommands,
     allowEnvs: narrow("allowEnvs"),
@@ -169,6 +255,10 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
     approvalTimeoutSeconds: repo.approvalTimeoutSeconds ?? floor.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
     biometry,
     approvalScope,
+    // The unmask list is the user's own decision, so only the floor can set
+    // it: a repository must not be able to talk hush out of masking a value
+    // it can write a file about. See unsensitiveForOutput() in schema.ts.
+    unmaskKeys: floor.unmaskKeys ?? [],
   };
 }
 
@@ -186,13 +276,29 @@ export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>):
     lines.push(`policy.json asks for unsafeAllowCommands: ${droppedFromUnsafe.join(", ")} — ignored, below your floor`);
   }
 
-  const narrowFields = { allowCommands: "allowCommands", allowEnvs: "allowEnvs" } as const;
+  const narrowFields = {
+    allowCommands: "allowCommands",
+    allowEnvs: "allowEnvs",
+    allowHosts: "allowHosts",
+  } as const;
   for (const field of Object.keys(narrowFields) as (keyof typeof narrowFields)[]) {
     const floorList = floor[field];
     const repoList = repo[field];
-    if (!floorList?.length || !repoList?.length) continue;
+    if (!floorList?.length) continue;
+    if (repoList && !repoList.length) {
+      lines.push(`policy.json asks for an empty ${field} — ignored, your floor's list (${floorList.join(", ")}) applies`);
+      continue;
+    }
+    if (!repoList?.length) continue;
     const dropped = repoList.filter((x) => !floorList.includes(x));
-    if (dropped.length) lines.push(`policy.json asks for ${field}: ${dropped.join(", ")} — ignored, outside your floor`);
+    if (dropped.length === repoList.length) {
+      lines.push(
+        `policy.json asks for ${field}: ${dropped.join(", ")} — none are inside your floor, ` +
+          `so your floor's list (${floorList.join(", ")}) applies`,
+      );
+    } else if (dropped.length) {
+      lines.push(`policy.json asks for ${field}: ${dropped.join(", ")} — ignored, outside your floor`);
+    }
   }
 
   if (repo.requireApproval) {

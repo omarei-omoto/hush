@@ -6,7 +6,12 @@
  * practice: a value split across two stdout chunks.
  */
 
-const MIN_REDACTABLE = 5;
+/**
+ * Values this short are not masked at all, so anything that writes a value
+ * reads this to be able to say so. Exported because the warning and the
+ * redactor disagreeing about the threshold is the whole bug.
+ */
+export const MIN_REDACTABLE = 5;
 
 /** Values this short or this common are not worth masking — masking them is noise. */
 const SKIP_VALUES = new Set(["true", "false", "null", "undefined", "0", "1", "localhost"]);

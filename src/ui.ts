@@ -11,11 +11,31 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { scanRepo, parseEnvFile } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
-import { requestApproval, pendingRequests, answerRequest } from "./approval.ts";
+
+/**
+ * Never let a repo-supplied symlink redirect a write hush performs.
+ *
+ * `.hush/policy.json` is a committed file, so a clone can make that path a
+ * symlink (git stores them) pointing at the user's own `~/.hush/policy.json`
+ * floor. `writeFileSync` follows it, so one ordinary settings change in the
+ * page would rewrite the floor — the control SECURITY.md names as the
+ * mitigation against repo-controlled policy. The class has to hold at every
+ * path hush writes into a repository, not one.
+ *
+ * Returns an error message, or null when the path is safe to write.
+ */
+function symlinkRefusal(path: string): string | null {
+  const st = lstatSync(path, { throwIfNoEntry: false });
+  if (st && !st.isFile()) {
+    return `${path} is not a regular file — it is a link or a device. Remove it and try again.`;
+  }
+  return null;
+}
+import { requestApproval } from "./approval.ts";
 import { readPolicyFile } from "./policy.ts";
 import { assess } from "./posture.ts";
 import {
@@ -416,6 +436,9 @@ function state(ctx: UiCtx) {
     resolution: resolutionLines(vault, libraryVault, used),
     policy: {
       requireApproval: repoPolicy.requireApproval ?? DEFAULT_POLICY.requireApproval,
+      // The repo's own value when it has one, so the page shows the number the
+      // dialog's button is actually built from.
+      approvalTtlSeconds: repoPolicy.approvalTtlSeconds ?? DEFAULT_POLICY.approvalTtlSeconds,
       biometry: effectivePolicy.biometry,
     },
     agent: agentStatus(ctx),
@@ -931,6 +954,8 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           // to the floor, or tighten one they deliberately relaxed.
           policyKept = true;
         } else {
+          const bad = symlinkRefusal(policyPath);
+          if (bad) return json(res, 400, { error: bad });
           writeFileSync(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
         }
       }
@@ -947,13 +972,25 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
      * be lost the moment this endpoint guessed at the rest of the file.
      */
     case "/api/policy": {
-      const { requireApproval } = body;
-      const allowed = new Set(["run", "add", "reveal"]);
+      const { requireApproval, approvalTtlSeconds } = body;
+      const allowed = new Set(["run", "add", "reveal", "request"]);
       if (
         !Array.isArray(requireApproval) ||
         requireApproval.some((a: unknown) => typeof a !== "string" || !allowed.has(a))
       ) {
-        return json(res, 400, { error: 'requireApproval must be a list drawn from "run", "add", "reveal"' });
+        return json(res, 400, { error: 'requireApproval must be a list drawn from "run", "add", "reveal", "request"' });
+      }
+      // How long an "Allow" lasts. Bounded rather than free: under a minute is
+      // a dialog per call, and over a day is "off" with extra steps.
+      if (approvalTtlSeconds !== undefined) {
+        if (
+          typeof approvalTtlSeconds !== "number" ||
+          !Number.isInteger(approvalTtlSeconds) ||
+          approvalTtlSeconds < 60 ||
+          approvalTtlSeconds > 86_400
+        ) {
+          return json(res, 400, { error: "approvalTtlSeconds must be a whole number of seconds, from 60 to 86400" });
+        }
       }
       const policyPath = join(ctx.hushDir, "policy.json");
       let existing: Record<string, unknown> = {};
@@ -967,44 +1004,29 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         }
       }
       mkdirSync(ctx.hushDir, { recursive: true });
+      const badPolicyPath = symlinkRefusal(policyPath);
+      if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
       writeFileSync(
         policyPath,
-        JSON.stringify({ ...existing, requireApproval: [...new Set(requireApproval)] }, null, 2) + "\n",
+        JSON.stringify(
+          {
+            ...existing,
+            requireApproval: [...new Set(requireApproval)],
+            // Only when the page sent one, so a caller that knows nothing about
+            // this field cannot reset it by leaving it out.
+            ...(approvalTtlSeconds === undefined ? {} : { approvalTtlSeconds }),
+          },
+          null,
+          2,
+        ) + "\n",
       );
-      audit(ctx.hushDir, { actor: "ui", action: "policy.update", requireApproval });
-      return json(res, 200, state(ctx));
-    }
-
-    /** The Agent section's "Waiting for you" list — the file queue approval.ts falls back to off macOS. */
-    case "/api/pending": {
-      return json(res, 200, { pending: pendingRequests(ctx.hushDir) });
-    }
-
-    /**
-     * Answer one pending request from the page — the same act `hush approve`
-     * performs from a terminal. Audited the same way every other approval
-     * decision is (see /api/reveal above, and mcp.ts's "run" approvals): one
-     * event shape for "a human answered a gated request", regardless of which
-     * surface asked or which surface answered.
-     */
-    case "/api/answer": {
-      const { id, decision } = body;
-      if (typeof id !== "string" || !id) return json(res, 400, { error: "id is required" });
-      if (decision !== "once" && decision !== "session" && decision !== "deny") {
-        return json(res, 400, { error: 'decision must be "once", "session" or "deny"' });
-      }
-      const found = pendingRequests(ctx.hushDir).find((p) => p.id === id) as
-        | { action?: string }
-        | undefined;
-      answerRequest(ctx.hushDir, id, decision);
       audit(ctx.hushDir, {
         actor: "ui",
-        action: "approval",
-        on: found?.action ?? "unknown",
-        decision,
-        via: "ui",
+        action: "policy.update",
+        requireApproval,
+        ...(approvalTtlSeconds === undefined ? {} : { approvalTtlSeconds }),
       });
-      return json(res, 200, { pending: pendingRequests(ctx.hushDir) });
+      return json(res, 200, state(ctx));
     }
 
     /** The Activity section: the last 100 lines of the local access log, newest first. */
@@ -1317,11 +1339,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
 .switch input:checked ~ .track{background:var(--ink)}
 .switch input:checked ~ .knob{left:18px}
 .switch input:focus-visible ~ .track{outline:2px solid var(--ink);outline-offset:2px}
-.pendingrow{padding:12px 4px;border-bottom:1px solid var(--line)}
-.pendingrow .summary{font-weight:600;font-size:14px}
-.pendingrow .code{font-family:var(--mono);color:var(--ink-muted);font-size:13px}
-.pendingrow .detail{color:var(--ink-muted);font-size:13px;margin:4px 0}
-.pendingactions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
 
 /* -------------------------------------------------------------- activity */
 .auditrow{display:flex;align-items:baseline;gap:14px;padding:7px 4px;border-bottom:1px solid var(--line);font-size:13.5px}
@@ -2010,55 +2027,6 @@ function renderTeam(){
 
 /* ------------------------------------------------------------------ agent */
 
-let PENDING=[];
-let pendingTimer=null;
-
-function renderPendingBox(){
-  const box=document.getElementById("pendingbox");
-  if(!box)return;
-  box.innerHTML="";
-  if(!PENDING.length){box.append($('<p class="muted">Nothing waiting.</p>'));return}
-  PENDING.forEach(function(p){
-    const row=$('<div class="pendingrow"></div>');
-    row.append($('<div class="summary">'+esc(p.summary)+'</div>'));
-    (p.detail||[]).forEach(function(line){row.append($('<div class="detail">'+esc(line)+'</div>'))});
-    row.append($('<div class="code">code '+esc(p.code)+'</div>'));
-    const actions=$('<div class="pendingactions"></div>');
-    const once=$('<button type="button" class="quiet">Allow once</button>');
-    once.onclick=()=>answerPending(p.id,"once");
-    const session=$('<button type="button" class="quiet">Allow for a while</button>');
-    session.onclick=()=>answerPending(p.id,"session");
-    const deny=$('<button type="button" class="quiet wax">Deny</button>');
-    deny.onclick=()=>answerPending(p.id,"deny");
-    actions.append(once,session,deny);
-    row.append(actions);
-    box.append(row);
-  });
-}
-
-async function answerPending(id,decision){
-  try{
-    const r=await api("/api/answer",{id:id,decision:decision});
-    PENDING=r.pending||[];
-    renderPendingBox();
-    toast(decision==="deny"?"denied":"allowed");
-  }catch(e){/* api() already reported it */}
-}
-
-async function loadPending(){
-  try{
-    const r=await api("/api/pending",{});
-    PENDING=r.pending||[];
-  }catch(e){/* api() already reported it */}
-  renderPendingBox();
-}
-
-function ensurePendingPoll(){
-  if(currentSection()==="agent"){
-    if(!pendingTimer){loadPending();pendingTimer=setInterval(loadPending,3000)}
-  }else if(pendingTimer){clearInterval(pendingTimer);pendingTimer=null}
-}
-
 function renderAgent(){
   const wrap=document.createElement("div");
   wrap.append($('<p class="intro">What an AI coding agent may do with these secrets, and what it must ask you for.</p>'));
@@ -2080,7 +2048,7 @@ function renderAgent(){
   });
 
   wrap.append($('<h3 class="subtitle">Asks first</h3>'));
-  const ACTIONS=[["run","Running a command with secrets injected"],["add","Adding a new secret"],["reveal","Revealing a value"]];
+  const ACTIONS=[["run","Running a command with secrets injected"],["add","Adding a new secret"],["reveal","Revealing a value"],["request","Sending a secret to an API"]];
   ACTIONS.forEach(function(pair){
     const action=pair[0],label=pair[1];
     const row=$('<div class="switchrow"></div>');
@@ -2105,15 +2073,41 @@ function renderAgent(){
     wrap.append(row);
   });
 
+  // How long an "Allow" lasts, in plain words rather than seconds. The number
+  // is what the dialog's own button says, so it is the same choice seen twice.
+  const TTL_CHOICES=[[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"],[14400,"4 hours"],[86400,"all day"]];
+  const ttlRow=$('<div class="switchrow"></div>');
+  ttlRow.append($('<div>An \u201Callow\u201D lasts</div>'));
+  const ttlSel=document.createElement("select");ttlSel.className="plain";
+  ttlSel.setAttribute("aria-label","How long an allow lasts");
+  TTL_CHOICES.forEach(function(pair){
+    const o=document.createElement("option");o.value=String(pair[0]);o.textContent=String(pair[1]);
+    if(S.policy.approvalTtlSeconds===pair[0])o.selected=true;
+    ttlSel.append(o);
+  });
+  // A value set by hand that is not one of the choices must not be silently
+  // rewritten by simply opening this page, so it gets its own option.
+  if(!TTL_CHOICES.some(function(p){return p[0]===S.policy.approvalTtlSeconds})){
+    const o=document.createElement("option");
+    o.value=String(S.policy.approvalTtlSeconds);
+    o.textContent=Math.round(S.policy.approvalTtlSeconds/60)+" minutes (set by hand)";
+    o.selected=true;
+    ttlSel.append(o);
+  }
+  ttlSel.onchange=async()=>{
+    try{
+      S=await api("/api/policy",{requireApproval:S.policy.requireApproval,approvalTtlSeconds:Number(ttlSel.value)});
+      render();
+      toast("updated");
+    }catch(e){toast(String(e.message||e))}
+  };
+  ttlRow.append(ttlSel);
+  wrap.append(ttlRow);
+
   const bioRow=$('<div class="switchrow"></div>');
   bioRow.append($('<div>Approval by fingerprint</div>'));
   bioRow.append($('<div class="statusfix">'+esc(S.policy.biometry)+' — change with hush secure</div>'));
   wrap.append(bioRow);
-
-  wrap.append($('<h3 class="subtitle">Waiting for you</h3>'));
-  const box=document.createElement("div");box.id="pendingbox";
-  wrap.append(box);
-  renderPendingBox();
 
   return wrap;
 }
@@ -2536,7 +2530,6 @@ function render(){
   else if(sec==="agent")body.append(renderAgent());
   else if(sec==="activity")body.append(renderActivity());
 
-  ensurePendingPoll();
   renderModal();
 }
 window.addEventListener("hashchange",render);

@@ -45,6 +45,22 @@ export const isValidationError = (e: unknown): boolean =>
 export const PK_PREFIX = "hush_pk_";
 export const SK_PREFIX = "hush_sk_";
 export const SCHEME = "hush/v1";
+/**
+ * The value-AAD version that binds a sealed value to the generation it was
+ * sealed under.
+ *
+ * In v1 the AAD carried only `env|KEY`, so `dek.generation` and each entry's
+ * `gen` were plaintext siblings that no AEAD covered — and freshness was
+ * decided from those numbers. Two integer edits in a committed vault file
+ * therefore silenced the rollback warning, let a removed member read every
+ * value they could still unwrap, and poisoned the local watermark. Binding the
+ * generation into the tag means an inflated label simply fails to decrypt:
+ * loud instead of silent.
+ *
+ * The wrap/KDF context deliberately keeps the v1 label (see deriveKek), so
+ * existing key wraps keep unwrapping.
+ */
+export const SCHEME_V2 = "hush/v2";
 
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const ub64 = (s: string) => Buffer.from(s, "base64");
@@ -130,19 +146,31 @@ export const fingerprint = (pub: Buffer): string =>
 
 // ------------------------------------------------------------ value sealing
 
-const valueAad = (env: string, key: string) => Buffer.from(`${SCHEME}|${env}|${key}`, "utf8");
+/** The pre-binding AAD, read-only, for values written by an older hush. */
+const valueAadLegacy = (env: string, key: string) => Buffer.from(`${SCHEME}|${env}|${key}`, "utf8");
 
-export function sealValue(dek: Buffer, env: string, key: string, plaintext: string): Sealed {
+const valueAadBound = (env: string, key: string, generation: number) =>
+  Buffer.from(`${SCHEME_V2}|${generation}|${env}|${key}`, "utf8");
+
+export function sealValue(dek: Buffer, env: string, key: string, plaintext: string, generation: number): Sealed {
   const iv = randomBytes(12);
   const c = createCipheriv("aes-256-gcm", dek, iv);
-  c.setAAD(valueAad(env, key));
+  c.setAAD(valueAadBound(env, key, generation));
   const ct = Buffer.concat([c.update(plaintext, "utf8"), c.final()]);
   return { iv: b64(iv), ct: b64(ct), tag: b64(c.getAuthTag()) };
 }
 
-export function openValue(dek: Buffer, env: string, key: string, s: Sealed): string {
+/**
+ * Open a sealed value.
+ *
+ * Pass `generation` for a value this build sealed (its entry carries `v: 2`);
+ * omit it for a value written by an older hush, whose AAD carried only
+ * `env|KEY`. The vault records which per entry, so a file that was upgraded
+ * value by value still opens.
+ */
+export function openValue(dek: Buffer, env: string, key: string, s: Sealed, generation?: number): string {
   const d = createDecipheriv("aes-256-gcm", dek, ub64(s.iv));
-  d.setAAD(valueAad(env, key));
+  d.setAAD(generation === undefined ? valueAadLegacy(env, key) : valueAadBound(env, key, generation));
   d.setAuthTag(ub64(s.tag));
   return Buffer.concat([d.update(ub64(s.ct)), d.final()]).toString("utf8");
 }

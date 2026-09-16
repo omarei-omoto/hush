@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+/**
+ * Stands in for `pbcopy` / `wl-copy` / `xclip` so the clipboard tests can see
+ * exactly what was handed to the clipboard, on macOS and Linux alike.
+ *
+ * The test symlinks this file under whichever name the platform looks for.
+ * Everything is scripted through the environment, never argv, so that nothing
+ * the test asserts about argv can be satisfied by this file's own arguments.
+ */
+const fs = require("fs");
+
+const target = process.env.HUSH_TEST_CLIPBOARD;
+if (target) fs.writeFileSync(target, fs.readFileSync(0, "utf8"));
+
+process.exit(Number(process.env.HUSH_TEST_CLIPBOARD_EXIT || "0"));

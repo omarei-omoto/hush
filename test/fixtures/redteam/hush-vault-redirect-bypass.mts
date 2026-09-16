@@ -65,7 +65,7 @@ function attempt(label: string, withFloor: boolean): void {
     HUSH_IDENTITY: encodeSecret(id),
     HUSH_NO_KEYCHAIN: "1",
     HUSH_BIOMETRY: "off",
-    HUSH_APPROVAL_MODE: "file",
+    HUSH_NO_DIALOG: "1",
     HUSH_NO_NUDGE: "1",
     NO_COLOR: "1",
   };

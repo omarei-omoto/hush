@@ -4,6 +4,8 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.5.0 — 2026-09-24
+
 ### The app, redesigned around what you came to do
 
 `hush ui` is rebuilt. The old page was five sections of lists and jargon ("What
@@ -114,6 +116,8 @@ that project adds it. To keep the old behaviour in a folder, run
 - From a clone on Node 22.6–22.17, which cannot run TypeScript without a flag,
   `bin/hush.js` falls back to a build, or says what to do. The docs now say that
   working from source needs Node 22.18.
+
+## 0.4.0 — 2026-09-16
 
 ### `hush install-mcp` learns which agent it is talking to
 

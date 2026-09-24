@@ -99,6 +99,25 @@ without.
 - **The security ladder never blocks.** A tool that refuses to run until you buy
   a YubiKey gets uninstalled, and the person goes back to a plaintext `.env`.
 
+## Releasing
+
+Releases are published by `.github/workflows/release.yml`, never from a laptop.
+There is no npm token: npm's trusted publishing checks the workflow's GitHub
+identity, and the package page gets a provenance badge that links back to
+the commit.
+
+1. On a branch: `npm version <x.y.z> --no-git-tag-version`. This updates
+   `package.json`, `package-lock.json` and `src/version.ts`. Then move the
+   CHANGELOG's `Unreleased` notes under a `## x.y.z — date` heading.
+2. Merge that PR once CI is green.
+3. Tag the merge commit on `main` and push the tag:
+   `git tag vx.y.z && git push origin vx.y.z`.
+
+The workflow refuses a tag that does not match `package.json` and
+`src/version.ts`, runs the full suite, then publishes. The one-time setup is
+on npmjs.com: @omarei/hush → Settings → Trusted publishing → GitHub Actions,
+repository `omarei-omoto/hush`, workflow `release.yml`.
+
 ## Reporting a security problem
 
 Not here. See [SECURITY.md](./SECURITY.md) — open a private advisory rather than

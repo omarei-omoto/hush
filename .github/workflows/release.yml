@@ -1,0 +1,74 @@
+name: Release
+
+# Publishing is a tag, not a click: push `v0.5.0` and this checks, builds and
+# publishes exactly that commit.
+#
+# No npm token exists anywhere. npm's trusted publishing verifies this
+# workflow's GitHub OIDC identity against the publisher configured on the
+# package (npmjs.com → @omarei/hush → Settings → Trusted publishing:
+# omarei-omoto/hush, workflow release.yml), and attaches a provenance
+# statement saying which commit and workflow built it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: the tagged commit passes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+
+      # A tag that disagrees with package.json would publish a version nobody
+      # tagged, so refuse before anything else runs.
+      - name: tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          src="$(node -p "require('fs').readFileSync('src/version.ts','utf8').match(/VERSION = \"([^\"]+)\"/)[1]")"
+          echo "tag=$tag package.json=$pkg src/version.ts=$src"
+          test "$tag" = "$pkg" && test "$pkg" = "$src"
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      - name: install age
+        run: sudo apt-get update && sudo apt-get install -y age
+
+      - run: npm test
+
+  publish:
+    name: publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The OIDC token trusted publishing exchanges for a one-time publish credential.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately no `registry-url`: with it, setup-node writes an
+      # `_authToken=${NODE_AUTH_TOKEN}` line that expands to empty, npm treats
+      # that as "already authenticated", never attempts the OIDC exchange, and
+      # the publish fails with a misleading 404.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - run: npm --version
+
+      # devDependencies are needed: `prepack` builds dist/ with tsc.
+      - run: npm ci
+
+      # Provenance is added automatically for a public package published this way.
+      - run: npm publish

@@ -26,12 +26,13 @@ import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { platform, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 export type BiometryMode = "off" | "preferred" | "required";
 export type BiometryResult = "ok" | "denied" | "unavailable";
 
 function sourcePath(): string {
-  return join(dirname(new URL(import.meta.url).pathname), "..", "native", "hush-touchid.swift");
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "native", "hush-touchid.swift");
 }
 
 function haveSwift(): boolean {

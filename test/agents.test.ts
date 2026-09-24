@@ -136,3 +136,15 @@ describe("Cursor wants a rule file, not a skill file", () => {
     assert.equal(stripFrontmatter("# plain\n"), "# plain\n");
   });
 });
+
+describe("what counts as registered", () => {
+  test("a config file with no hush entry is not a registration", async () => {
+    const { mcpRegistrations } = await import("../src/agents.ts");
+    const files: Record<string, string> = {
+      "/home/me/.codex/config.toml": `model = "o3"\n`,
+      "/proj/.mcp.json": JSON.stringify({ mcpServers: { hush: { command: "hush", args: ["mcp"] } } }),
+    };
+    const found = mcpRegistrations("/proj", { HOME: "/home/me" }, (p) => files[p] ?? null);
+    assert.deepEqual(found.map((f) => f.agent.id), ["claude-code"]);
+  });
+});

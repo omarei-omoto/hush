@@ -249,11 +249,37 @@ export function loadUse(hushDir: string): UseFile {
 
 // ------------------------------------------------------------------ locating
 
+/**
+ * Whether a `.hush` directory is hush's own home (`~/.hush`) rather than a
+ * project's. They share a name, so from anywhere under $HOME the walk upward
+ * reaches it — and once `hush use` or `hush init` had been run from the home
+ * folder, every folder beneath it silently became part of that "project".
+ */
+export function isHushHome(hushDir: string): boolean {
+  return resolve(hushDir) === resolve(hushHome());
+}
+
+/** Refuse to write project files (envs.json, vault.json, policy.json) into ~/.hush. */
+export function assertProjectHushDir(hushDir: string): void {
+  if (isHushHome(hushDir)) {
+    throw new ValidationError(
+      `${hushDir} is where hush keeps your key and library, not a project. ` +
+        "Run this inside a project folder, or use --library for your own sets.",
+    );
+  }
+}
+
 /** Walk up from `start` looking for a `.hush` directory. */
 export function findHushDir(start = process.cwd()): string | null {
   let dir = resolve(start);
   for (;;) {
     const candidate = join(dir, ".hush");
+    if (isHushHome(candidate)) {
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+      continue;
+    }
     // envs.json alone marks a project that only uses library sets — it gets a
     // vault of its own the first time it needs one, not before.
     if (

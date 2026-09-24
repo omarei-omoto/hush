@@ -7,8 +7,9 @@ cannot (Linux, Windows, a YubiKey I do not own).
 
 ## Getting set up
 
-You need Node 22.6 or newer. There is no build step and no dependencies to
-install — Node runs the TypeScript directly.
+You need Node 22.18 or newer (the first 22.x that runs TypeScript without a
+flag). There is no build step and no dependencies to install — Node runs the
+TypeScript directly. The published package itself still runs on 22.6+.
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git

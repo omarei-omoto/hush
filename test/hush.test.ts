@@ -1516,7 +1516,10 @@ describe("retiring your own key", () => {
 });
 
 describe("durability and concurrency, for real", () => {
-  test("a save that cannot create its temp file leaves the old vault whole", () => {
+  // root ignores directory permissions, so the chmod below cannot make the
+  // save fail there (containers, some CI images); the test would only ever
+  // report that, not a real regression.
+  test("a save that cannot create its temp file leaves the old vault whole", { skip: process.getuid?.() === 0 && "running as root" }, () => {
     // Distinguishes temp+rename from a plain write: opening an *existing* file
     // for writing does not need directory permission, so a plain writeFileSync
     // would truncate the vault here. The atomic path fails before touching it.

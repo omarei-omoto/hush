@@ -57,7 +57,7 @@ export function isGitignored(root: string, name: string): boolean {
     return readFileSync(gi, "utf8")
       .split(/\r?\n/)
       .map((l) => l.trim())
-      .some((l) => l === name || l === ".env*" || l === ".env.*" || l === "*.local");
+      .some((l) => l === name || l === `/${name}` || l === ".env*" || l === ".env.*" || l === "*.local");
   } catch {
     return false;
   }

@@ -38,9 +38,12 @@ function symlinkRefusal(path: string): string | null {
 import { requestApproval } from "./approval.ts";
 import { readPolicyFile } from "./policy.ts";
 import { assess } from "./posture.ts";
+import { biometryStatus } from "./biometry.ts";
+import { AGENTS, mcpRegistrations } from "./agents.ts";
 import {
   Vault, locateProject, namedVaultPath, audit,
   isValidationError, ValidationError, slugifyEnv,
+  assertProjectHushDir,
 } from "./vault.ts";
 import {
   librarySets, loadLinks, saveLinks, openGlobal, usedSets,
@@ -139,11 +142,18 @@ function agentStatus(ctx: UiCtx): {
   policyFilePresent: boolean;
   policyFloorPresent: boolean;
 } {
-  const skillPath = join(ctx.root, ".claude", "skills", "hush", "SKILL.md");
-  const globalSkillPath = join(process.env.HOME ?? "", ".claude", "skills", "hush", "SKILL.md");
+  // Every agent hush knows, not only Claude Code's files — as `hush doctor` does.
+  const read = (p: string): string | null => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  const skills = AGENTS.flatMap((g) => [g.skill.project(ctx.root), g.skill.global?.(process.env)]);
   return {
-    mcpRegistered: existsSync(join(ctx.root, ".mcp.json")),
-    skillInstalled: existsSync(skillPath) || existsSync(globalSkillPath),
+    mcpRegistered: mcpRegistrations(ctx.root, process.env, read).length > 0,
+    skillInstalled: skills.some((p) => !!p && existsSync(p)),
     policyFilePresent: existsSync(join(ctx.hushDir, "policy.json")),
     policyFloorPresent: existsSync(join(hushHome(), "policy.json")),
   };
@@ -440,6 +450,9 @@ function state(ctx: UiCtx) {
       // dialog's button is actually built from.
       approvalTtlSeconds: repoPolicy.approvalTtlSeconds ?? DEFAULT_POLICY.approvalTtlSeconds,
       biometry: effectivePolicy.biometry,
+      // So the page does not offer "preferred" fingerprint approval on a
+      // machine that has no fingerprint reader to prefer.
+      biometryAvailable: biometryStatus().available,
     },
     agent: agentStatus(ctx),
     posture: { rung: posture.rung, name: posture.name },
@@ -954,6 +967,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           // to the floor, or tighten one they deliberately relaxed.
           policyKept = true;
         } else {
+          assertProjectHushDir(ctx.hushDir);
           const bad = symlinkRefusal(policyPath);
           if (bad) return json(res, 400, { error: bad });
           writeFileSync(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
@@ -1003,6 +1017,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           });
         }
       }
+      assertProjectHushDir(ctx.hushDir);
       mkdirSync(ctx.hushDir, { recursive: true });
       const badPolicyPath = symlinkRefusal(policyPath);
       if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
@@ -1136,8 +1151,15 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
     process.stdout.write(`\n  hush ui  →  ${link}\n\n  ${vaultLine}\n  Ctrl-C to stop.\n\n`);
     if (opts.open !== false) {
       import("node:child_process").then(({ spawn }) => {
-        const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-        spawn(cmd, [link], { stdio: "ignore", detached: true }).unref();
+        const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+        // A server, a container or an SSH session has no xdg-open. spawn()
+        // reports that as an 'error' event, and an unhandled one took the
+        // whole server down a moment after it printed the link.
+        const child = spawn(cmd, [link], { stdio: "ignore", detached: true });
+        child.on("error", () => {
+          process.stdout.write(`  (could not open a browser here — open the link above yourself)\n\n`);
+        });
+        child.unref();
       });
     }
   });
@@ -1288,7 +1310,9 @@ input:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible{ou
 input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
 
 /* ----------------------------------------------------------- empty state */
-.empty{color:var(--ink-muted);padding:24px 4px;border-top:1px dashed var(--line);font-size:14px}
+/* Not on an .editrow: an unset description is also marked .empty, and picking
+   up this padding and dashed rule made every unnamed set row ~120px tall. */
+.empty:not(.editrow){color:var(--ink-muted);padding:24px 4px;border-top:1px dashed var(--line);font-size:14px}
 
 /* A section's intro/subtitle line with its "New set" action on the same
    line, right-aligned — so the button reads as an action next to what it
@@ -1401,6 +1425,11 @@ input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
 }
 @media (max-width:480px){
   .navlist .count{display:none}
+  /* Beside the brand, the five tabs overflowed a phone's width and the hidden
+     scrollbar left "Activity" cut off with no sign there was more. On their
+     own row, tightened, they all fit. */
+  .navlist{flex:1 1 100%;order:2;padding-right:0;justify-content:space-between}
+  .navlist a{padding:6px 4px}
 }
 @media (max-width:400px){
   .content{padding:14px}
@@ -2106,7 +2135,9 @@ function renderAgent(){
 
   const bioRow=$('<div class="switchrow"></div>');
   bioRow.append($('<div>Approval by fingerprint</div>'));
-  bioRow.append($('<div class="statusfix">'+esc(S.policy.biometry)+' — change with hush secure</div>'));
+  bioRow.append($('<div class="statusfix">'+(S.policy.biometryAvailable
+    ?esc(S.policy.biometry)+' — change with hush secure'
+    :'none on this machine')+'</div>'));
   wrap.append(bioRow);
 
   return wrap;
@@ -2463,9 +2494,13 @@ document.getElementById("drophint-holder").append(dropCard());
 const SECTIONS=["library","folder","team","agent","activity"];
 const SECTION_TITLES={library:"Library",folder:"This folder",team:"Team",agent:"Agent",activity:"Activity"};
 
+/* With no hash, open where the person is: hush ui is run from a folder, and
+   the header already names it. Landing on an empty Library ("You have no
+   library yet") inside a project that has its own sets read as if nothing was
+   set up. The folder section is also where an unset folder's setup box lives. */
 function currentSection(){
   const h=(location.hash||"").replace("#","");
-  return SECTIONS.indexOf(h)>-1?h:"library";
+  return SECTIONS.indexOf(h)>-1?h:"folder";
 }
 
 function sectionHeading(text){

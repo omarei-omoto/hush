@@ -46,9 +46,27 @@ export interface AgentSpec {
     /** Cursor wants a rule file with its own frontmatter; the others take SKILL.md as-is. */
     transform?: (skillMarkdown: string, description: string) => string;
   };
-  /** The line to print when hush cannot write the config itself. */
-  manual: (cliPath: string, root: string) => string;
+  /**
+   * The line to print when hush cannot write the config itself. Takes the entry
+   * hush would have written, or a bare path to cli.ts/cli.js (run with node).
+   */
+  manual: (entry: McpEntry | string, root: string) => string;
 }
+
+const asEntry = (e: McpEntry | string): McpEntry => (typeof e === "string" ? { command: "node", args: [e, "mcp"] } : e);
+
+/** `node "/path/cli.js" mcp` or `hush mcp`, for a shell line. */
+const shellLine = (e: McpEntry | string): string => {
+  const { command, args } = asEntry(e);
+  return [command, ...args.map((a) => (/^[\w./-]+$/.test(a) ? a : JSON.stringify(a)))].join(" ");
+};
+
+/** The JSON `mcpServers` document, on one line, for a paste. */
+const jsonLine = (e: McpEntry | string): string => {
+  const { command, args } = asEntry(e);
+  const list = args.map((a) => JSON.stringify(a)).join(", ");
+  return `{ "mcpServers": { "hush": { "command": ${JSON.stringify(command)}, "args": [${list}] } } }`;
+};
 
 const home = (env: NodeJS.ProcessEnv): string => env.HOME ?? env.USERPROFILE ?? "~";
 
@@ -80,7 +98,7 @@ export const AGENTS: AgentSpec[] = [
       project: (root) => join(root, ".agents", "skills", "hush", "SKILL.md"),
       global: (env) => join(home(env), ".agents", "skills", "hush", "SKILL.md"),
     },
-    manual: (cliPath) => `codex mcp add hush -- node ${JSON.stringify(cliPath)} mcp`,
+    manual: (entry) => `codex mcp add hush -- ${shellLine(entry)}`,
   },
   {
     id: "claude-code",
@@ -99,9 +117,7 @@ export const AGENTS: AgentSpec[] = [
       project: (root) => join(root, ".claude", "skills", "hush", "SKILL.md"),
       global: (env) => join(home(env), ".claude", "skills", "hush", "SKILL.md"),
     },
-    manual: (cliPath, root) =>
-      `write ${join(root, ".mcp.json")}:\n` +
-      `    { "mcpServers": { "hush": { "command": "node", "args": [${JSON.stringify(cliPath)}, "mcp"] } } }`,
+    manual: (entry, root) => `write ${join(root, ".mcp.json")}:\n    ${jsonLine(entry)}`,
   },
   {
     id: "cursor",
@@ -122,9 +138,7 @@ export const AGENTS: AgentSpec[] = [
       transform: (markdown, description) =>
         `---\ndescription: ${description}\nalwaysApply: false\n---\n\n${stripFrontmatter(markdown)}`,
     },
-    manual: (cliPath, root) =>
-      `write ${join(root, ".cursor", "mcp.json")}:\n` +
-      `    { "mcpServers": { "hush": { "command": "node", "args": [${JSON.stringify(cliPath)}, "mcp"] } } }`,
+    manual: (entry, root) => `write ${join(root, ".cursor", "mcp.json")}:\n    ${jsonLine(entry)}`,
   },
 ];
 
@@ -200,4 +214,23 @@ export function renderMcp(
   entry: McpEntry,
 ): { ok: true; text: string; changed: boolean } | { ok: false; reason: string } {
   return format === "toml" ? mergeMcpToml(existing, name, entry) : mergeMcpJson(existing, name, entry);
+}
+
+/**
+ * The agents whose config file actually has a `hush` server in it. Shared by
+ * `hush doctor` and the app so the two never disagree — and a file merely
+ * existing is not a registration: most Codex users have a config.toml.
+ */
+export function mcpRegistrations(
+  root: string,
+  env: NodeJS.ProcessEnv,
+  read: (path: string) => string | null,
+): { agent: AgentSpec; file: string }[] {
+  return AGENTS.flatMap((agent) => {
+    const file = agent.mcp.path(root, env);
+    const text = read(file);
+    if (text === null) return [];
+    const merged = renderMcp(agent.mcp.format, text, "hush", { command: "hush", args: ["mcp"] });
+    return merged.ok && !merged.changed ? [{ agent, file }] : [];
+  });
 }

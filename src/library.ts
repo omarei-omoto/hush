@@ -21,7 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Vault, namedVaultPath, ValidationError, loadUse, type EnvMeta } from "./vault.ts";
+import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
@@ -113,6 +113,7 @@ function lastMentionWins(names: string[]): string[] {
 }
 
 export function saveLinks(hushDir: string, use: string[]): void {
+  assertProjectHushDir(hushDir);
   mkdirSync(hushDir, { recursive: true });
   // Order is precedence (later wins), so the file keeps the order it was
   // given — never sorted — and mentioning a set again moves it to the end,
@@ -234,6 +235,7 @@ export function composeSets(
  * textual merge of two versions is a corrupt vault).
  */
 export function writeProjectDotfiles(hushDir: string): void {
+  assertProjectHushDir(hushDir);
   mkdirSync(hushDir, { recursive: true });
   const gitignore = join(hushDir, ".gitignore");
   if (!existsSync(gitignore)) {

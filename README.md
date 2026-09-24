@@ -72,7 +72,8 @@ Needs Node ≥ 22.6.
 npm install -g @omarei/hush
 ```
 
-From a clone there is no build step — Node runs the TypeScript directly:
+From a clone there is no build step — Node ≥ 22.18 runs the TypeScript directly
+(on 22.6–22.17, run `npm run build` first):
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git
@@ -375,9 +376,12 @@ hush install-mcp
 It looks for the coding agents on this machine and registers hush with each one
 it finds, in the file that agent actually reads: **Codex**
 (`~/.codex/config.toml`), **Claude Code** (`.mcp.json`), **Cursor**
-(`.cursor/mcp.json`). It never rewrites an entry you already have, and when it
-cannot write one it prints the line to paste instead of a tick that means
-nothing.
+(`.cursor/mcp.json`). On a terminal it lists the files first and asks
+(`pick` to choose per agent; `--yes` skips the question). It never rewrites an
+entry you already have, and when it cannot write one it prints the line to
+paste instead of a tick that means nothing. The entry is a plain `hush mcp`
+when the `hush` on your PATH is this install, so the committed file works on
+your teammates' machines too.
 
 If hush cannot see your agent (a fresh machine, an unusual setup):
 
@@ -936,7 +940,7 @@ write access can loosen. Use a hardware identity if that matters to you.
 
 ## Development
 
-No build step and nothing to install — Node 22.6+ runs the TypeScript directly.
+No build step and nothing to install — Node 22.18+ runs the TypeScript directly.
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git

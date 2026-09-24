@@ -7,7 +7,7 @@
  */
 import {
   existsSync, mkdirSync, readFileSync, appendFileSync,
-  openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, statSync,
+  openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, statSync, realpathSync,
 } from "node:fs";
 import { dirname, join, resolve, isAbsolute } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
@@ -256,7 +256,16 @@ export function loadUse(hushDir: string): UseFile {
  * folder, every folder beneath it silently became part of that "project".
  */
 export function isHushHome(hushDir: string): boolean {
-  return resolve(hushDir) === resolve(hushHome());
+  // Real paths, not spellings: macOS's /var is a symlink to /private/var, and
+  // a home folder reached through a link would otherwise slip past this.
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return real(hushDir) === real(hushHome());
 }
 
 /** Refuse to write project files (envs.json, vault.json, policy.json) into ~/.hush. */

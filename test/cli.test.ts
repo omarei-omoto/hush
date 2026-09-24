@@ -3241,6 +3241,25 @@ describe("hush stays out of places it was not asked into", () => {
     }
   });
 
+  // Bites: macOS's /var is a link to /private/var, so HUSH_HOME and the
+  // folder the walk reaches can be the same directory spelled two ways.
+  test("~/.hush is recognised through a symlinked path too", () => {
+    const p = bareFolder();
+    const real = join(p.root, "real");
+    const link = join(p.root, "link");
+    try {
+      mkdirSync(join(real, ".hush"), { recursive: true });
+      mkdirSync(join(real, "code", "app"), { recursive: true });
+      writeFileSync(join(real, ".hush", "envs.json"), JSON.stringify({ use: [] }));
+      symlinkSync(real, link);
+      p.env.HUSH_HOME = join(link, ".hush");
+      const r = spawnSync(process.execPath, [CLI, "root"], { cwd: join(real, "code", "app"), env: p.env, encoding: "utf8" });
+      assert.notEqual(r.status, 0, `~/.hush reached through a link was taken for a project: ${r.stdout}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   // Bites: the absolute path to one machine's node_modules went into the
   // committed .mcp.json, wrong on every teammate's machine.
   test("install-mcp registers a bare `hush mcp` when PATH's hush is this install", () => {

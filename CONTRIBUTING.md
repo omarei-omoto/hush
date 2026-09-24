@@ -113,16 +113,12 @@ the commit.
 3. Tag the merge commit on `main` and push the tag:
    `git tag vx.y.z && git push origin vx.y.z`.
 
-4. Approve the staged release with 2FA: on npmjs.com in the package's
-   **Staged Packages** tab, or with `npm stage list @omarei/hush` and then
-   `npm stage approve <stage-id>`. Nothing is public until you do.
-
 The workflow refuses a tag that does not match `package.json` and
-`src/version.ts`, runs the full suite, then *stages* the release: it can
-submit a version but can never make one live. The one-time setup is on
-npmjs.com: @omarei/hush → Settings → Trusted publishing → GitHub Actions,
-repository `omarei-omoto/hush`, workflow `release.yml`, with **Allow npm
-publish** left unticked.
+`src/version.ts`, runs the full suite, then publishes. The one-time setup is
+on npmjs.com: @omarei/hush → Settings → Trusted publishing → GitHub Actions,
+repository `omarei-omoto/hush`, workflow `release.yml`, **Allow npm publish**
+ticked. (For an approval step before each release, change the workflow's
+last line to `npm stage publish` and approve on npmjs.com.)
 
 ## Reporting a security problem
 

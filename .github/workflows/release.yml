@@ -8,11 +8,10 @@ name: Release
 # package (npmjs.com → @omarei/hush → Settings → Trusted publishing:
 # omarei-omoto/hush, workflow release.yml).
 #
-# The publisher is stage-only ("Allow npm publish" left off): this workflow
-# can submit a release but never make one live. A maintainer approves it with
-# 2FA, on npmjs.com (the package's Staged Packages tab) or with
-# `npm stage approve <stage-id>`. For a secrets tool that is the point: a
-# stolen tag or a compromised workflow cannot ship a version on its own.
+# The publisher allows `npm publish`, so a tag that passes the checks goes
+# live directly. For a human approval step instead, switch the last step to
+# `npm stage publish` and approve each release with 2FA on npmjs.com (the
+# package's Staged Packages tab) or with `npm stage approve <stage-id>`.
 on:
   push:
     tags: ["v*"]
@@ -68,12 +67,12 @@ jobs:
         with:
           node-version: "24.x"
 
-      # Staged publishing needs npm 11.15.0 or later (trusted publishing, 11.5.1).
+      # Trusted publishing needs npm 11.5.1 or later (staged publishing, 11.15.0).
       - run: npm install -g npm@latest
       - run: npm --version
 
       # devDependencies are needed: `prepack` builds dist/ with tsc.
       - run: npm ci
 
-      # Submits the release for approval; nothing is public until it is approved.
-      - run: npm stage publish
+      # Provenance is attached automatically for a public package published this way.
+      - run: npm publish

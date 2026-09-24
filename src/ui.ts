@@ -35,17 +35,21 @@ function symlinkRefusal(path: string): string | null {
   }
   return null;
 }
-import { requestApproval } from "./approval.ts";
+import { requestApproval, approvalPromptAvailable } from "./approval.ts";
 import { readPolicyFile } from "./policy.ts";
 import { assess } from "./posture.ts";
+import { biometryStatus } from "./biometry.ts";
+import { PAGE } from "./ui-page.ts";
+import { AGENTS, mcpRegistrations } from "./agents.ts";
 import {
   Vault, locateProject, namedVaultPath, audit,
   isValidationError, ValidationError, slugifyEnv,
+  assertProjectHushDir,
 } from "./vault.ts";
 import {
   librarySets, loadLinks, saveLinks, openGlobal, usedSets,
   globalVaultName, globalVaultExists, namedVaults, saveConfig,
-  writeProjectDotfiles, ensureProjectVault, suggestSets,
+  writeProjectDotfiles, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor,
 } from "./library.ts";
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
@@ -139,11 +143,18 @@ function agentStatus(ctx: UiCtx): {
   policyFilePresent: boolean;
   policyFloorPresent: boolean;
 } {
-  const skillPath = join(ctx.root, ".claude", "skills", "hush", "SKILL.md");
-  const globalSkillPath = join(process.env.HOME ?? "", ".claude", "skills", "hush", "SKILL.md");
+  // Every agent hush knows, not only Claude Code's files — as `hush doctor` does.
+  const read = (p: string): string | null => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  const skills = AGENTS.flatMap((g) => [g.skill.project(ctx.root), g.skill.global?.(process.env)]);
   return {
-    mcpRegistered: existsSync(join(ctx.root, ".mcp.json")),
-    skillInstalled: existsSync(skillPath) || existsSync(globalSkillPath),
+    mcpRegistered: mcpRegistrations(ctx.root, process.env, read).length > 0,
+    skillInstalled: skills.some((p) => !!p && existsSync(p)),
     policyFilePresent: existsSync(join(ctx.hushDir, "policy.json")),
     policyFloorPresent: existsSync(join(hushHome(), "policy.json")),
   };
@@ -181,11 +192,11 @@ function resolutionLines(vault: Vault | null, libraryVault: Vault | null, used: 
       first = false;
     };
     if (name === "default") {
-      const libDefault = libraryVault?.sets().find((s) => s.name === "default" && s.keys.length);
-      const projDefault = vault?.hasSet("default");
-      if (libDefault) push("default", "— your global environment", false);
-      if (projDefault) push("default", "(this folder)", false);
-      if (!libDefault && !projDefault) push("default", "(this folder, once you add one)", false);
+      push("default", vault?.hasSet("default") ? "(this folder)" : "(this folder, once you add one)", false);
+      return;
+    }
+    if (name === LIBRARY_DEFAULT) {
+      push("default", libraryVault?.hasSet("default") ? "(library)" : "(not found)", true);
       return;
     }
     const projSet = vault?.sets().find((s) => s.name === name);
@@ -309,6 +320,26 @@ function dropStages(ids: unknown): number {
   return n;
 }
 
+/**
+ * What this folder's code reads from the environment, for the page's "your
+ * code needs" panel. Names and file paths only — scanning never looks at a
+ * value. Cached briefly because state() runs after every click and a large
+ * repo is not worth walking that often; a few seconds stale is invisible.
+ */
+const SCAN_TTL_MS = 10_000;
+let scanCache: { root: string; at: number; needs: { name: string; sites: string[]; declared: boolean }[] } | null = null;
+function codeNeeds(root: string): { name: string; sites: string[]; declared: boolean }[] {
+  if (scanCache && scanCache.root === root && Date.now() - scanCache.at < SCAN_TTL_MS) return scanCache.needs;
+  let needs: { name: string; sites: string[]; declared: boolean }[] = [];
+  try {
+    needs = scanRepo(root).slice(0, 300).map((u) => ({ name: u.name, sites: u.sites.slice(0, 3), declared: u.declared }));
+  } catch {
+    /* an unreadable tree is not a reason for the page to fail */
+  }
+  scanCache = { root, at: Date.now(), needs };
+  return needs;
+}
+
 function state(ctx: UiCtx) {
   const id = requireIdentity();
   const fState = folderState(ctx);
@@ -372,19 +403,22 @@ function state(ctx: UiCtx) {
     source: s.source ?? "",
     keys: s.keys,
     secrets: libraryVault ? describe(libraryVault, s.name) : [],
-    used: used.includes(s.name),
-    position: positionOf(s.name),
+    // What the page sends to /api/link: the library's default is recorded as
+    // library:default, because a plain "default" means this folder's own.
+    link: linkNameFor("library", s.name),
+    used: used.includes(linkNameFor("library", s.name)),
+    position: positionOf(linkNameFor("library", s.name)),
   }));
 
   // A folder with no marker at all gets offered a one-click setup: what its
   // code references, and which library sets already cover that. Only worth
   // computing once there is no project yet — a linked or vaulted project has
   // already made this choice.
+  const needs = codeNeeds(ctx.root);
   const suggestion = fState === "unset" ? (() => {
-    const usages = scanRepo(ctx.root);
-    const needed = usages.map((u) => u.name);
+    const needed = needs.map((u) => u.name);
     const files = new Set<string>();
-    for (const u of usages) for (const site of u.sites) files.add(site);
+    for (const u of needs) for (const site of u.sites) files.add(site);
     return {
       needed,
       files: files.size,
@@ -440,9 +474,21 @@ function state(ctx: UiCtx) {
       // dialog's button is actually built from.
       approvalTtlSeconds: repoPolicy.approvalTtlSeconds ?? DEFAULT_POLICY.approvalTtlSeconds,
       biometry: effectivePolicy.biometry,
+      // So the page does not offer "preferred" fingerprint approval on a
+      // machine that has no fingerprint reader to prefer.
+      biometryAvailable: biometryStatus().available,
+      // Whether anything here can put an approval in front of a person. When
+      // nothing can, every gated action is refused, and the page says so.
+      promptAvailable: approvalPromptAvailable(),
     },
+    // Names only: which variables this folder's code reads, and where.
+    needs,
     agent: agentStatus(ctx),
-    posture: { rung: posture.rung, name: posture.name },
+    posture: {
+      rung: posture.rung,
+      name: posture.name,
+      next: posture.next ? { label: posture.next.label, command: posture.next.command ?? "", why: posture.next.why ?? "" } : null,
+    },
     members: vault
       ? vault.members().map((m) => ({
           name: m.name,
@@ -943,7 +989,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       }
 
       writeProjectDotfiles(ctx.hushDir);
-      saveLinks(ctx.hushDir, use as string[]);
+      saveLinks(ctx.hushDir, (use as string[]).map((u) => (existing?.hasSet(u) ? u : linkNameFor("library", u))));
 
       let policyKept = false;
       if (agent) {
@@ -954,6 +1000,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           // to the floor, or tighten one they deliberately relaxed.
           policyKept = true;
         } else {
+          assertProjectHushDir(ctx.hushDir);
           const bad = symlinkRefusal(policyPath);
           if (bad) return json(res, 400, { error: bad });
           writeFileSync(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
@@ -1003,6 +1050,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           });
         }
       }
+      assertProjectHushDir(ctx.hushDir);
       mkdirSync(ctx.hushDir, { recursive: true });
       const badPolicyPath = symlinkRefusal(policyPath);
       if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
@@ -1136,1403 +1184,16 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
     process.stdout.write(`\n  hush ui  →  ${link}\n\n  ${vaultLine}\n  Ctrl-C to stop.\n\n`);
     if (opts.open !== false) {
       import("node:child_process").then(({ spawn }) => {
-        const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-        spawn(cmd, [link], { stdio: "ignore", detached: true }).unref();
+        const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+        // A server, a container or an SSH session has no xdg-open. spawn()
+        // reports that as an 'error' event, and an unhandled one took the
+        // whole server down a moment after it printed the link.
+        const child = spawn(cmd, [link], { stdio: "ignore", detached: true });
+        child.on("error", () => {
+          process.stdout.write(`  (could not open a browser here — open the link above yourself)\n\n`);
+        });
+        child.unref();
       });
     }
   });
 }
-
-// ----------------------------------------------------------------- the page
-//
-// Paper, ink, and redaction. The page is a real application shell — a
-// sidebar of five sections and a content column — not a stack of cards.
-// The one memorable element is the redaction bar over every secret value:
-// solid ink carrying only a masked preview, until Reveal lifts it for 15s.
-
-const PAGE = String.raw`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>hush</title>
-<style>
-:root{
-  --paper:#EEF1F4; --panel:#FFFFFF; --ink:#14213D; --ink-muted:#5B6478;
-  --line:#D5DAE2; --used:#0F6E56; --wax:#9B1B30;
-  --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
-  --sans:-apple-system,"Segoe UI",system-ui,sans-serif;
-  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-}
-@media (prefers-color-scheme:dark){:root{
-  --paper:#161B26; --panel:#1E2430; --ink:#E6E9EF; --ink-muted:#9AA3B5;
-  --line:#2E3644; --used:#3DBE8B; --wax:#E0526A;
-}}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans)}
-button,input,select{font-family:inherit}
-a{color:inherit}
-.shell{display:flex;min-height:100vh}
-
-/* ---------------------------------------------------------------- sidebar */
-.sidebar{width:220px;flex:0 0 220px;background:var(--paper);border-right:1px solid var(--line);
-  display:flex;flex-direction:column;padding:20px 16px;gap:22px}
-.brand{display:flex;align-items:center;gap:8px;color:var(--ink)}
-.brand svg{flex:0 0 auto}
-.brand .wordmark{font:600 18px/1 var(--serif);letter-spacing:-.01em}
-.navlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
-.navlist li{margin:0}
-.navlist a{display:flex;align-items:center;justify-content:space-between;gap:8px;
-  padding:8px 10px;border-left:2px solid transparent;color:var(--ink-muted);
-  text-decoration:none;font-size:15px;border-radius:0 4px 4px 0}
-.navlist a:hover{color:var(--ink)}
-.navlist a.active{border-left-color:var(--ink);color:var(--ink);font-weight:600}
-.navlist .count{font-size:13px;color:var(--ink-muted)}
-.navlist .count.used{color:var(--used)}
-.sidefoot{margin-top:auto;padding-top:16px;border-top:1px solid var(--line);
-  display:flex;flex-direction:column;gap:10px;font-size:13px;color:var(--ink-muted)}
-.drophint{background:none;border:0;padding:0;margin:0;text-align:left;color:var(--ink-muted);
-  font-size:13px;line-height:1.4;cursor:pointer}
-.drophint:hover{color:var(--ink)}
-.rung{color:var(--ink-muted);text-decoration:none;font-size:13px}
-.rung:hover{color:var(--ink);text-decoration:underline}
-
-/* ---------------------------------------------------------------- content */
-.content{flex:1;min-width:0;padding:32px;max-width:944px}
-.pageheader{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:28px}
-.pageheader h1{font:600 24px/1.2 var(--serif);letter-spacing:-.01em;margin:0}
-.pageheader .state{font:15px/1.4 var(--sans);color:var(--ink-muted)}
-.sectiontitle{font:600 18px/1.3 var(--serif);letter-spacing:-.01em;margin:0 0 4px}
-.subtitle{font:600 15px/1.3 var(--sans);color:var(--ink);margin:24px 0 8px}
-.intro{color:var(--ink-muted);font-size:15px;margin:0 0 20px;max-width:64ch}
-.content p{margin:0 0 10px}
-.muted{color:var(--ink-muted)}
-.mono{font-family:var(--mono)}
-.serif{font-family:var(--serif)}
-.k{font-family:var(--mono);font-size:13px}
-
-/* ------------------------------------------------------------------ ledger */
-.ledger{border-top:1px solid var(--line)}
-.ledgerrow{border-bottom:1px solid var(--line)}
-.rowmain{display:flex;align-items:center;gap:12px;padding:12px 4px}
-.chevron{background:none;border:0;padding:2px 4px;cursor:pointer;color:var(--ink-muted);
-  font-size:15px;line-height:1;flex:0 0 auto}
-.chevron:hover{color:var(--ink)}
-.rowname{flex:1;min-width:0}
-input[type=text].nameinput{font:600 15px var(--serif);background:transparent;border:1px solid transparent;
-  border-radius:4px;padding:2px 4px;margin:-2px 0 0 -4px;width:100%;color:var(--ink)}
-input[type=text].nameinput:hover{border-color:var(--line)}
-input[type=text].nameinput:focus{border-color:var(--line);background:var(--panel)}
-.rowdesc{font-size:13px;color:var(--ink-muted);margin-top:2px}
-.rowcount{flex:0 0 auto;font-size:13px;color:var(--ink-muted);white-space:nowrap}
-.rowuse{flex:0 0 auto}
-.quiet{background:none;border:0;padding:4px 6px;cursor:pointer;color:var(--ink-muted);font-size:13px;border-radius:4px}
-.quiet:hover{color:var(--ink);text-decoration:underline}
-.quiet.on{color:var(--used)}
-.quiet.wax{color:var(--wax)}
-.quiet.wax:hover{color:var(--wax)}
-.quiet:disabled{cursor:default;text-decoration:none}
-/* A single one-line control, not a stray span the name is edited with — click
-   turns it into an input; Enter/blur saves through /api/env describe, Escape
-   reverts. No separate boxed field duplicates it below the row. */
-.editrow{margin-top:2px}
-.editspan{cursor:pointer;display:inline-block;max-width:100%;border-bottom:1px dotted transparent}
-.editspan:hover{border-bottom-color:var(--ink-muted)}
-.editspan.placeholder{font-style:italic}
-/* An unset "when to use it" is an invitation, not information: offer it only once the row is open. */
-.ledgerrow:not(.open) .editrow.empty[data-field=whenToUse]{display:none}
-input[type=text].editinput{background:var(--panel);border:1px solid var(--line);border-radius:4px;
-  padding:2px 6px;margin:-2px 0 0 -6px;font-size:13px;color:var(--ink);width:100%;max-width:60ch}
-input[type=text].editinput:focus{border-color:var(--ink);outline:none}
-.rowdetail{padding:0 4px 16px 32px}
-/* Dimming is only for the boundary-disabled reorder arrows — an informational
-   label like "always used" must keep full-strength colour, or the "used" green
-   drops below the 4.5:1 contrast floor (measured: 1.68:1 at 35% opacity). */
-.resline .updown button:disabled{opacity:.35}
-
-/* --------------------------------------------------------------- redrows */
-.redrow{display:flex;align-items:center;gap:10px;padding:6px 0}
-.redkey{font-family:var(--mono);font-size:13px;min-width:170px;flex:0 0 auto;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.redbar{position:relative;flex:1;min-width:0;height:30px;border-radius:4px;overflow:hidden}
-.redbar .layer{position:absolute;inset:0;display:flex;align-items:center;
-  padding:0 10px;font-family:var(--mono);font-size:13px;white-space:nowrap;overflow:hidden}
-.redbar .value{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
-.redbar .masked{background:var(--ink);color:var(--paper);transition:transform .16s ease}
-.redbar.open .masked{transform:translateY(-100%)}
-@media (prefers-reduced-motion:reduce){.redbar .masked{transition:none}}
-.redactions{flex:0 0 auto;display:flex;gap:2px;align-items:center;flex-wrap:wrap}
-/* One word-button, not a native select with a floating arrow: the select
-   itself carries the "Move to…" label, appearance:none removes the native
-   arrow, and .moveto draws a single small chevron of its own over it. */
-.moveto{position:relative;display:inline-flex;align-items:center}
-select.moveselect{appearance:none;-webkit-appearance:none;-moz-appearance:none;
-  background:none;border:0;color:var(--ink-muted);font-size:13px;font-family:inherit;
-  padding:4px 16px 4px 6px;border-radius:4px;cursor:pointer;max-width:150px}
-select.moveselect:hover{color:var(--ink)}
-.moveto::after{content:"⌄";position:absolute;right:5px;top:50%;transform:translateY(-52%);
-  pointer-events:none;color:var(--ink-muted);font-size:11px}
-.moveto:hover::after{color:var(--ink)}
-.addrow{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}
-.addrow input{flex:1;min-width:120px}
-.addrow button{flex:0 0 auto}
-.addrow .deleteset{margin-left:auto}
-
-/* ----------------------------------------------------------------- forms */
-button.primary{background:var(--ink);color:var(--paper);border:1px solid var(--ink);
-  border-radius:4px;padding:7px 14px;font-size:14px;cursor:pointer}
-button.primary:hover{opacity:.9}
-input[type=text],input[type=password],select.plain{
-  font-size:14px;padding:7px 9px;border:1px solid var(--line);border-radius:4px;
-  background:var(--panel);color:var(--ink)}
-input:focus,select:focus,button:focus,a:focus{outline:2px solid var(--ink);outline-offset:2px}
-input:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-input[type=checkbox],input[type=radio]{accent-color:var(--ink)}
-
-/* ----------------------------------------------------------- empty state */
-.empty{color:var(--ink-muted);padding:24px 4px;border-top:1px dashed var(--line);font-size:14px}
-
-/* A section's intro/subtitle line with its "New set" action on the same
-   line, right-aligned — so the button reads as an action next to what it
-   acts on, not a stray label floating in the ledger. */
-.sectionhead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;
-  flex-wrap:wrap;margin:0 0 8px}
-.sectionhead .intro,.sectionhead .subtitle{margin:0}
-.newbtn{background:none;border:1px solid var(--line);color:var(--ink);border-radius:4px;
-  font-size:13px;padding:4px 10px;cursor:pointer;flex:0 0 auto;white-space:nowrap}
-.newbtn:hover{border-color:var(--ink-muted)}
-.newbtn[aria-expanded=true]{border-color:var(--ink)}
-
-/* -------------------------------------------------------------- setup box */
-.panelbox{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin:0 0 20px}
-.panelbox h3{font:600 15px var(--sans);margin:0 0 8px}
-.checkline{display:flex;align-items:center;gap:7px;margin:12px 0}
-.gorow{margin-top:16px}
-
-/* --------------------------------------------------------- resolution list */
-.resolution{margin:0 0 8px;padding:0;border-top:1px solid var(--line)}
-.resline{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--line);font-size:14px}
-.resline .num{font-family:var(--mono);color:var(--ink-muted);flex:0 0 20px}
-.resline .reslabel{flex:1;font-family:var(--serif)}
-.resline .updown{display:flex;gap:4px;flex:0 0 auto}
-.resline .updown button{width:24px;height:24px;padding:0;font-size:13px;line-height:1;
-  border:1px solid transparent;border-radius:4px}
-.resline .updown button:hover:not(:disabled),.resline .updown button:focus-visible{border-color:var(--line)}
-.rule{color:var(--ink-muted);font-size:13px;margin:10px 0 24px}
-
-/* ------------------------------------------------------------- team rows */
-.teamrow{display:flex;align-items:center;gap:16px;padding:10px 4px;flex-wrap:wrap}
-.teamrow .rowname{flex:1;min-width:120px}
-.teamrow .rowmeta{flex:0 0 auto;font-size:13px;color:var(--ink-muted);min-width:70px}
-
-/* ------------------------------------------------------------- agent rows */
-.statusrow{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--line)}
-.statusdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--ink-muted)}
-.statusdot.ok{background:var(--used)}
-.statuslabel{flex:1;font-size:14px}
-.statusfix{font-family:var(--mono);font-size:12.5px;color:var(--ink-muted)}
-.switchrow{display:flex;align-items:center;justify-content:space-between;gap:12px;
-  padding:8px 4px;border-bottom:1px solid var(--line);max-width:60ch}
-.switch{position:relative;display:inline-block;width:36px;height:20px;flex:0 0 auto}
-.switch input{opacity:0;width:100%;height:100%;margin:0;position:absolute;inset:0;cursor:pointer;z-index:1}
-.switch .track{position:absolute;inset:0;background:var(--line);border-radius:10px;pointer-events:none}
-.switch .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
-  background:var(--panel);pointer-events:none;transition:none}
-.switch input:checked ~ .track{background:var(--ink)}
-.switch input:checked ~ .knob{left:18px}
-.switch input:focus-visible ~ .track{outline:2px solid var(--ink);outline-offset:2px}
-
-/* -------------------------------------------------------------- activity */
-.auditrow{display:flex;align-items:baseline;gap:14px;padding:7px 4px;border-bottom:1px solid var(--line);font-size:13.5px}
-.auditrow .when{flex:0 0 84px;color:var(--ink-muted)}
-.auditrow .who{flex:0 0 48px;color:var(--ink-muted);font-family:var(--mono)}
-.auditrow .what{flex:1}
-
-/* --------------------------------------------------------------- dropzone */
-.dropzone{position:fixed;inset:12px;border:3px dashed var(--ink);border-radius:8px;
-  background:var(--panel);display:none;align-items:center;justify-content:center;
-  z-index:50;font:600 17px var(--serif);color:var(--ink);pointer-events:none;text-align:center}
-.dropzone.on{display:flex}
-.modalback{position:fixed;inset:0;background:rgba(20,33,61,.4);display:flex;
-  align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto;z-index:40}
-.modalback[hidden]{display:none}
-.modalpanel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  padding:20px 22px;max-width:760px;width:100%}
-.bulk{display:flex;gap:9px;margin:12px 0;flex-wrap:wrap}
-.bulk input,.bulk select{flex:1;min-width:160px}
-.namer{border:1px solid var(--line);border-radius:4px;padding:12px 14px;margin:12px 0}
-.file{font-size:12px;color:var(--ink-muted);margin:16px 0 4px;font-weight:600}
-.stagerow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)}
-.stagerow .k{min-width:150px;flex:0 0 auto}
-.stagerow select{max-width:180px}
-.warn{font-size:12px;color:var(--wax)}
-.hint{font-size:12px;color:var(--used)}
-.stagefoot{display:flex;gap:12px;align-items:center;margin-top:16px;flex-wrap:wrap}
-.stagefoot label{font-size:13px;color:var(--ink-muted);display:flex;align-items:center;gap:6px}
-
-/* ------------------------------------------------------------------ toast */
-.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:22px;background:var(--ink);
-  color:var(--paper);padding:9px 16px;border-radius:4px;font-size:13px;opacity:0;
-  transition:opacity .16s;pointer-events:none;max-width:90vw}
-.toast.on{opacity:1}
-@media (prefers-reduced-motion:reduce){.toast{transition:none}}
-
-/* -------------------------------------------------------------- responsive */
-@media (max-width:800px){
-  .shell{flex-direction:column}
-  /* flex-wrap so the sidefoot (drop hint + rung) is forced onto its own row
-     below brand+nav via flex-basis:100%, rather than competing with the tabs
-     for width in the same row and squeezing "Library" down to "Li…". */
-  .sidebar{width:auto;flex:0 0 auto;flex-direction:row;flex-wrap:wrap;align-items:center;
-    padding:12px 16px;gap:4px 16px}
-  .brand{flex:0 0 auto}
-  /* The tab row scrolls on its own axis rather than shrinking its labels —
-     min-width:0 lets a flex child shrink below its content size at all, which
-     is what makes its own overflow-x take over instead of wrapping text. */
-  .navlist{flex-direction:row;gap:4px;flex-wrap:nowrap;flex:1 1 auto;min-width:0;
-    overflow-x:auto;overflow-y:hidden;padding-right:24px;
-    -ms-overflow-style:none;scrollbar-width:none}
-  .navlist::-webkit-scrollbar{display:none}
-  .navlist li{flex:0 0 auto}
-  .navlist a{border-left:0;border-bottom:2px solid transparent;padding:6px 8px;
-    border-radius:4px 4px 0 0;white-space:nowrap}
-  .navlist a.active{border-left-color:transparent;border-bottom-color:var(--ink)}
-  .sidefoot{flex:1 1 100%;order:3;margin-top:4px;padding-top:10px;border-top:1px solid var(--line);
-    flex-direction:row;gap:14px;flex-wrap:wrap}
-  .content{padding:20px}
-}
-@media (max-width:480px){
-  .navlist .count{display:none}
-}
-@media (max-width:400px){
-  .content{padding:14px}
-  .redkey{min-width:100px}
-  .teamrow{flex-wrap:wrap}
-  .pageheader{gap:6px}
-}
-</style></head><body>
-<div class="shell">
-<nav class="sidebar" aria-label="Sections">
-  <div class="brand"><svg viewBox="0 0 64 64" width="28" height="28" aria-hidden="true"><rect x="10" y="6" width="44" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="4"/><rect x="20" y="18" width="24" height="3" rx="1.5" fill="currentColor" opacity="0.45"/><rect x="18" y="28" width="28" height="9" rx="2" fill="currentColor"/><rect x="20" y="45" width="16" height="3" rx="1.5" fill="currentColor" opacity="0.45"/></svg><span class="wordmark">hush</span></div>
-  <ul class="navlist" id="navlist"></ul>
-  <div class="sidefoot">
-    <div id="drophint-holder"></div>
-    <a href="#agent" class="rung" id="runglink"></a>
-  </div>
-</nav>
-<main class="content">
-  <header class="pageheader">
-    <h1 id="foldername"></h1>
-    <div class="state" id="folderstate"></div>
-  </header>
-  <div id="sectionbody"></div>
-</main>
-</div>
-<div class="modalback" id="modalback" hidden><div class="modalpanel" id="modalpanel"></div></div>
-<div class="dropzone" id="drop">Drop .env files to bring them in</div>
-<input type="file" id="picker" multiple hidden>
-<div class="toast" id="toast"></div>
-<script>
-const T="__TOKEN__";
-let S=null;
-const $=(h)=>{const d=document.createElement("div");d.innerHTML=h.trim();return d.firstChild};
-const esc=(s)=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-
-function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.classList.add("on");
-  clearTimeout(t._x);t._x=setTimeout(()=>t.classList.remove("on"),2600)}
-
-async function api(path,body){
-  const r=await fetch(path,{method:body?"POST":"GET",headers:{"x-hush-token":T,"content-type":"application/json"},
-    body:body?JSON.stringify(body):undefined});
-  const j=await r.json();
-  if(!r.ok){toast(j.error||"failed");throw new Error(j.error)}
-  return j;
-}
-async function refresh(next){S=next||await api("/api/state");render()}
-
-/** 1st, 2nd, 3rd, 4th, … — how a set's place in the resolution order is shown. */
-function ordinal(n){
-  if(n%10===1&&n%100!==11)return n+"st";
-  if(n%10===2&&n%100!==12)return n+"nd";
-  if(n%10===3&&n%100!==13)return n+"rd";
-  return n+"th";
-}
-
-async function retag(scope,key,note){
-  await refresh(await api("/api/tag",{scope,key,note}));
-  toast(note?"tagged "+key:"tag cleared");
-}
-async function setSecret(scope,key,value,where){
-  const r=await api("/api/secret",{scope,key,value,where});
-  await refresh(r);
-  toast(r.vaultCreated?"made this folder's own vault — commit .hush/vault.json":(value===null?"deleted":"saved"));
-}
-async function reveal(scope,key,barEl,valueEl,where){
-  const {value}=await api("/api/reveal",{scope,key,where});
-  valueEl.textContent=value;
-  barEl.classList.add("open");
-  clearTimeout(barEl._hideTimer);
-  barEl._hideTimer=setTimeout(function(){barEl.classList.remove("open");valueEl.textContent=""},15000);
-}
-
-/* ------------------------------------------------------- redaction rows -- */
-
-function redactionRow(scope,s,where){
-  const row=$('<div class="redrow"></div>');
-  row.append($('<div class="redkey">'+esc(s.key)+'</div>'));
-
-  const bar=document.createElement("div");
-  bar.className="redbar";
-  const valueLayer=$('<div class="layer value"></div>');
-  const maskedLayer=$('<div class="layer masked">'+esc(s.preview)+'</div>');
-  bar.append(valueLayer,maskedLayer);
-  row.append(bar);
-
-  const actions=$('<div class="redactions"></div>');
-
-  const rv=$('<button type="button" class="quiet wax">Reveal</button>');
-  rv.setAttribute("aria-label","Reveal "+s.key);
-  rv.onclick=()=>reveal(scope,s.key,bar,valueLayer,where).catch(()=>{});
-  actions.append(rv);
-
-  const rep=$('<button type="button" class="quiet">Replace</button>');
-  rep.setAttribute("aria-label","Replace "+s.key);
-  rep.onclick=()=>{const nv=prompt("New value for "+s.key);if(nv)setSecret(scope,s.key,nv,where)};
-  actions.append(rep);
-
-  const here=where||"project";
-  const dests=(here==="library"?S.library:S.project).map(function(x){return {name:x.name,label:x.label}})
-    .filter(function(x){return x.name!==scope});
-  if(dests.length){
-    // One control, not a select sitting loose next to a floating native arrow:
-    // .moveto draws its own chevron over an appearance:none select, so the
-    // whole thing reads as a single word-button like Replace beside it.
-    const mvWrap=document.createElement("span");
-    mvWrap.className="moveto";
-    const mv=document.createElement("select");
-    mv.className="moveselect";
-    mv.setAttribute("aria-label","Move "+s.key+" to another set");
-    mv.append($('<option value="">Move to…</option>'));
-    dests.forEach(function(d){mv.append($('<option value="'+esc(d.name)+'">'+esc(d.label)+'</option>'))});
-    mv.onchange=async function(){
-      if(!mv.value)return;
-      const to=mv.value;mv.value="";
-      try{await refresh(await api("/api/move",{where:here,key:s.key,from:scope,to:to}));toast("moved "+s.key)}
-      catch(e){toast(e.message)}
-    };
-    mvWrap.append(mv);
-    actions.append(mvWrap);
-  }
-
-  const del=$('<button type="button" class="quiet wax">Delete</button>');
-  del.setAttribute("aria-label","Delete "+s.key);
-  del.onclick=()=>{if(confirm("Delete "+s.key+"?"))setSecret(scope,s.key,null,where)};
-  actions.append(del);
-
-  row.append(actions);
-  return row;
-}
-
-/* ------------------------------------------------------------ ledger rows */
-
-/**
- * A muted line that becomes a text input on click — the description and
- * when-to-use line under a set's name. Exactly one representation: no
- * permanently-visible boxed field duplicates the same text below the row.
- */
-function editableRow(set,where,field,value,placeholder,ariaLabel){
-  const holder=document.createElement("div");
-  holder.className="rowdesc editrow";
-  holder.setAttribute("data-field",field);
-  let current=value||"";
-
-  const span=document.createElement("span");
-  span.className="editspan";
-  span.tabIndex=0;
-  span.setAttribute("role","button");
-
-  const showSpan=()=>{
-    holder.innerHTML="";
-    span.textContent=current||placeholder;
-    span.classList.toggle("placeholder",!current);
-    holder.classList.toggle("empty",!current);
-    span.setAttribute("aria-label","Edit "+ariaLabel);
-    holder.append(span);
-  };
-
-  const showInput=()=>{
-    const input=document.createElement("input");
-    input.type="text";input.className="editinput";input.value=current;input.placeholder=placeholder;
-    input.setAttribute("aria-label",ariaLabel);
-    holder.innerHTML="";holder.append(input);
-    input.focus();input.select();
-    let settled=false;
-    const save=async()=>{
-      if(settled)return;settled=true;
-      const next=input.value.trim();
-      if(next===current){showSpan();return}
-      const patch={action:"describe",where:where,name:set.name};patch[field]=next;
-      try{current=next;await refresh(await api("/api/env",patch))}
-      catch(e){toast(e.message);showSpan()}
-    };
-    input.onblur=save;
-    input.onkeydown=(ev)=>{
-      if(ev.key==="Enter"){input.blur()}
-      else if(ev.key==="Escape"){settled=true;showSpan()}
-    };
-  };
-
-  span.onclick=showInput;
-  span.onkeydown=(ev)=>{if(ev.key==="Enter"){ev.preventDefault();showInput()}};
-  showSpan();
-  return holder;
-}
-
-function setRow(set,where){
-  const row=document.createElement("div");
-  row.className="ledgerrow";
-  const detailId="detail-"+where+"-"+set.name.replace(/[^a-zA-Z0-9]/g,"_");
-
-  const main=$('<div class="rowmain"></div>');
-
-  const chev=$('<button type="button" class="chevron" aria-expanded="false">›</button>');
-  chev.setAttribute("aria-controls",detailId);
-  chev.setAttribute("aria-label","Show keys for "+set.label);
-  main.append(chev);
-
-  const nameWrap=$('<div class="rowname"></div>');
-  const nm=document.createElement("input");
-  nm.type="text";nm.className="nameinput";nm.value=set.label;nm.placeholder="name this set";
-  nm.setAttribute("aria-label","Rename "+set.label);
-  let lastName=set.label;
-  nm.onblur=async()=>{
-    const next=nm.value.trim();
-    if(!next||next===lastName){nm.value=lastName;return}
-    try{
-      const r=await api("/api/env",{action:"rename",where:where,name:set.name,label:next});
-      lastName=next;await refresh(r);
-      toast("renamed to "+next);
-    }catch(e){nm.value=lastName;toast(e.message)}
-  };
-  nm.onkeydown=(ev)=>{if(ev.key==="Enter")nm.blur();if(ev.key==="Escape"){nm.value=lastName;nm.blur()}};
-  nameWrap.append(nm);
-
-  const descFallback=(where==="library"&&set.name==="default")
-    ?"your global environment — under everything, in every folder":"what is this for?";
-  nameWrap.append(editableRow(set,where,"description",set.description,descFallback,"description for "+set.label));
-  nameWrap.append(editableRow(set,where,"whenToUse",set.whenToUse,"When to use it","when to use "+set.label));
-  main.append(nameWrap);
-
-  const keyWord=set.keys.length===1?" key":" keys";
-  main.append($('<div class="rowcount">'+set.keys.length+esc(keyWord)+'</div>'));
-
-  const useWrap=$('<div class="rowuse"></div>');
-  if(where==="project"&&set.name==="default"){
-    const floor=$('<button type="button" class="quiet on" disabled>● always used · '+ordinal((set.position||0)+1)+'</button>');
-    floor.title="The default set of this project is always used, underneath everything else";
-    useWrap.append(floor);
-  }else{
-    const useLabel=set.used?("● Used here · "+ordinal(set.position+1)):"Use in this folder";
-    const use=$('<button type="button" class="quiet'+(set.used?" on":"")+'">'+esc(useLabel)+'</button>');
-    use.title=set.used?"Stop using it in this folder":"Use it in this folder";
-    use.onclick=async()=>{
-      const r=await api("/api/link",{name:set.name,use:!set.used});
-      await refresh(r);toast(set.used?"dropped "+set.name:"this project now uses "+set.name);
-    };
-    useWrap.append(use);
-  }
-  main.append(useWrap);
-  row.append(main);
-
-  const detail=document.createElement("div");
-  detail.className="rowdetail";detail.id=detailId;detail.hidden=true;
-
-  chev.onclick=()=>{
-    const open=chev.getAttribute("aria-expanded")==="true";
-    chev.setAttribute("aria-expanded",open?"false":"true");
-    chev.textContent=open?"›":"‹";
-    detail.hidden=open;
-    row.classList.toggle("open",!open);
-  };
-
-  if(set.secrets&&set.secrets.length){
-    set.secrets.forEach(function(sec){detail.append(redactionRow(set.name,sec,where))});
-  }
-
-  // The last line of the expanded row: the add-key fields on the left, and
-  // Delete this set at the far right of the very same line, not centered
-  // underneath it on a line of its own.
-  const addRow=document.createElement("form");addRow.className="addrow";
-  const ak=document.createElement("input");ak.type="text";ak.placeholder="KEY";ak.setAttribute("aria-label","New key name");
-  const av=document.createElement("input");av.type="password";av.placeholder="value";av.autocomplete="new-password";
-  av.setAttribute("aria-label","New key value");
-  addRow.append(ak,av);
-  const addBtn=document.createElement("button");addBtn.type="submit";addBtn.textContent="Add";
-  addRow.append(addBtn);
-  addRow.onsubmit=async(ev)=>{
-    ev.preventDefault();
-    if(!ak.value||!av.value)return;
-    await setSecret(set.name,ak.value.trim(),av.value,where);
-  };
-  const delBtn=$('<button type="button" class="quiet wax deleteset">Delete this set</button>');
-  delBtn.onclick=async()=>{
-    if(!confirm('Delete "'+set.label+'" and its '+set.keys.length+' key(s)? This cannot be undone.'))return;
-    await refresh(await api("/api/env",{action:"delete",where:where,name:set.name}));toast("deleted");
-  };
-  addRow.append(delBtn);
-  detail.append(addRow);
-
-  if(set.source)detail.append($('<div class="muted">from '+esc(set.source)+'</div>'));
-
-  row.append(detail);
-  return row;
-}
-
-/* ------------------------------------------------------------ new-set form */
-
-function promptForVars(where,scope,serviceLabel,vars){
-  const back=document.getElementById("sectionbody");
-  const box=document.createElement("div");box.className="panelbox";
-  box.append($('<h3>Fill in '+esc(serviceLabel)+'</h3>'));
-  const inputs=vars.map(function(name){
-    const row=$('<div class="redrow"></div>');
-    row.append($('<div class="redkey">'+esc(name)+'</div>'));
-    const vi=document.createElement("input");vi.type="password";vi.placeholder="value";vi.autocomplete="new-password";
-    row.append(vi);
-    box.append(row);
-    return {key:name,input:vi};
-  });
-  const save=$('<button type="button" class="primary">Save these values</button>');
-  save.onclick=async()=>{
-    let n=0;
-    for(const it of inputs){
-      if(!it.input.value)continue;
-      await api("/api/secret",{where:where,scope:scope,key:it.key,value:it.input.value});
-      n++;
-    }
-    await refresh(await api("/api/state"));
-    toast("saved "+n+" value(s)");
-  };
-  box.append(save);
-  back.insertBefore(box,back.firstChild);
-}
-
-function newSetForm(where,onDone){
-  const box=document.createElement("div");box.className="panelbox";
-  const f=document.createElement("form");f.className="addrow";
-  const nm=document.createElement("input");nm.type="text";nm.placeholder="name it — e.g. Acme Production";
-  const ds=document.createElement("input");ds.type="text";ds.placeholder="what is it for? (optional)";
-  f.append(nm,ds);
-  const svc=document.createElement("select");svc.className="plain";
-  svc.append($('<option value="">for a service… (optional)</option>'));
-  S.catalog.forEach(function(c){svc.append($('<option value="'+esc(c.id)+'">'+esc(c.label)+'</option>'))});
-  f.append(svc);
-  const submit=document.createElement("button");submit.type="submit";submit.className="primary";submit.textContent="Add set";
-  f.append(submit);
-  f.onsubmit=async(ev)=>{
-    ev.preventDefault();
-    if(!nm.value.trim())return;
-    const serviceLabel=svc.options[svc.selectedIndex].text;
-    try{
-      if(where==="library"&&!S.global.exists)await api("/api/global",{create:true});
-      const r=await api("/api/env",{action:"create",where:where,label:nm.value.trim(),description:ds.value,service:svc.value||undefined});
-      const created=r.created;
-      await refresh(r);
-      toast(r.vaultCreated?"made this folder's own vault — commit .hush/vault.json":"created "+nm.value.trim());
-      if(onDone)onDone();
-      if(created&&r.vars&&r.vars.length)promptForVars(where,created,serviceLabel,r.vars);
-    }catch(e){toast(e.message)}
-  };
-  box.append(f);
-  return box;
-}
-
-/**
- * The "New set" / "New set here" action — a bordered button that sits beside
- * a section's own intro or subtitle line (see .sectionhead), toggling a
- * full-width form panel in the caller-supplied holder below that line.
- */
-function newSetButton(where,buttonLabel,holder){
-  const btn=$('<button type="button" class="newbtn">'+esc(buttonLabel)+'</button>');
-  btn.setAttribute("aria-expanded","false");
-  btn.onclick=()=>{
-    if(holder.childNodes.length){holder.innerHTML="";btn.setAttribute("aria-expanded","false");return}
-    holder.append(newSetForm(where,function(){holder.innerHTML="";btn.setAttribute("aria-expanded","false")}));
-    btn.setAttribute("aria-expanded","true");
-  };
-  return btn;
-}
-
-function librarySetup(){
-  const box=document.createElement("div");box.className="panelbox";
-  box.append($("<h3>You have no library yet</h3>"));
-  box.append($('<p class="muted">A library holds your named env sets in one place, so a key lives in exactly one vault and every project points at it.</p>'));
-  const row=document.createElement("div");
-  const make=$('<button type="button" class="primary">Create one</button>');
-  make.onclick=async()=>{await refresh(await api("/api/global",{create:true}));toast("library created")};
-  row.append(make);
-  (S.global.others||[]).forEach(function(v){
-    const b=$('<button type="button" class="quiet">use my "'+esc(v)+'" vault</button>');
-    b.onclick=async()=>{await refresh(await api("/api/global",{name:v}));toast("library is now "+v)};
-    row.append(b);
-  });
-  box.append(row);
-  return box;
-}
-
-/**
- * "Set this folder up" — shown above the library when folder.state is
- * "unset". Nothing is written until the button: checkboxes and radios only
- * build up the list of names the click sends to /api/setup.
- */
-function setupPanel(){
-  const sug=S.suggestion||{needed:[],files:0,picks:[],ambiguous:[],uncovered:[],provider:{}};
-  const box=document.createElement("div");box.className="panelbox";
-  box.append($("<h3>This folder isn't set up for hush yet</h3>"));
-
-  if(sug.needed.length){
-    const word=sug.files===1?"file":"files";
-    box.append($('<p class="muted">Its code references '+esc(sug.needed.join(", "))+' ('+sug.files+' '+word+').</p>'));
-  }else{
-    box.append($('<p class="muted">No env-var references were found here — pick sets from your library below, or add one.</p>'));
-  }
-
-  if(!S.global.exists||!S.library.length){
-    box.append($('<p class="muted">Your library has nothing to offer yet — set it up below, then come back here.</p>'));
-  }
-
-  const checks={};
-  if(S.library.length){
-    if(sug.picks.length)box.append($('<p class="muted">Your library covers them:</p>'));
-    S.library.forEach(function(set){
-      const picked=sug.picks.indexOf(set.name)>-1;
-      const row=$('<div class="stagerow"></div>');
-      const cb=document.createElement("input");
-      cb.type="checkbox";cb.checked=picked;
-      cb.setAttribute("aria-label","Use "+set.label+" here");
-      checks[set.name]=cb;
-      row.append(cb);
-      row.append($('<div class="serif">'+esc(set.label)+'</div>'));
-      const covered=Object.keys(sug.provider).filter(function(k){return sug.provider[k]===set.name});
-      row.append($('<div class="muted mono">'+esc((covered.length?covered:set.keys).join(", "))+'</div>'));
-      box.append(row);
-    });
-  }
-
-  const radios={};
-  sug.ambiguous.forEach(function(a){
-    const row=$('<div class="stagerow"></div>');
-    row.append($('<div class="k">'+esc(a.key)+'</div>'));
-    row.append($('<div class="muted">is in more than one set</div>'));
-    const group=document.createElement("div");
-    radios[a.key]=group;
-    a.options.forEach(function(optName){
-      const set=S.library.find(function(x){return x.name===optName});
-      const label=document.createElement("label");
-      label.style.marginRight="12px";
-      const r=document.createElement("input");
-      r.type="radio";r.name="amb-"+a.key;r.value=optName;
-      label.append(r,document.createTextNode(" "+(set?set.label:optName)));
-      group.append(label);
-    });
-    row.append(group);
-    box.append(row);
-  });
-
-  if(sug.uncovered.length){
-    box.append($('<p class="muted">Not in your library: '+esc(sug.uncovered.join(", "))+' — add it to a set later</p>'));
-  }
-
-  const agentRow=document.createElement("label");
-  agentRow.className="muted checkline";
-  const agentCb=document.createElement("input");
-  agentCb.type="checkbox";
-  agentRow.append(agentCb,document.createTextNode(" An AI agent will use secrets here (turn approvals on)"));
-  box.append(agentRow);
-
-  const go=$('<button type="button" class="primary">Use these here</button>');
-  go.onclick=async function(){
-    const use=[];
-    Object.keys(checks).forEach(function(name){if(checks[name].checked)use.push(name)});
-    Object.keys(radios).forEach(function(key){
-      const chosen=radios[key].querySelector("input[type=radio]:checked");
-      if(chosen&&use.indexOf(chosen.value)<0)use.push(chosen.value);
-    });
-    try{
-      await refresh(await api("/api/setup",{use:use,agent:agentCb.checked}));
-      toast("this folder now uses "+use.length+" set(s)");
-    }catch(e){toast(e.message)}
-  };
-  const goRow=document.createElement("div");
-  goRow.className="gorow";
-  goRow.append(go);
-  box.append(goRow);
-  return box;
-}
-
-/* ---------------------------------------------------------------- library */
-
-function renderLibrary(){
-  const wrap=document.createElement("div");
-
-  if(S.global.error){
-    wrap.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
-    wrap.append($('<div class="empty">'+esc(S.global.error)+'</div>'));
-    return wrap;
-  }
-  if(!S.global.exists){
-    wrap.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
-    wrap.append(librarySetup());
-    return wrap;
-  }
-
-  const holder=document.createElement("div");
-  const head=$('<div class="sectionhead"></div>');
-  head.append($('<p class="intro">Yours alone, never in a repo. Any folder can use these.</p>'));
-  head.append(newSetButton("library","New set",holder));
-  wrap.append(head);
-  wrap.append(holder);
-
-  if(!S.library.length){
-    wrap.append($('<div class="empty">Nothing here yet. Drop a .env anywhere on this page, or make a set.</div>'));
-    return wrap;
-  }
-
-  const ledger=document.createElement("div");ledger.className="ledger";
-  S.library.forEach(function(set){ledger.append(setRow(set,"library"))});
-  wrap.append(ledger);
-  return wrap;
-}
-
-/* ------------------------------------------------------------ this folder */
-
-function renderFolder(){
-  const wrap=document.createElement("div");
-  const fstate=S.folder.state;
-
-  if(fstate==="unset"){
-    wrap.append(setupPanel());
-    return wrap;
-  }
-
-  wrap.append($('<h3 class="subtitle">What a run gets</h3>'));
-  const list=document.createElement("div");list.className="resolution";
-  (S.resolution||[]).forEach(function(line,idx){
-    const li=$('<div class="resline"></div>');
-    li.append($('<div class="num">'+(idx+1)+'</div>'));
-    li.append($('<div class="reslabel">'+esc(line.label)+' '+esc(line.note)+'</div>'));
-    if(line.first){
-      const controls=$('<div class="updown"></div>');
-      const up=$('<button type="button" class="quiet" aria-label="Move '+esc(line.label)+' earlier in the order">▴</button>');
-      const down=$('<button type="button" class="quiet" aria-label="Move '+esc(line.label)+' later in the order">▾</button>');
-      up.disabled=line.usedIndex===0;
-      down.disabled=line.usedIndex===S.used.length-1;
-      up.onclick=async()=>{
-        const order=S.used.slice();
-        const i=line.usedIndex;
-        const t=order[i-1];order[i-1]=order[i];order[i]=t;
-        await refresh(await api("/api/link",{order:order}));
-      };
-      down.onclick=async()=>{
-        const order=S.used.slice();
-        const i=line.usedIndex;
-        const t=order[i+1];order[i+1]=order[i];order[i]=t;
-        await refresh(await api("/api/link",{order:order}));
-      };
-      controls.append(up,down);
-      li.append(controls);
-      if(line.removable){
-        const stop=$('<button type="button" class="quiet">Stop using</button>');
-        stop.onclick=async()=>{
-          await refresh(await api("/api/link",{name:line.name,use:false}));
-          toast("dropped "+line.name);
-        };
-        li.append(stop);
-      }
-    }
-    list.append(li);
-  });
-  wrap.append(list);
-  wrap.append($('<p class="rule">Later wins on a shared key.</p>'));
-
-  const ownHolder=document.createElement("div");
-  const ownHead=$('<div class="sectionhead"></div>');
-  ownHead.append($("<h3 class=\"subtitle\">This folder's own sets</h3>"));
-  ownHead.append(newSetButton("project","New set here",ownHolder));
-  wrap.append(ownHead);
-  wrap.append(ownHolder);
-  if(fstate==="links-only"){
-    wrap.append($("<p class=\"muted\">No vault of its own yet — one is made the first time you add a secret here or a teammate.</p>"));
-  }else{
-    if(!S.project.length){
-      wrap.append($('<div class="empty">Nothing here yet. Drop a .env anywhere on this page, or make a set.</div>'));
-    }else{
-      const ledger=document.createElement("div");ledger.className="ledger";
-      S.project.forEach(function(set){ledger.append(setRow(set,"project"))});
-      wrap.append(ledger);
-    }
-  }
-  return wrap;
-}
-
-/* ------------------------------------------------------------------- team */
-
-function renderTeam(){
-  const wrap=document.createElement("div");
-  wrap.append($("<p class=\"intro\">People who can decrypt this folder's vault. Give someone access with the key they send you; removing them re-encrypts everything so their old copy decrypts nothing new.</p>"));
-
-  if(S.folder.state!=="vault"){
-    wrap.append($('<p class="muted">This folder has no vault yet. Adding a teammate makes one.</p>'));
-  }
-
-  if(S.members.length){
-    const ledger=document.createElement("div");ledger.className="ledger";
-    S.members.forEach(function(member){
-      const kindLabel=member.kind==="hardware"?"hardware":"key";
-      const row=$('<div class="ledgerrow teamrow"></div>');
-      row.append($('<div class="rowname serif">'+esc(member.name)+'</div>'));
-      row.append($('<div class="rowmeta">'+esc(member.role)+'</div>'));
-      row.append($('<div class="rowmeta mono">'+esc((member.fingerprint||"").slice(0,12))+'…</div>'));
-      row.append($('<div class="rowmeta">'+esc(kindLabel)+'</div>'));
-      if(member.name!==S.me.name){
-        const rm=$('<button type="button" class="quiet wax">Remove</button>');
-        rm.setAttribute("aria-label","Remove "+member.name);
-        rm.onclick=async()=>{
-          if(!confirm("Remove "+member.name+"? Removing them re-encrypts everything so their old copy decrypts nothing new."))return;
-          const r=await api("/api/team",{action:"remove",name:member.name});await refresh(r);
-          toast(r.vaultCreated?"made this folder's own vault — commit .hush/vault.json":(r.notice||"removed"));
-        };
-        row.append(rm);
-      }
-      ledger.append(row);
-    });
-    wrap.append(ledger);
-  }
-
-  const f=document.createElement("form");f.className="addrow";
-  const nm=document.createElement("input");nm.type="text";nm.placeholder="their name";
-  const pk=document.createElement("input");pk.type="text";pk.placeholder="hush_pk_…  (they run: hush id --create)";
-  f.append(nm,pk);
-  const submit=document.createElement("button");submit.type="submit";submit.className="primary";submit.textContent="Give them access";
-  f.append(submit);
-  f.onsubmit=async(ev)=>{
-    ev.preventDefault();
-    if(!nm.value||!pk.value)return;
-    const res=await api("/api/team",{name:nm.value.trim(),pk:pk.value.trim()});
-    await refresh(res);
-    toast(res.vaultCreated?"made this folder's own vault — commit .hush/vault.json":"added "+nm.value);
-    f.reset();
-  };
-  wrap.append(f);
-  return wrap;
-}
-
-/* ------------------------------------------------------------------ agent */
-
-function renderAgent(){
-  const wrap=document.createElement("div");
-  wrap.append($('<p class="intro">What an AI coding agent may do with these secrets, and what it must ask you for.</p>'));
-
-  const statusItems=[
-    {label:"MCP registered",ok:S.agent.mcpRegistered,fix:"hush install-mcp"},
-    {label:"Skill installed",ok:S.agent.skillInstalled,fix:"hush install-skill"},
-    {label:"Policy file present",ok:S.agent.policyFilePresent,fix:"hush install-mcp"},
-    {label:"Policy floor present",ok:S.agent.policyFloorPresent,fix:"create ~/.hush/policy.json"},
-  ];
-  statusItems.forEach(function(item){
-    const row=$('<div class="statusrow"></div>');
-    const dot=document.createElement("span");
-    dot.className="statusdot"+(item.ok?" ok":"");
-    row.append(dot);
-    row.append($('<div class="statuslabel">'+esc(item.label)+'</div>'));
-    if(!item.ok)row.append($('<div class="statusfix">'+esc(item.fix)+'</div>'));
-    wrap.append(row);
-  });
-
-  wrap.append($('<h3 class="subtitle">Asks first</h3>'));
-  const ACTIONS=[["run","Running a command with secrets injected"],["add","Adding a new secret"],["reveal","Revealing a value"],["request","Sending a secret to an API"]];
-  ACTIONS.forEach(function(pair){
-    const action=pair[0],label=pair[1];
-    const row=$('<div class="switchrow"></div>');
-    row.append($('<div>'+esc(label)+'</div>'));
-    const sw=document.createElement("label");sw.className="switch";
-    const cb=document.createElement("input");cb.type="checkbox";
-    cb.checked=S.policy.requireApproval.indexOf(action)>-1;
-    cb.setAttribute("aria-label","Ask before: "+label);
-    const track=document.createElement("span");track.className="track";
-    const knob=document.createElement("span");knob.className="knob";
-    sw.append(cb,track,knob);
-    cb.onchange=async()=>{
-      const chosen=new Set(S.policy.requireApproval);
-      if(cb.checked)chosen.add(action);else chosen.delete(action);
-      try{
-        S=await api("/api/policy",{requireApproval:Array.from(chosen)});
-        render();
-        toast("updated");
-      }catch(e){cb.checked=!cb.checked}
-    };
-    row.append(sw);
-    wrap.append(row);
-  });
-
-  // How long an "Allow" lasts, in plain words rather than seconds. The number
-  // is what the dialog's own button says, so it is the same choice seen twice.
-  const TTL_CHOICES=[[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"],[14400,"4 hours"],[86400,"all day"]];
-  const ttlRow=$('<div class="switchrow"></div>');
-  ttlRow.append($('<div>An \u201Callow\u201D lasts</div>'));
-  const ttlSel=document.createElement("select");ttlSel.className="plain";
-  ttlSel.setAttribute("aria-label","How long an allow lasts");
-  TTL_CHOICES.forEach(function(pair){
-    const o=document.createElement("option");o.value=String(pair[0]);o.textContent=String(pair[1]);
-    if(S.policy.approvalTtlSeconds===pair[0])o.selected=true;
-    ttlSel.append(o);
-  });
-  // A value set by hand that is not one of the choices must not be silently
-  // rewritten by simply opening this page, so it gets its own option.
-  if(!TTL_CHOICES.some(function(p){return p[0]===S.policy.approvalTtlSeconds})){
-    const o=document.createElement("option");
-    o.value=String(S.policy.approvalTtlSeconds);
-    o.textContent=Math.round(S.policy.approvalTtlSeconds/60)+" minutes (set by hand)";
-    o.selected=true;
-    ttlSel.append(o);
-  }
-  ttlSel.onchange=async()=>{
-    try{
-      S=await api("/api/policy",{requireApproval:S.policy.requireApproval,approvalTtlSeconds:Number(ttlSel.value)});
-      render();
-      toast("updated");
-    }catch(e){toast(String(e.message||e))}
-  };
-  ttlRow.append(ttlSel);
-  wrap.append(ttlRow);
-
-  const bioRow=$('<div class="switchrow"></div>');
-  bioRow.append($('<div>Approval by fingerprint</div>'));
-  bioRow.append($('<div class="statusfix">'+esc(S.policy.biometry)+' — change with hush secure</div>'));
-  wrap.append(bioRow);
-
-  return wrap;
-}
-
-/* --------------------------------------------------------------- activity */
-
-function relTime(iso){
-  const t=new Date(iso).getTime();
-  if(isNaN(t))return "";
-  const diff=Math.max(0,Math.round((Date.now()-t)/1000));
-  if(diff<60)return diff+"s ago";
-  const mins=Math.round(diff/60);
-  if(mins<60)return mins+" min ago";
-  const hrs=Math.round(mins/60);
-  if(hrs<24)return hrs+" hr ago";
-  const days=Math.round(hrs/24);
-  return days+" day"+(days===1?"":"s")+" ago";
-}
-
-function describeEvent(entry){
-  const skip={at:1,actor:1,action:1};
-  const parts=[];
-  Object.keys(entry).forEach(function(k){
-    if(skip[k])return;
-    const v=entry[k];
-    if(v===undefined||v===null||v==="")return;
-    parts.push(k+": "+(Array.isArray(v)?v.join(", "):String(v)));
-  });
-  return parts.join(", ");
-}
-
-let AUDIT=[];
-
-function renderAuditBox(){
-  const box=document.getElementById("auditbox");
-  if(!box)return;
-  box.innerHTML="";
-  if(!AUDIT.length){box.append($('<p class="muted">Nothing yet.</p>'));return}
-  AUDIT.forEach(function(entry){
-    const row=$('<div class="auditrow"></div>');
-    row.append($('<div class="when">'+esc(relTime(entry.at))+'</div>'));
-    row.append($('<div class="who">'+esc(entry.actor||"")+'</div>'));
-    const detail=describeEvent(entry);
-    const what=esc(entry.action||"")+(detail?" — "+esc(detail):"");
-    row.append($('<div class="what">'+what+'</div>'));
-    box.append(row);
-  });
-}
-
-async function loadAudit(){
-  try{
-    const r=await api("/api/audit",{});
-    AUDIT=r.entries||[];
-  }catch(e){/* api() already reported it */}
-  renderAuditBox();
-}
-
-function renderActivity(){
-  const wrap=document.createElement("div");
-  const box=document.createElement("div");box.id="auditbox";
-  wrap.append(box);
-  loadAudit();
-  return wrap;
-}
-
-/* --------------------------------------------------------- staging modal -- */
-
-let STAGES=[];        // [{stageId,file,entries,rejected}]
-let CHOICE={};        // stageId|key -> {scope,note,include}   (per row, not per name)
-let EXTRA=[];         // scopes typed during review
-let OVERWRITE=false;
-let countBtn=null;
-let importing=false;
-
-/* Two dropped files may each define the same variable; keep their rows apart. */
-function ck(stageId,key){return stageId+"|"+key}
-
-function allScopes(){
-  const out=[];
-  (S.project||[]).forEach(function(e){out.push(e.name)});
-  (S.library||[]).forEach(function(s){if(out.indexOf(s.name)<0)out.push(s.name)});
-  EXTRA.forEach(function(x){if(out.indexOf(x)<0)out.push(x)});
-  return out;
-}
-
-function stagedCount(){return Object.keys(CHOICE).filter(function(k){return CHOICE[k].include}).length}
-
-function refreshCount(){
-  if(countBtn)countBtn.textContent="Import "+stagedCount()+" secret(s)";
-}
-
-/* Matches the server's limits, so an impossible file is refused before the tab
-   tries to hold it in memory rather than after. */
-const MAX_DROP_BYTES=2*1024*1024;
-const MAX_DROP_FILES=20;
-
-async function ingestFiles(files){
-  let list=[].slice.call(files);
-  if(!list.length)return;
-  if(list.length>MAX_DROP_FILES){
-    toast("taking the first "+MAX_DROP_FILES+" files");
-    list=list.slice(0,MAX_DROP_FILES);
-  }
-  let added=0;
-  for(const f of list){
-    if(f.size>MAX_DROP_BYTES){toast(f.name+" is too large to be a .env");continue}
-    let text;
-    try{text=await f.text()}catch(err){toast("could not read "+f.name);continue}
-    try{
-      const st=await api("/api/stage",{text:text,filename:f.name});
-      if(!st.entries.length&&!st.rejected.length){toast("no variables in "+f.name);continue}
-      STAGES.push(st);
-      // Pre-tag with the service hush recognised, so the common case is one click.
-      st.entries.forEach(function(e){CHOICE[ck(st.stageId,e.key)]={scope:e.suggestedScope,note:e.service||"",include:true}});
-      added++;
-    }catch(err){/* api() already reported it */}
-  }
-  if(added)render();
-}
-
-function scopeSelect(cid){
-  const sel=document.createElement("select");
-  allScopes().forEach(function(sc){
-    const o=document.createElement("option");
-    o.value=sc;o.textContent=sc;
-    if(CHOICE[cid].scope===sc)o.selected=true;
-    sel.append(o);
-  });
-  sel.onchange=function(){CHOICE[cid].scope=sel.value};
-  return sel;
-}
-
-function dropCard(){
-  const c=document.createElement("button");
-  c.type="button";c.className="drophint";
-  c.textContent="Drop a .env anywhere on the page";
-  c.onclick=function(){document.getElementById("picker").click()};
-  return c;
-}
-
-function stagingPanel(){
-  const c=document.createElement("div");
-  let total=0;STAGES.forEach(function(st){total+=st.entries.length});
-  c.append($('<h3>Review '+total+' variable(s)</h3>'));
-  c.append($('<p class="muted">Nothing is saved until you import. Values stay on this machine.</p>'));
-
-  const namer=document.createElement("div");namer.className="namer";
-  namer.append($("<p><b>Save all of this as one named set</b></p>"));
-  const nrow=document.createElement("div");nrow.className="bulk";
-  const setName=document.createElement("input");
-  setName.type="text";
-  const guess=STAGES.length===1?(STAGES[0].file||"").replace(/^\.env\.?/,"").replace(/[-_.]+/g," ").trim():"";
-  setName.placeholder="name it — e.g. Acme Production";
-  setName.value=guess?guess.charAt(0).toUpperCase()+guess.slice(1):"";
-  const setDesc=document.createElement("input");
-  setDesc.type="text";setDesc.placeholder="what is it for? (optional)";
-  const dest=document.createElement("select");dest.className="plain";
-  dest.append($('<option value="library">in my library — every project can use it</option>'));
-  dest.append($('<option value="project">in this project — shared with the team</option>'));
-  if(!S.global.exists)dest.value="project";
-  nrow.append(setName,setDesc);
-  namer.append(nrow);
-  const drow=document.createElement("div");drow.className="bulk";
-  drow.append(dest);
-  const go=document.createElement("button");go.type="button";go.className="primary";go.textContent="Save as a named set";
-  go.onclick=async function(){
-    const label=setName.value.trim();
-    if(!label){toast("give it a name first");return}
-    if(importing)return;importing=true;
-    try{
-      const where=dest.value;
-      if(where==="library"&&!S.global.exists){
-        await api("/api/global",{create:true});
-      }
-      const created=await api("/api/env",{action:"create",where:where,label:label,description:setDesc.value});
-      const scope=created.created;
-      if(!scope)throw new Error("could not create the set");
-      const batches=STAGES.map(function(st){
-        const assignments={};
-        st.entries.forEach(function(e){
-          const c2=CHOICE[ck(st.stageId,e.key)];
-          if(c2&&c2.include!==false)assignments[e.key]={scope:scope,note:(c2&&c2.note)||""};
-        });
-        return {stageId:st.stageId,assignments:assignments};
-      }).filter(function(b){return Object.keys(b.assignments).length});
-      const r=await api("/api/import",{stages:batches,where:where,overwrite:true});
-      if(where==="library")await api("/api/link",{name:scope,use:true});
-      STAGES=[];CHOICE={};EXTRA=[];countBtn=null;
-      await refresh(await api("/api/state"));
-      toast("saved "+label+(where==="library"?" — this project now uses it":""));
-    }catch(e){toast(e.message)}
-    finally{importing=false}
-  };
-  drow.append(go);
-  namer.append(drow);
-  namer.append($('<p class="muted">Or file them one by one below.</p>'));
-  c.append(namer);
-
-  const bar=document.createElement("div");bar.className="bulk";
-  const setAll=document.createElement("select");setAll.className="plain";
-  setAll.append($('<option value="">move all to…</option>'));
-  allScopes().forEach(function(sc){setAll.append($('<option value="'+esc(sc)+'">'+esc(sc)+'</option>'))});
-  setAll.onchange=function(){
-    if(!setAll.value)return;
-    Object.keys(CHOICE).forEach(function(k){CHOICE[k].scope=setAll.value});
-    renderModal();
-  };
-  const mk=document.createElement("input");
-  mk.type="text";
-  mk.placeholder="or a new scope, e.g. fal/acme — press enter";
-  mk.onkeydown=function(ev){
-    if(ev.key!=="Enter")return;
-    const v=mk.value.trim();
-    if(!v)return;
-    if(EXTRA.indexOf(v)<0)EXTRA.push(v);
-    Object.keys(CHOICE).forEach(function(k){CHOICE[k].scope=v});
-    mk.value="";renderModal();
-  };
-  bar.append(setAll,mk);
-  c.append(bar);
-
-  STAGES.forEach(function(st){
-    c.append($('<div class="file">'+esc(st.file)+'</div>'));
-    st.rejected.forEach(function(n){c.append($('<div class="muted">skipped '+esc(n)+' — not a usable variable name</div>'))});
-    st.entries.forEach(function(e){
-      const cid=ck(st.stageId,e.key);
-      const row=$('<div class="stagerow"></div>');
-      const cb=document.createElement("input");
-      cb.type="checkbox";cb.checked=CHOICE[cid].include;
-      cb.onchange=function(){CHOICE[cid].include=cb.checked;refreshCount()};
-      row.append(cb);
-      row.append($('<div class="k">'+esc(e.key)+'</div>'));
-      row.append($('<div class="muted">'+esc(e.preview)+(e.multiline?" · multi-line":"")+'</div>'));
-      if(e.existsIn.length)row.append($('<span class="warn">already in '+esc(e.existsIn.join(", "))+'</span>'));
-      else if(e.service)row.append($('<span class="hint">'+esc(e.service)+'</span>'));
-      row.append(scopeSelect(cid));
-      const tag=document.createElement("input");
-      tag.type="text";tag.placeholder="tag";tag.value=CHOICE[cid].note;
-      tag.oninput=function(){CHOICE[cid].note=tag.value};
-      row.append(tag);
-      c.append(row);
-    });
-  });
-
-  const foot=document.createElement("div");foot.className="stagefoot";
-  countBtn=document.createElement("button");countBtn.type="button";
-  countBtn.className="primary";
-  countBtn.onclick=doImport;
-  const ow=document.createElement("label");
-  const owc=document.createElement("input");
-  owc.type="checkbox";owc.checked=OVERWRITE;
-  owc.onchange=function(){OVERWRITE=owc.checked};
-  ow.append(owc,document.createTextNode("overwrite keys that already exist"));
-  const cancel=document.createElement("button");cancel.type="button";
-  cancel.className="quiet";
-  cancel.textContent="Discard";
-  cancel.onclick=async function(){
-    const ids=STAGES.map(function(st){return st.stageId});
-    STAGES=[];CHOICE={};EXTRA=[];countBtn=null;renderModal();
-    try{await api("/api/discard",{stageIds:ids})}catch(err){}
-    toast("discarded");
-  };
-  foot.append(countBtn,ow,cancel);
-  c.append(foot);
-  refreshCount();
-  return c;
-}
-
-async function doImport(){
-  if(importing)return;                       // a double click would re-send spent stages
-  if(!stagedCount()){toast("nothing selected");return}
-  importing=true;
-  if(countBtn){countBtn.disabled=true;countBtn.textContent="Importing…"}
-  try{
-    await runImport();
-  }catch(err){
-    // Leave the review on screen so the work is not lost, and let them retry.
-    if(countBtn){countBtn.disabled=false}
-    refreshCount();
-  }finally{
-    importing=false;
-  }
-}
-
-async function runImport(){
-  const batches=STAGES.map(function(st){
-    const assignments={};
-    st.entries.forEach(function(e){
-      const cid=ck(st.stageId,e.key);
-      if(!CHOICE[cid].include)return;
-      assignments[e.key]={scope:CHOICE[cid].scope,note:CHOICE[cid].note};
-    });
-    return {stageId:st.stageId,assignments:assignments};
-  });
-  const res=await api("/api/import",{stages:batches,overwrite:OVERWRITE});
-  STAGES=[];CHOICE={};EXTRA=[];countBtn=null;
-  await refresh(res);
-  let msg="imported "+res.imported.length;
-  if(res.skipped.length)msg+=", skipped "+res.skipped.length;
-  if(res.vaultCreated)msg+=" — made this folder's own vault, commit .hush/vault.json";
-  toast(msg);
-  if(res.unpinned&&res.unpinned.length){
-    const body=document.getElementById("sectionbody");
-    const box=document.createElement("div");box.className="panelbox";
-    box.append($("<h3>Not in use here yet</h3>"));
-    res.unpinned.forEach(function(u){
-      const row=$('<div class="redrow"></div>');
-      row.append($('<div class="redkey">'+esc(u.scope)+'</div>'));
-      row.append($('<div class="muted">'+u.keys+' key(s) — this project does not use this account, so hush run will not inject them</div>'));
-      const b=document.createElement("button");b.type="button";b.className="primary";b.textContent="Use it here";
-      b.onclick=async function(){await refresh(await api("/api/link",{name:u.scope,use:true}));toast("using "+u.scope+" here")};
-      row.append(b);
-      box.append(row);
-    });
-    body.insertBefore(box,body.firstChild);
-  }
-  if(res.skipped.length){
-    const body=document.getElementById("sectionbody");
-    const box=document.createElement("div");box.className="panelbox";
-    box.append($('<h3>Skipped '+res.skipped.length+'</h3>'));
-    res.skipped.forEach(function(sk){box.append($('<div class="redrow"><div class="redkey">'+esc(sk.key)+'</div><div class="muted">'+esc(sk.why)+'</div></div>'))});
-    body.insertBefore(box,body.firstChild);
-  }
-}
-
-function renderModal(){
-  const back=document.getElementById("modalback");
-  const panel=document.getElementById("modalpanel");
-  if(!STAGES.length){back.hidden=true;panel.innerHTML="";return}
-  panel.innerHTML="";
-  panel.append(stagingPanel());
-  back.hidden=false;
-}
-
-/* Drag anywhere on the window, not just onto a small target. */
-let dragDepth=0;
-function dz(){return document.getElementById("drop")}
-window.addEventListener("dragenter",function(ev){ev.preventDefault();dragDepth++;dz().classList.add("on")});
-window.addEventListener("dragover",function(ev){ev.preventDefault()});
-window.addEventListener("dragleave",function(ev){ev.preventDefault();if(--dragDepth<=0){dragDepth=0;dz().classList.remove("on")}});
-window.addEventListener("drop",function(ev){
-  ev.preventDefault();dragDepth=0;dz().classList.remove("on");
-  if(ev.dataTransfer&&ev.dataTransfer.files&&ev.dataTransfer.files.length)ingestFiles(ev.dataTransfer.files);
-});
-document.getElementById("picker").addEventListener("change",function(ev){
-  if(ev.target.files&&ev.target.files.length)ingestFiles(ev.target.files);
-  ev.target.value="";
-});
-document.getElementById("drophint-holder").append(dropCard());
-
-/* -------------------------------------------------------------- the shell */
-
-const SECTIONS=["library","folder","team","agent","activity"];
-const SECTION_TITLES={library:"Library",folder:"This folder",team:"Team",agent:"Agent",activity:"Activity"};
-
-function currentSection(){
-  const h=(location.hash||"").replace("#","");
-  return SECTIONS.indexOf(h)>-1?h:"library";
-}
-
-function sectionHeading(text){
-  return $('<h2 class="sectiontitle">'+esc(text)+'</h2>');
-}
-
-function renderNav(){
-  const nav=document.getElementById("navlist");
-  nav.innerHTML="";
-  const active=currentSection();
-  const libUsed=(S.library||[]).filter(function(x){return x.used}).length;
-  const folderUsed=(S.project||[]).filter(function(x){return x.used}).length;
-  const items=[
-    {id:"library",label:"Library",count:libUsed,bullet:true},
-    {id:"folder",label:"This folder",count:folderUsed,bullet:true},
-    {id:"team",label:"Team",count:S.members.length,bullet:false},
-    {id:"agent",label:"Agent",count:0},
-    {id:"activity",label:"Activity",count:0},
-  ];
-  items.forEach(function(it){
-    const li=document.createElement("li");
-    const a=document.createElement("a");
-    a.href="#"+it.id;
-    a.textContent=it.label;
-    if(it.id===active){a.className="active";a.setAttribute("aria-current","page")}
-    if(it.count>0){
-      const c=document.createElement("span");
-      c.className="count"+(it.bullet?" used":"");
-      c.textContent=(it.bullet?"●":"")+it.count;
-      a.append(c);
-    }
-    li.append(a);
-    nav.append(li);
-  });
-}
-
-function renderHeader(){
-  const name=S.folder.root.replace(/[\\/]+$/,"").split(/[\\/]/).pop()||S.folder.root;
-  document.getElementById("foldername").textContent=name;
-  const stateText=S.folder.state==="unset"?"not set up"
-    :S.folder.state==="links-only"?"no vault yet — uses library sets only"
-    :"vault committed to the repo";
-  document.getElementById("folderstate").textContent=stateText;
-}
-
-function renderSidefoot(){
-  document.getElementById("runglink").textContent="rung "+S.posture.rung+" of 5";
-}
-
-function render(){
-  renderHeader();
-  renderNav();
-  renderSidefoot();
-
-  const body=document.getElementById("sectionbody");
-  body.innerHTML="";
-  const sec=currentSection();
-  body.append(sectionHeading(SECTION_TITLES[sec]));
-  if(sec==="library")body.append(renderLibrary());
-  else if(sec==="folder")body.append(renderFolder());
-  else if(sec==="team")body.append(renderTeam());
-  else if(sec==="agent")body.append(renderAgent());
-  else if(sec==="activity")body.append(renderActivity());
-
-  renderModal();
-}
-window.addEventListener("hashchange",render);
-
-refresh().catch(function(e){document.getElementById("sectionbody").innerHTML='<div class="empty">'+esc(e.message)+'</div>'});
-</script></body></html>`;

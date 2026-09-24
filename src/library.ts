@@ -21,7 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Vault, namedVaultPath, ValidationError, loadUse, type EnvMeta } from "./vault.ts";
+import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
@@ -112,7 +112,24 @@ function lastMentionWins(names: string[]): string[] {
   return [...new Set([...names].reverse())].reverse();
 }
 
+/**
+ * How a project names the library's own `default` set in envs.json. The
+ * project has a `default` of its own, so the plain name would mean that one.
+ *
+ * The library is a catalog, not a floor: nothing in it reaches a folder until
+ * that folder asks for it. Its default set used to sit under every run in
+ * every folder, which made every key you ever saved "just to have it" part of
+ * every project on the machine.
+ */
+export const LIBRARY_DEFAULT = "library:default";
+
+/** The name to record in envs.json for a set living in `where`. */
+export function linkNameFor(where: "library" | "project", name: string): string {
+  return where === "library" && name === "default" ? LIBRARY_DEFAULT : name;
+}
+
 export function saveLinks(hushDir: string, use: string[]): void {
+  assertProjectHushDir(hushDir);
   mkdirSync(hushDir, { recursive: true });
   // Order is precedence (later wins), so the file keeps the order it was
   // given — never sorted — and mentioning a set again moves it to the end,
@@ -186,18 +203,23 @@ export function composeSets(
 
   for (const name of names) {
     if (name === "default") {
-      // "default" is two floors, not one. The library's default set is the
-      // global environment — the pile a value lands in when nobody named a
-      // set — and it sits under everything in every folder; the project's own
-      // default sits on top of it. An empty library default adds no layer,
-      // so the "using …" line stays honest about what was actually injected.
-      if (library && library.sets().some((s) => s.name === "default" && s.keys.length)) {
-        Object.assign(secrets, library.materialize(id, "default"));
-        layers.push(`${globalVaultName()}:default`);
-      }
+      // Only this project's own default. The library's is opt-in, below.
       if (project?.hasSet("default")) {
         Object.assign(secrets, project.materialize(id, "default"));
         layers.push("default");
+      }
+      continue;
+    }
+    if (name === LIBRARY_DEFAULT) {
+      // An empty library default adds no layer, so the "using …" line stays
+      // honest about what was actually injected.
+      if (library?.hasSet("default")) {
+        if (library.sets().some((s) => s.name === "default" && s.keys.length)) {
+          Object.assign(secrets, library.materialize(id, "default"));
+          layers.push(`${globalVaultName()}:default`);
+        }
+      } else {
+        missing.push(name);
       }
       continue;
     }
@@ -234,6 +256,7 @@ export function composeSets(
  * textual merge of two versions is a corrupt vault).
  */
 export function writeProjectDotfiles(hushDir: string): void {
+  assertProjectHushDir(hushDir);
   mkdirSync(hushDir, { recursive: true });
   const gitignore = join(hushDir, ".gitignore");
   if (!existsSync(gitignore)) {

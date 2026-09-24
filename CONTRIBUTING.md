@@ -7,8 +7,9 @@ cannot (Linux, Windows, a YubiKey I do not own).
 
 ## Getting set up
 
-You need Node 22.6 or newer. There is no build step and no dependencies to
-install — Node runs the TypeScript directly.
+You need Node 22.18 or newer (the first 22.x that runs TypeScript without a
+flag). There is no build step and no dependencies to install — Node runs the
+TypeScript directly. The published package itself still runs on 22.6+.
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git
@@ -97,6 +98,27 @@ without.
   editing a map key.
 - **The security ladder never blocks.** A tool that refuses to run until you buy
   a YubiKey gets uninstalled, and the person goes back to a plaintext `.env`.
+
+## Releasing
+
+Releases are published by `.github/workflows/release.yml`, never from a laptop.
+There is no npm token: npm's trusted publishing checks the workflow's GitHub
+identity, and the package page gets a provenance badge that links back to
+the commit.
+
+1. On a branch: `npm version <x.y.z> --no-git-tag-version`. This updates
+   `package.json`, `package-lock.json` and `src/version.ts`. Then move the
+   CHANGELOG's `Unreleased` notes under a `## x.y.z — date` heading.
+2. Merge that PR once CI is green.
+3. Tag the merge commit on `main` and push the tag:
+   `git tag vx.y.z && git push origin vx.y.z`.
+
+The workflow refuses a tag that does not match `package.json` and
+`src/version.ts`, runs the full suite, then publishes. The one-time setup is
+on npmjs.com: @omarei/hush → Settings → Trusted publishing → GitHub Actions,
+repository `omarei-omoto/hush`, workflow `release.yml`, **Allow npm publish**
+ticked. (For an approval step before each release, change the workflow's
+last line to `npm stage publish` and approve on npmjs.com.)
 
 ## Reporting a security problem
 

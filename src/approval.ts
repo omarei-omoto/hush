@@ -23,7 +23,7 @@
  */
 import { randomInt } from "node:crypto";
 import { platform } from "node:os";
-import { authenticate, type BiometryMode, type BiometryResult } from "./biometry.ts";
+import { authenticate, biometryStatus, type BiometryMode, type BiometryResult } from "./biometry.ts";
 import { detectBackend, ttlLabel } from "./dialogs.ts";
 
 export type Decision = "once" | "session" | "deny" | "timeout";
@@ -82,6 +82,15 @@ const currentBackend = (deps: Pick<ApprovalDeps, "platform" | "resolveDialogProg
     platform: deps.platform ?? platform,
     ...(deps.resolveDialogProgram ? { resolveProgram: deps.resolveDialogProgram } : {}),
   });
+
+/**
+ * Whether anything on this machine can put an approval in front of a human: a
+ * dialog program or a fingerprint reader. When neither exists every gated
+ * action is refused, so a caller about to turn approvals on should say so.
+ */
+export function approvalPromptAvailable(): boolean {
+  return Boolean(currentBackend()) || biometryStatus().available;
+}
 
 /**
  * scope -> epoch ms when the session approval lapses. Process-lifetime only.

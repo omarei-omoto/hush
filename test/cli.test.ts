@@ -1584,13 +1584,25 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
-  test("the deny floor holds even with allowCommands unset", () => {
+  // The deny list is for the agent's MCP tools (see mcp.test.ts). In a
+  // terminal it turns into a warning on the approval prompt, the way
+  // `op run` asks rather than refuses: an agent shelling out to `hush run`
+  // still has to get past a dialog it cannot click.
+  test("an interpreter goes to the approval prompt, not a flat refusal", () => {
     const p = project();
     try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const gated = p.run(["run", "--", "sh", "-c", "echo RAN"]);
+      assert.equal(gated.code, 1, gated.out);
+      assert.match(gated.out, /Approval denied/, "not routed through the approval gate");
+      assert.doesNotMatch(gated.out, /denied by default/);
+      assert.ok(!gated.out.includes("RAN"), "ran without an approval");
+
+      // No approval asked for: the person opted out, and their command runs.
       writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
-      const r = p.run(["run", "--", "env"]);
-      assert.equal(r.code, 1, r.out);
-      assert.match(r.out, /denied by default/);
+      const open = p.run(["run", "--quiet", "--", "sh", "-c", "echo RAN"]);
+      assert.equal(open.code, 0, open.out);
+      assert.match(open.out, /RAN/);
     } finally {
       p.cleanup();
     }
@@ -2488,11 +2500,19 @@ describe("a folder that isn't set up yet", () => {
       p.librarySet("acme-production", { FAL_KEY: "v" });
       writeFileSync(join(p.root, "index.js"), "process.env.FAL_KEY;\n");
 
+      // Declining is an answer, not an error.
       const r = p.run(["use"], "n\n");
-      assert.equal(r.code, 1, r.out);
-      assert.match(r.out, /Nothing set up/);
-      assert.match(r.out, /hush use <set> when you're ready/);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /Nothing saved here/);
       assert.ok(!existsSync(join(p.hushDir, "envs.json")), "envs.json was written despite declining");
+
+      // And a run that was declined still runs — with nothing, and saying so.
+      const marker = join(p.root, "ran.txt");
+      const run = p.run(["sh", "-c", `touch ${marker}`], "n\n");
+      assert.equal(run.code, 0, run.out);
+      assert.match(run.out, /running without secrets/);
+      assert.ok(existsSync(marker), "the declined run never ran");
+      assert.ok(!existsSync(join(p.hushDir, "envs.json")), "a declined run wrote envs.json");
     } finally {
       p.cleanup();
     }
@@ -3185,6 +3205,135 @@ describe("hush run --materialize", () => {
       const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /path=/);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("hush stays out of places it was not asked into", () => {
+  // Bites: ~/.hush and a project's .hush share a name, so the upward walk from
+  // any folder under $HOME found it. One `hush use` from the home folder wrote
+  // ~/.hush/envs.json and every folder beneath became part of that "project".
+  test("~/.hush is never a project, and nothing writes project files into it", () => {
+    const p = bareFolder();
+    const hushHome = join(p.root, ".hush");
+    p.env.HUSH_HOME = hushHome;
+    try {
+      p.librarySet("work", { WORK_KEY: "work_value_1234" });
+      const use = p.run(["use", "work"]);
+      assert.equal(use.code, 1, use.out);
+      assert.match(use.out, /not a project/);
+      assert.ok(!existsSync(join(hushHome, "envs.json")), "wrote envs.json into ~/.hush");
+
+      const init = p.run(["init"]);
+      assert.equal(init.code, 1, init.out);
+      assert.ok(!existsSync(join(hushHome, "vault.json")), "made a project vault in ~/.hush");
+
+      // A folder left in the old state is not picked up either.
+      writeFileSync(join(hushHome, "envs.json"), JSON.stringify({ use: ["work"] }));
+      const nested = join(p.root, "code", "app");
+      mkdirSync(nested, { recursive: true });
+      const r = spawnSync(process.execPath, [CLI, "root"], { cwd: nested, env: p.env, encoding: "utf8" });
+      assert.notEqual(r.status, 0, `a folder under $HOME resolved to ~/.hush: ${r.stdout}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: macOS's /var is a link to /private/var, so HUSH_HOME and the
+  // folder the walk reaches can be the same directory spelled two ways.
+  test("~/.hush is recognised through a symlinked path too", () => {
+    const p = bareFolder();
+    const real = join(p.root, "real");
+    const link = join(p.root, "link");
+    try {
+      mkdirSync(join(real, ".hush"), { recursive: true });
+      mkdirSync(join(real, "code", "app"), { recursive: true });
+      writeFileSync(join(real, ".hush", "envs.json"), JSON.stringify({ use: [] }));
+      symlinkSync(real, link);
+      p.env.HUSH_HOME = join(link, ".hush");
+      const r = spawnSync(process.execPath, [CLI, "root"], { cwd: join(real, "code", "app"), env: p.env, encoding: "utf8" });
+      assert.notEqual(r.status, 0, `~/.hush reached through a link was taken for a project: ${r.stdout}`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: the absolute path to one machine's node_modules went into the
+  // committed .mcp.json, wrong on every teammate's machine.
+  test("install-mcp registers a bare `hush mcp` when PATH's hush is this install", () => {
+    const p = project();
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+      const bin = join(p.home, "bin");
+      mkdirSync(bin);
+      symlinkSync(join(dirname(CLI), "..", "bin", "hush.js"), join(bin, "hush"));
+      p.env.HOME = fakeHome;
+      p.env.PATH = bin;
+      const r = p.run(["install-mcp"]);
+      assert.equal(r.code, 0, r.out);
+      const doc = JSON.parse(readFileSync(join(p.root, ".mcp.json"), "utf8")) as {
+        mcpServers: { hush: { command: string; args: string[] } };
+      };
+      assert.deepEqual(doc.mcpServers.hush, { command: "hush", args: ["mcp"] });
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  test("writing a policy says what it does to your own runs", () => {
+    const p = project();
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(fakeHome, { recursive: true });
+      p.env.HOME = fakeHome;
+      p.env.PATH = "";
+      const r = p.run(["install-mcp"]);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /yours too/);
+      // HUSH_NO_DIALOG: nothing here can show a prompt, and it has to say so.
+      assert.match(r.out, /every hush run here will be refused/);
+    } finally {
+      p.cleanup();
+    }
+  });
+
+  // Bites: the ladder only looked for a project vault, so a folder that uses
+  // library sets — the recommended model — was told "your secrets are not encrypted".
+  test("a folder that only uses library sets counts as encrypted", () => {
+    const p = bareFolder();
+    try {
+      p.librarySet("work", { WORK_KEY: "work_value_1234" });
+      assert.equal(p.run(["use", "work"]).code, 0);
+      const r = p.run(["level"]);
+      assert.match(r.out, /✓ secrets are encrypted at rest/, r.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("the library is a catalog, not a floor", () => {
+  test("its default reaches a folder only after `hush use default --library`", () => {
+    const p = bareFolder();
+    try {
+      p.librarySet("default", { CATCH_ALL: "catch_all_value_123" });
+      p.librarySet("work", { WORK_KEY: "work_value_1234" });
+      assert.equal(p.run(["use", "work"]).code, 0);
+
+      const before = p.run(["run", "--", "sh", "-c", 'echo "[${CATCH_ALL:-unset}]"']);
+      assert.equal(before.code, 0, before.out);
+      assert.match(before.out, /\[unset\]/, "the library's default leaked into a folder that never asked");
+
+      const use = p.run(["use", "default", "--library"]);
+      assert.equal(use.code, 0, use.out);
+      const links = JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] };
+      assert.deepEqual(links.use, ["work", "library:default"]);
+
+      const after = p.run(["run", "--", "sh", "-c", 'echo "[${CATCH_ALL:-unset}]"']);
+      assert.match(after.out, /\[redacted:CATCH_ALL\]/, after.out);
     } finally {
       p.cleanup();
     }

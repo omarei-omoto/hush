@@ -26,6 +26,7 @@ import {
   suggestSets,
   ensureProjectVault,
   writeProjectDotfiles,
+  LIBRARY_DEFAULT,
 } from "../src/library.ts";
 import { setNameFor } from "../src/services.ts";
 
@@ -295,9 +296,10 @@ describe("library: composeSets()", () => {
     });
   });
 
-  // Bites: resolving "default" from one vault only makes the library's default
-  // apply in vault-less folders and vanish the moment a project gets a vault.
-  test("the library's default is the global floor under the project's default, in every folder", () => {
+  // The library is a catalog, not a floor: its default reaches a folder only
+  // when that folder asks for it, and then under the project's own default
+  // only if listed before it (later wins, like every other set).
+  test("the library's default is used only in folders that add it", () => {
     const home = scratch();
     withHome(home, () => {
       const { owner, project, hushDir } = projectSetup();
@@ -307,14 +309,15 @@ describe("library: composeSets()", () => {
       library.save();
       project.set(owner, "default", "SHARED", "from-project");
 
-      const withProject = composeSets(project, owner, hushDir);
-      assert.equal(withProject.secrets.SHARED, "from-project", "the project's default must sit on top");
-      assert.equal(withProject.secrets.GLOBAL_ONLY, "everywhere", "the library's default was not injected under it");
-      assert.deepEqual(withProject.layers, [`${globalVaultName()}:default`, "default"]);
+      const untouched = composeSets(project, owner, hushDir);
+      assert.equal(untouched.secrets.GLOBAL_ONLY, undefined, "the library leaked into a folder that never asked");
+      assert.deepEqual(untouched.layers, ["default"]);
 
-      const noProject = composeSets(null, owner, hushDir);
-      assert.equal(noProject.secrets.GLOBAL_ONLY, "everywhere");
-      assert.deepEqual(noProject.layers, [`${globalVaultName()}:default`]);
+      saveLinks(hushDir, [LIBRARY_DEFAULT]);
+      const opted = composeSets(project, owner, hushDir);
+      assert.equal(opted.secrets.GLOBAL_ONLY, "everywhere");
+      assert.equal(opted.secrets.SHARED, "from-library", "a set added later wins, as always");
+      assert.deepEqual(opted.layers, ["default", `${globalVaultName()}:default`]);
     });
   });
 
@@ -326,6 +329,7 @@ describe("library: composeSets()", () => {
       const { owner, project, hushDir } = projectSetup();
       makeGlobalVault(home, owner).save();
       project.set(owner, "default", "K", "v");
+      saveLinks(hushDir, [LIBRARY_DEFAULT]);
       assert.deepEqual(composeSets(project, owner, hushDir).layers, ["default"]);
     });
   });

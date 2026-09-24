@@ -4,6 +4,121 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.5.0 — 2026-09-24
+
+### The app, redesigned around what you came to do
+
+`hush ui` is rebuilt. The old page was five sections of lists and jargon ("What
+a run gets", "rung 0 of 5"), with keys hidden behind a chevron and native
+`prompt()` boxes for editing. The new one:
+
+- **Opens on your project, and answers whether it will run.** The code is
+  scanned for the variables it reads, and each is shown as provided (by which
+  set) or missing. A missing key that an unused set already holds offers
+  **Use that set**; otherwise **Add** opens the add dialog with the name filled
+  in. The sidebar shows the missing count.
+- **Shows every key.** The sets a run gets appear in order, each with its keys
+  under a redaction bar. A key a later set overrides is struck through with
+  "overridden by …". Up and down change the order.
+- **Add secret** is always one click away. It handles multi-line values, saving
+  to any set, making a new set, and using that set here. It warns before
+  replacing an existing key.
+- **Reveal** says when it is waiting on your approval. It shows the value for 15
+  seconds with a visible countdown, offers Copy, and hides again.
+- **Import .env** is a single review dialog. Save everything as one named set
+  (library first when you have one), or file keys into existing sets one by
+  one. Closing it discards the upload server-side.
+- **Agent** shows setup as steps with copyable commands, approvals as switches
+  with plain descriptions, a warning when this machine can't show a prompt, and
+  your protection level with the next step.
+- **Activity** reads as sentences ("Ran npm with 4 secrets · agent"), grouped
+  by day.
+- **Menus and dialogs** replace `prompt()` and `confirm()`, with keyboard
+  support. There is a bottom tab bar on phones, and dark mode throughout.
+
+Under the hood, the page lives in `src/ui-page.ts`, and the DOM is built only
+through `textContent` and attributes. No string of HTML exists for a value to
+escape from, and a test forbids every API that could create one.
+`/api/state` adds `needs` (variable names and file paths, from a scan cached
+for 10 s), `posture.next` and `policy.promptAvailable`.
+
+### Changed — asks instead of refusing, and the library stays a library
+
+**Breaking (pre-1.0):** your library's `default` set is no longer injected into
+every folder. The library is a catalog: nothing in it reaches a project until
+that project adds it. To keep the old behaviour in a folder, run
+`hush use default --library` there. It is recorded as `library:default` in
+`.hush/envs.json`, and you can add more from the library later.
+
+- **Your own commands are no longer refused.** With a `.hush/policy.json`, the
+  CLI used to refuse `hush node server.js`, `hush python app.py`,
+  `hush bash deploy.sh` and a bun project's `hush dev`, all to the person who
+  typed them. varlock gates nothing and 1Password's `op run` asks rather than
+  blocks, so hush now does the same. With `run` approval on, these commands go
+  to the approval prompt with a warning line. An agent shelling out to
+  `hush run` still has to get a human to click Allow on that exact command.
+  The agent's MCP tools keep the hard deny, and an `allowCommands` list you
+  wrote still narrows both.
+- **The setup questions in a new folder can be declined.** Answering `n` (or
+  picking nothing) runs your command with nothing injected, says so, and
+  writes nothing. The folder is asked again next time. It used to exit with
+  "Nothing set up."
+
+### Less that hush does to a project without asking
+
+- **`hush install-mcp` and `hush install-skill` show what they will write, and
+  ask**, on a terminal. Detection is broad (a `~/.cursor` left over from a trial
+  counts), so registering hush for the one agent you use also dropped a
+  `.cursor/` into the repo and appended to your user-wide
+  `~/.codex/config.toml`. You now see the list, with files outside the project
+  marked, and answer `Y`, `n` or `pick`. `--yes`, `--for` and scripts are
+  unchanged. `install-skill` no longer quietly overwrites a skill file you
+  edited: an identical file is "already up to date", and a different one is
+  flagged before it is replaced.
+- **`.mcp.json` gets `hush mcp`, not a path to your `node_modules`**, whenever
+  the `hush` on PATH is the same install. Those files are committed, and the
+  absolute path (an nvm version folder, your home directory) was wrong on every
+  teammate's machine and on yours after the next Node upgrade.
+- **Turning approvals on says what it does to *your* runs.** The CLI enforces
+  the same policy as the agent's tools, so once `.hush/policy.json` exists,
+  every `hush run` asks first and `node`, `python`, `bash` and the other
+  interpreters are refused. `hush start`, `hush init` and `hush install-mcp`
+  now say so, with the undo. On a machine with no dialog program they also warn
+  that every run will be refused, where before your next `hush dev` simply
+  failed.
+- **`~/.hush` is never a project.** It shares a name with a project's `.hush`,
+  so the upward search found it from anywhere under `$HOME`. One `hush use`
+  from the home folder wrote `~/.hush/envs.json`, and every folder beneath
+  silently became part of that "project". A `hush install-mcp` there would even
+  have written the user-wide policy floor. It is now skipped when searching, and
+  writing project files into it is refused.
+
+### Fixed
+
+- `hush ui` crashed a moment after printing its link on any machine without
+  `xdg-open` (servers, containers, SSH sessions). It now says to open the link
+  yourself.
+- `hush install-mcp`, `hush install-skill` and the Touch ID helper broke under
+  any install path containing a space, because they read a URL-encoded path.
+- The app opens on **This folder** instead of an empty Library. An unnamed set
+  no longer renders as a 120px row with a stray dashed rule, because it had
+  picked up the empty-state style. All five tabs fit at phone width.
+  Fingerprint approval reads "none on this machine" where there is none.
+- The app and `hush doctor` count an agent as registered only when its config
+  actually has a `hush` entry. The app used to look only at `.mcp.json`, and
+  doctor accepted any `~/.codex/config.toml`.
+- A folder that uses only library sets is no longer nudged with "your secrets
+  are not encrypted". The `hush level` fix for a stray `.env` was
+  `hush import .env`, which fails without `--as`.
+- In a folder that is not set up, on a machine with no key yet, `hush <cmd>`
+  now points at `hush start` instead of `hush id --create`.
+- `/.env` in `.gitignore` counts as ignored in `hush start`.
+- From a clone on Node 22.6–22.17, which cannot run TypeScript without a flag,
+  `bin/hush.js` falls back to a build, or says what to do. The docs now say that
+  working from source needs Node 22.18.
+
+## 0.4.0 — 2026-09-16
+
 ### `hush install-mcp` learns which agent it is talking to
 
 It wrote `.mcp.json` — Claude Code's file — whatever agent was in the room, and

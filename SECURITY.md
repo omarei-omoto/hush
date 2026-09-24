@@ -186,7 +186,11 @@ reversed, or written to a file. The controls that hold are `allowCommands` and
 human approval.
 
 **The command deny list is a speed bump.** It blocks the obvious interpreters and
-exfiltration tools, and it is a floor that a stale `policy.json` cannot lower.
+exfiltration tools for the MCP tools, and it is a floor that a stale
+`policy.json` cannot lower. The CLI does not refuse them: with `run` approval on
+they reach the approval prompt with a warning line, so an agent shelling out to
+`hush run -- node -e …` still needs a human to click Allow on that exact
+command; with `run` approval off, the person has opted out of gating.
 But no deny list is complete: `npm run <script>` executes whatever `package.json`
 says. Use `allowCommands` for anything sensitive.
 

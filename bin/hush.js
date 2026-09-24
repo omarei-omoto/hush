@@ -26,4 +26,20 @@ const built = join(here, "..", "dist", "cli.js");
 const source = join(here, "..", "src", "cli.ts");
 
 const entry = installed || !existsSync(source) ? built : source;
-await import(pathToFileURL(entry).href);
+try {
+  await import(pathToFileURL(entry).href);
+} catch (e) {
+  // Node 22.6–22.17 runs TypeScript only behind a flag, so a clone on those
+  // versions fails to load src/ at all. Use a build when there is one, and say
+  // what to do when there is not, instead of a bare ERR_UNKNOWN_FILE_EXTENSION.
+  if (entry !== source || e?.code !== "ERR_UNKNOWN_FILE_EXTENSION") throw e;
+  if (existsSync(built)) {
+    await import(pathToFileURL(built).href);
+  } else {
+    process.stderr.write(
+      `hush: this Node (${process.version}) cannot run TypeScript directly. ` +
+        "Use Node >= 22.18, or run `npm run build` in this checkout first.\n",
+    );
+    process.exit(1);
+  }
+}

@@ -12,7 +12,7 @@ import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { resolveVaultPath, Vault, audit } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
-import { composeSets, usedSets, librarySets, globalVaultName, openGlobal } from "./library.ts";
+import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import {
   checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
@@ -444,7 +444,7 @@ function listSets(ctx: Ctx): ListedSet[] {
     whenToUse: s.whenToUse,
     keys: s.keys,
     where: "library",
-    used: used.has(s.name),
+    used: used.has(linkNameFor("library", s.name)),
   }));
   return [...project, ...library].sort((a, b) => a.label.localeCompare(b.label));
 }

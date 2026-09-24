@@ -72,7 +72,8 @@ Needs Node ≥ 22.6.
 npm install -g @omarei/hush
 ```
 
-From a clone there is no build step — Node runs the TypeScript directly:
+From a clone there is no build step — Node ≥ 22.18 runs the TypeScript directly
+(on 22.6–22.17, run `npm run build` first):
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git
@@ -168,9 +169,13 @@ A set lives in one of two places:
 - **This project** — `.hush/vault.json`, committed, shared with your team.
 
 A project *uses* sets. Its own `default` set is always used, as the floor;
-everything else layers on top in the order you added it, later wins. Under
-even that sits your library's `default` — your **global environment**,
-injected in every folder (`hush add K=v --library` with no `--to` lands there).
+everything else layers on top in the order you added it, later wins.
+
+**Your library is a catalog, not a floor.** Nothing in it reaches a folder
+until that folder asks: `hush use <set>`, or tell your agent which ones you want
+and it adds them. Its `default` set is your catch-all (`hush add K=v --library`
+with no `--to` lands there); use it in a folder with
+`hush use default --library`. Add more from the library any time.
 `.hush/envs.json` records only the *names* — a teammate who clones the repo
 gets "this project uses a set called acme-production" and supplies their own.
 
@@ -333,36 +338,32 @@ Don't want to type commands? Don't.
 hush ui
 ```
 
-A local app in your browser: add keys, name and describe sets, choose which
-ones a project uses, manage the team. It binds to `127.0.0.1` only, needs a
-one-time token in the URL, refuses non-loopback `Host` headers, and sends the
-browser **masked previews** — never the real values, unless you click *reveal*
-(which is written to the audit log).
+A local app in your browser, built around what you came to do:
 
-**Dropping in a `.env`.** Drag one or more files onto it. Nothing is saved yet —
-you name the set first, and get a review table:
+- **Project** answers "does my app have what it needs?" hush scans the code for
+  the variables it reads and marks each one provided (and by which set) or
+  missing. A missing key that one of your other sets already has comes with a
+  **Use that set** button, so you don't type it twice. Below that are the sets
+  a run gets, in the order they apply, with every key visible and any key that
+  a later set overrides struck through.
+- **Library** is your own catalog. **Team** is who can decrypt. **Agent** shows
+  what your coding agent is connected to and what it must ask you first.
+  **Activity** is the audit log in plain sentences.
 
-```
-Save all of this as one named set
-  [ Acme Production            ] [ what is it for? (optional)     ]
-  [ in my library — every project can use it  ▾ ]  [ Save as a named set ]
+It binds to `127.0.0.1` only, needs a one-time token in the URL, refuses
+non-loopback `Host` headers, and sends the browser **masked previews**, never
+the real values. The exception is when you click **Reveal**, which asks for the
+same approval as `hush get`, shows the value for fifteen seconds and writes the
+reveal to the audit log.
 
-Review 4 variable(s)                          [ move all to… ▾ ]
-
-.ENV.PRODUCTION
- ☑ FAL_KEY            fal…le (25 chars)   already in personal-fal   [personal-fal ▾]
- ☑ STRIPE_SECRET_KEY  sk_…op (24 chars)   stripe                    [default ▾]
- ☑ DATABASE_URL       pos…db (23 chars)   postgres                  [prod ▾]
- ☑ PEM_KEY            ---…-- · multi-line                           [default ▾]
-   skipped "bad name" — not a usable variable name
-
- [Import 4 secret(s)]  ☐ overwrite keys that already exist        [Discard]
-```
-
-Keys that already exist are flagged and skipped unless you tick overwrite.
-Multi-line values (PEM keys) survive intact. **Values never come back to the
-browser** — staging returns names, masked previews and suggestions only; the
-plaintext stays server-side until you import.
+**Dropping in a `.env`.** Drag files anywhere onto the page, or use **Import
+.env**. Nothing is saved until you review it. The common case is one click:
+name it, and it becomes a set, in your library if you have one, and used by
+this project straight away. For a file that mixes things, tick **File them into
+existing sets instead** to choose a set and a tag per key. Multi-line values
+(PEM keys) survive intact. **Values never come back to the browser**: the review
+gets names and masked previews only, and the plaintext stays server-side until
+you import or discard it.
 
 ---
 
@@ -375,9 +376,12 @@ hush install-mcp
 It looks for the coding agents on this machine and registers hush with each one
 it finds, in the file that agent actually reads: **Codex**
 (`~/.codex/config.toml`), **Claude Code** (`.mcp.json`), **Cursor**
-(`.cursor/mcp.json`). It never rewrites an entry you already have, and when it
-cannot write one it prints the line to paste instead of a tick that means
-nothing.
+(`.cursor/mcp.json`). On a terminal it lists the files first and asks
+(`pick` to choose per agent; `--yes` skips the question). It never rewrites an
+entry you already have, and when it cannot write one it prints the line to
+paste instead of a tick that means nothing. The entry is a plain `hush mcp`
+when the `hush` on your PATH is this install, so the committed file works on
+your teammates' machines too.
 
 If hush cannot see your agent (a fresh machine, an unusual setup):
 
@@ -529,10 +533,13 @@ descriptions explain themselves — you just have to say so each time.
 
 `.hush/policy.json` controls what it may run — through the MCP tools *and*
 through the CLI, so an agent that shells out to `hush run` or `hush export`
-meets the same policy and the same approval prompt. Anything that exists to dump
-or re-encode the environment is denied by default — shells, `env`, `base64`,
+meets the same approval prompt. For the agent's tools, anything that exists to
+dump or re-encode the environment is denied outright — shells, `env`, `base64`,
 `curl`, and every interpreter, because `node -e` can write the whole environment
-to a file that output redaction never sees:
+to a file that output redaction never sees. In your terminal the same commands
+are not refused: `hush node server.js` goes to the approval prompt with a
+warning line, the way `op run` asks rather than blocks. `allowCommands` still
+narrows both:
 
 ```json
 {
@@ -936,7 +943,7 @@ write access can loosen. Use a hardware identity if that matters to you.
 
 ## Development
 
-No build step and nothing to install — Node 22.6+ runs the TypeScript directly.
+No build step and nothing to install — Node 22.18+ runs the TypeScript directly.
 
 ```bash
 git clone https://github.com/omarei-omoto/hush.git

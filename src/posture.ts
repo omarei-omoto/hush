@@ -18,6 +18,7 @@ import { loadIdentity, hushHome } from "./identity.ts";
 import { biometryStatus } from "./biometry.ts";
 import { identityPlugin, ageIdentityPath, ageAvailable } from "./age.ts";
 import { loadPolicy } from "./mcp.ts";
+import { globalVaultExists } from "./library.ts";
 
 export type Rung = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -128,7 +129,11 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       id: "vault",
       gap: "your secrets are not encrypted",
       label: "secrets are encrypted at rest",
-      pass: Boolean(vault),
+      // A folder that only uses library sets has no vault of its own, and its
+      // secrets are every bit as encrypted — the library is a vault too. Without
+      // this, the model the README recommends was nudged with "your secrets are
+      // not encrypted".
+      pass: Boolean(vault) || globalVaultExists(),
       command: "hush init",
       why: "a plaintext .env is readable by every process you run",
     },
@@ -138,7 +143,9 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       gap: "a plaintext .env is still on disk",
       label: "no plaintext .env left in the project",
       pass: strayEnv.length === 0,
-      command: `hush import ${strayEnv[0] ?? ".env"} && rm ${strayEnv[0] ?? ".env"}`,
+      // `hush import` needs --as; the old hint failed with "Give the set a name."
+      // Keys already in the set are skipped, so this is safe to re-run.
+      command: `hush add ${strayEnv[0] ?? ".env"} --as Dev && rm ${strayEnv[0] ?? ".env"}`,
       why: strayEnv.length ? `${strayEnv.join(", ")} still on disk, so the vault is not the only copy` : undefined,
     },
     {

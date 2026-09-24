@@ -4,6 +4,42 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### The app, redesigned around what you came to do
+
+`hush ui` is rebuilt. The old page was five sections of lists and jargon ("What
+a run gets", "rung 0 of 5"), with keys hidden behind a chevron and native
+`prompt()` boxes for editing. The new one:
+
+- **Opens on your project, and answers whether it will run.** The code is
+  scanned for the variables it reads, and each is shown as provided (by which
+  set) or missing. A missing key that an unused set already holds offers
+  **Use that set**; otherwise **Add** opens the add dialog with the name filled
+  in. The sidebar shows the missing count.
+- **Shows every key.** The sets a run gets appear in order, each with its keys
+  under a redaction bar. A key a later set overrides is struck through with
+  "overridden by …". Up and down change the order.
+- **Add secret** is always one click away. It handles multi-line values, saving
+  to any set, making a new set, and using that set here. It warns before
+  replacing an existing key.
+- **Reveal** says when it is waiting on your approval. It shows the value for 15
+  seconds with a visible countdown, offers Copy, and hides again.
+- **Import .env** is a single review dialog. Save everything as one named set
+  (library first when you have one), or file keys into existing sets one by
+  one. Closing it discards the upload server-side.
+- **Agent** shows setup as steps with copyable commands, approvals as switches
+  with plain descriptions, a warning when this machine can't show a prompt, and
+  your protection level with the next step.
+- **Activity** reads as sentences ("Ran npm with 4 secrets · agent"), grouped
+  by day.
+- **Menus and dialogs** replace `prompt()` and `confirm()`, with keyboard
+  support. There is a bottom tab bar on phones, and dark mode throughout.
+
+Under the hood, the page lives in `src/ui-page.ts`, and the DOM is built only
+through `textContent` and attributes. No string of HTML exists for a value to
+escape from, and a test forbids every API that could create one.
+`/api/state` adds `needs` (variable names and file paths, from a scan cached
+for 10 s), `posture.next` and `policy.promptAvailable`.
+
 ### Changed — asks instead of refusing, and the library stays a library
 
 **Breaking (pre-1.0):** your library's `default` set is no longer injected into

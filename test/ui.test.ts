@@ -574,46 +574,31 @@ describe("the page script itself", () => {
     assert.notEqual(ck("s", "A"), ck("s", "B"));
   });
 
-  test("esc() escapes everything that could break out of markup", async () => {
+  // The page builds its DOM with h(), which only sets textContent and
+  // attributes. That is a stronger guarantee than escaping at every call
+  // site: there is no string of HTML for a value to break out of. These pin
+  // that no API that turns a string into markup is used anywhere.
+  test("no markup is ever built from a string", async () => {
     const { js } = await pageSource();
-    const line = js.split("\n").find((l) => l.startsWith("const esc="));
-    assert.ok(line, "the page has no esc() helper");
-    const esc = new Function("return " + line!.replace(/^const esc=/, "").replace(/;$/, ""))() as (
-      v: string,
-    ) => string;
-
-    // Checking for a bare "&" would be wrong — "&amp;" contains one. Compare
-    // against the exact expected encoding instead.
-    assert.equal(esc("<img src=x>"), "&lt;img src=x&gt;");
-    assert.equal(esc("a&b"), "a&amp;b");
-    assert.equal(esc("say \"hi\""), "say &quot;hi&quot;");
-    assert.equal(esc("it's"), "it&#39;s");
-    assert.equal(esc("plain"), "plain");
-    // Nothing that can open a tag or close an attribute may survive.
-    const hostile = esc("</div><script>alert(1)</script>");
-    for (const ch of ["<", ">"]) assert.ok(!hostile.includes(ch), "esc() left a raw " + ch);
-  });
-  test("every data-bearing interpolation into markup is escaped", async () => {
-    const { js } = await pageSource();
-    // Literal ternaries and counts are fine; anything reading a field off a
-    // record that came from the vault or a dropped file must go through esc().
-    const dataRef = /\b(?:e|s|a|m|st|sk|r|i)\.[a-zA-Z_]/;
-    const builders = js.match(/\$\('<[^)]*?\+[^)]*?\)/g) ?? [];
-    assert.ok(builders.length > 5, "expected several markup builders to check");
-
-    let checked = 0;
-    for (const b of builders) {
-      for (const part of b.split("+").slice(1)) {
-        const t = part.trim();
-        if (!dataRef.test(t)) continue; // literal or a count
-        // A ternary whose branches are both string literals renders a literal,
-        // however data-driven the condition is.
-        if (/^\(?[\w.]+\?"[^"]*":"[^"]*"\)?$/.test(t)) continue;
-        checked++;
-        assert.ok(t.startsWith("esc("), `unescaped field in markup: ${t.slice(0, 70)}`);
-      }
+    for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "createContextualFragment", "DOMParser"]) {
+      assert.ok(!js.includes(api), `the page uses ${api}`);
     }
-    assert.ok(checked > 8, `only checked ${checked} interpolations — the scan missed the markup`);
+    const hStart = js.indexOf("function h(");
+    assert.ok(hStart > -1, "the h() builder is missing");
+    const hBody = js.slice(hStart, js.indexOf("\nfunction ", hStart + 1));
+    assert.match(hBody, /textContent/, "h() does not set text as text");
+    assert.match(js, /el\.append\(c instanceof Node\?c:String\(c\)\)/, "children are not appended as text nodes");
+    // A child that is an event handler name must not become an attribute that runs code.
+    assert.match(hBody, /addEventListener/, "on* props are not wired as listeners");
+  });
+
+  test("a value reaches the page only through Reveal, and only as text", async () => {
+    const { js } = await pageSource();
+    assert.equal((js.match(/\/api\/reveal/g) || []).length, 1, "something besides reveal() asks for a value");
+    const start = js.indexOf("async function reveal(");
+    const body = js.slice(start, js.indexOf("\n}\n", start));
+    assert.match(body, /plain\.textContent=value/, "the revealed value is not set as text");
+    assert.match(body, /setTimeout\(hide,15000\)/, "a revealed value does not hide itself again");
   });
 
   test("the page pulls nothing from the network", async () => {
@@ -623,118 +608,50 @@ describe("the page script itself", () => {
     assert.ok(!/@import/.test(html), "the CSS imports something");
   });
 
-  test("the page shows one list of sets at two levels, not the old two vocabularies", async () => {
-    const { html } = await pageSource();
-    // The redesign moved the library's own copy into a one-line intro rather
-    // than a "Your library" card heading — pin that intro line instead.
-    assert.ok(html.includes("Yours alone, never in a repo."), "the library section intro is missing");
-    // "This folder" alone also names the (unrelated) setup-panel heading, so
-    // pin the folder-state string the header row actually shows once a
-    // project has a vault of its own.
-    assert.ok(html.includes("vault committed to the repo"), "the project folder-state copy is missing");
-    assert.ok(!html.includes("Service accounts"), "the old Service accounts section is still there");
-  });
-
-  // The project's default set is the floor of every run and cannot be switched
-  // off; the card must say so rather than offer a toggle whose "drop" is a no-op.
-  test("the project's default card says it is always used instead of offering a toggle", async () => {
+  // What the page is for, pinned as behaviour rather than markup.
+  test("the project page leads with what the code needs, and offers the set that already has a missing key", async () => {
     const { js } = await pageSource();
-    assert.ok(js.includes("● always used"), "the default set's card does not say it is the floor");
+    assert.match(js, /function needsCard\(/, "no panel for what the code reads");
+    assert.match(js, /function sourceFor\(/, "a missing key is not matched to a set that already has it");
+    assert.match(js, /"Use "\+src\.set\.label/, "the set that has it is not offered");
+    assert.match(js, /"overridden by "/, "a key another set overrides is not marked");
   });
 
-  // Bites: without the rule every collapsed row carries an italic
-  // "When to use it" line, which reads as noise on a screen of sets.
-  test("an unset when-to-use line is hidden until the row is opened", async () => {
-    const { html, js } = await pageSource();
-    assert.ok(html.includes(".ledgerrow:not(.open) .editrow.empty[data-field=whenToUse]{display:none}"), "the collapsed-row rule is missing");
-    assert.ok(js.includes('row.classList.toggle("open",!open)'), "opening a row does not mark it open");
-    assert.ok(js.includes('holder.classList.toggle("empty",!current)'), "an empty field is not marked empty");
-  });
-
-  test("the namer bar's default destination is the library when one exists", async () => {
+  test("this project's default set cannot be stopped or deleted from the page", async () => {
     const { js } = await pageSource();
-    // Scoped to stagingPanel() itself — the new-set form lower on the page has
-    // its own, separate destination select, and must not be able to satisfy
-    // this assertion on the namer bar's behalf.
+    assert.match(js, /const floor=where==="project"&&set\.name==="default"/);
+    assert.match(js, /ctx\.order&&!floor\?\{label:"Stop using here"/, "the floor can be switched off");
+    assert.match(js, /floor\?null:\{label:"Delete set…"/, "the floor can be deleted");
+  });
+
+  test("every destructive action asks first", async () => {
+    const { js } = await pageSource();
+    assert.match(js, /confirmDialog\("Delete "\+s\.key/, "deleting a key does not confirm");
+    assert.match(js, /function deleteSetDialog\(/, "deleting a set does not confirm");
+    assert.match(js, /confirmDialog\("Remove "\+m\.name/, "removing a teammate does not confirm");
+    // Closing the import review without saving must release the upload.
+    assert.match(js, /onClose:function\(\)\{reviewDlg=null;if\(STAGES\.length&&!importing\)\{discardStages\(\)/);
+  });
+
+  test("the import review keeps a dropped .env in the library when there is one", async () => {
+    const { js } = await pageSource();
     const start = js.indexOf("function stagingPanel(");
     assert.ok(start > -1, "stagingPanel() is missing");
-    const end = js.indexOf("\nfunction ", start + 1);
-    const panel = js.slice(start, end > -1 ? end : undefined);
-
-    const libAt = panel.indexOf('option value="library"');
-    const projAt = panel.indexOf('option value="project"');
-    assert.ok(libAt > -1 && projAt > -1, "the namer bar is missing a destination option");
-    assert.ok(libAt < projAt, "the namer bar does not offer the library first");
-    assert.match(panel, /if\(!S\.global\.exists\)dest\.value="project"/, "no fallback to project when there is no library");
+    const panel = js.slice(start, js.indexOf("\nfunction ", start + 1));
+    const libAt = panel.indexOf('value:"library"');
+    const projAt = panel.indexOf('value:"project"');
+    assert.ok(libAt > -1 && projAt > -1, "the review is missing a destination");
+    assert.ok(libAt < projAt, "the library is not offered first");
+    assert.match(panel, /S\.global\.exists\?"library":"project"/, "no fallback to the project when there is no library");
   });
 
-  test("a set's description and when-to-use render exactly once, not as a muted line plus a permanent boxed duplicate", async () => {
-    const { js } = await pageSource();
-    // The old boxed fields (mkField/.fieldinput/.fieldrow) are gone — editing
-    // happens in place on the same muted line the text is displayed on.
-    assert.ok(!/\bmkField\b/.test(js), "mkField still builds a second, boxed copy of the field");
-    assert.ok(!js.includes('className="fieldinput"'), ".fieldinput boxed input is still built");
-    assert.ok(!js.includes('"fieldrow"'), ".fieldrow wrapper is still built");
-    assert.match(js, /function editableRow\(/, "editableRow() is missing");
-    // setRow() must call it for both fields, and must not also emit a second
-    // static rowdesc for the description (which is how the duplicate happened).
-    const start = js.indexOf("function setRow(");
-    assert.ok(start > -1, "setRow() is missing");
-    const end = js.indexOf("\nfunction ", start + 1);
-    const body = js.slice(start, end > -1 ? end : undefined);
-    assert.equal(
-      (body.match(/editableRow\(set,where,"description"/g) || []).length,
-      1,
-      "description is not built by exactly one editableRow() call",
-    );
-    assert.match(body, /editableRow\(set,where,"whenToUse"/, "when-to-use is not editable in place");
-    assert.ok(!/\$\('<div class="rowdesc">'\+esc\(descText\)/.test(body), "the old static duplicate description line is still built");
-  });
-
-  test("Move to… is one control: an appearance:none select with its own drawn chevron, not a bare native select", async () => {
-    const { js, html } = await pageSource();
-    // Checked against the <style> text specifically — a comment in the script
-    // mentioning "appearance:none" must not be able to satisfy this on the
-    // actual CSS rule's behalf.
-    assert.match(html, /select\.moveselect\{appearance:none/, "the select still shows a native dropdown arrow");
-    assert.match(js, /className="moveto"/, "the select is not wrapped in .moveto for its own chevron");
-    assert.match(html, /\.moveto::after\{content:"⌄"/, "no chevron is drawn for the move-to control");
-  });
-
-  test("New set / New set here render as bordered buttons beside the section head, not toggles with no visual weight", async () => {
-    const { js, html } = await pageSource();
-    assert.match(js, /function newSetButton\(/, "newSetButton() is missing");
-    assert.ok(!/\bnewSetToggle\b/.test(js), "the old newSetToggle() is still referenced");
-    assert.match(html, /\.newbtn\{[^}]*border:1px solid var\(--line\)/, "the New set button has no visible border");
-    assert.match(js, /class="sectionhead"/, "New set is not paired with the section head on one line");
-  });
-
-  test("Delete this set sits at the end of the add-key row, not centered on its own line", async () => {
-    const { js } = await pageSource();
-    const start = js.indexOf("function setRow(");
-    const end = js.indexOf("\nfunction ", start + 1);
-    const body = js.slice(start, end > -1 ? end : undefined);
-    assert.match(body, /addRow\.append\(delBtn\)/, "Delete this set is not appended to the add-key row");
-    assert.ok(!body.includes('"fieldrow"'), "a separate centered row for Delete this set still exists");
-  });
-
-  test("the reorder arrows are real 24×24 targets, not ~8px glyphs", async () => {
+  test("on a phone the sections move to a bottom tab bar and key rows stack", async () => {
     const { html } = await pageSource();
-    assert.match(html, /\.resline \.updown button\{width:24px;height:24px/, "the reorder arrows were not sized up");
-  });
-
-  test("the narrow-width sidefoot (drop hint + rung) wraps to its own row, not squeezed into the scrollable tab row", async () => {
-    const { html } = await pageSource();
-    const start = html.indexOf("@media (max-width:800px)");
-    assert.ok(start > -1, "the 800px breakpoint is missing");
-    const end = html.indexOf("@media (max-width:480px)");
-    const block = html.slice(start, end > -1 ? end : undefined);
-    assert.match(block, /\.sidebar\{[^}]*flex-wrap:wrap/, "the sidebar no longer wraps its row");
-    assert.match(
-      block,
-      /\.sidefoot\{flex:1 1 100%/,
-      "the sidefoot is not forced onto its own line — it will compete with the tabs for width again",
-    );
+    const start = html.indexOf("@media (max-width:860px)");
+    assert.ok(start > -1, "the narrow breakpoint is missing");
+    const block = html.slice(start, html.indexOf("</style>", start));
+    assert.match(block, /\.nav\{position:fixed;left:0;right:0;bottom:0/, "the nav is not a bottom tab bar");
+    assert.match(block, /\.krow \.bar\{grid-column:1 \/ -1/, "the value bar does not take its own line");
   });
 });
 

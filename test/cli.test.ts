@@ -1584,13 +1584,25 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     }
   });
 
-  test("the deny floor holds even with allowCommands unset", () => {
+  // The deny list is for the agent's MCP tools (see mcp.test.ts). In a
+  // terminal it turns into a warning on the approval prompt, the way
+  // `op run` asks rather than refuses: an agent shelling out to `hush run`
+  // still has to get past a dialog it cannot click.
+  test("an interpreter goes to the approval prompt, not a flat refusal", () => {
     const p = project();
     try {
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      const gated = p.run(["run", "--", "sh", "-c", "echo RAN"]);
+      assert.equal(gated.code, 1, gated.out);
+      assert.match(gated.out, /Approval denied/, "not routed through the approval gate");
+      assert.doesNotMatch(gated.out, /denied by default/);
+      assert.ok(!gated.out.includes("RAN"), "ran without an approval");
+
+      // No approval asked for: the person opted out, and their command runs.
       writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
-      const r = p.run(["run", "--", "env"]);
-      assert.equal(r.code, 1, r.out);
-      assert.match(r.out, /denied by default/);
+      const open = p.run(["run", "--quiet", "--", "sh", "-c", "echo RAN"]);
+      assert.equal(open.code, 0, open.out);
+      assert.match(open.out, /RAN/);
     } finally {
       p.cleanup();
     }
@@ -2488,11 +2500,19 @@ describe("a folder that isn't set up yet", () => {
       p.librarySet("acme-production", { FAL_KEY: "v" });
       writeFileSync(join(p.root, "index.js"), "process.env.FAL_KEY;\n");
 
+      // Declining is an answer, not an error.
       const r = p.run(["use"], "n\n");
-      assert.equal(r.code, 1, r.out);
-      assert.match(r.out, /Nothing set up/);
-      assert.match(r.out, /hush use <set> when you're ready/);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /Nothing saved here/);
       assert.ok(!existsSync(join(p.hushDir, "envs.json")), "envs.json was written despite declining");
+
+      // And a run that was declined still runs — with nothing, and saying so.
+      const marker = join(p.root, "ran.txt");
+      const run = p.run(["sh", "-c", `touch ${marker}`], "n\n");
+      assert.equal(run.code, 0, run.out);
+      assert.match(run.out, /running without secrets/);
+      assert.ok(existsSync(marker), "the declined run never ran");
+      assert.ok(!existsSync(join(p.hushDir, "envs.json")), "a declined run wrote envs.json");
     } finally {
       p.cleanup();
     }
@@ -3270,6 +3290,31 @@ describe("hush stays out of places it was not asked into", () => {
       assert.equal(p.run(["use", "work"]).code, 0);
       const r = p.run(["level"]);
       assert.match(r.out, /✓ secrets are encrypted at rest/, r.out);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("the library is a catalog, not a floor", () => {
+  test("its default reaches a folder only after `hush use default --library`", () => {
+    const p = bareFolder();
+    try {
+      p.librarySet("default", { CATCH_ALL: "catch_all_value_123" });
+      p.librarySet("work", { WORK_KEY: "work_value_1234" });
+      assert.equal(p.run(["use", "work"]).code, 0);
+
+      const before = p.run(["run", "--", "sh", "-c", 'echo "[${CATCH_ALL:-unset}]"']);
+      assert.equal(before.code, 0, before.out);
+      assert.match(before.out, /\[unset\]/, "the library's default leaked into a folder that never asked");
+
+      const use = p.run(["use", "default", "--library"]);
+      assert.equal(use.code, 0, use.out);
+      const links = JSON.parse(readFileSync(join(p.hushDir, "envs.json"), "utf8")) as { use: string[] };
+      assert.deepEqual(links.use, ["work", "library:default"]);
+
+      const after = p.run(["run", "--", "sh", "-c", 'echo "[${CATCH_ALL:-unset}]"']);
+      assert.match(after.out, /\[redacted:CATCH_ALL\]/, after.out);
     } finally {
       p.cleanup();
     }

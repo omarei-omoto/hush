@@ -59,8 +59,9 @@ tool that returns one.
   sets, the variable names, a 4-digit code that also lands in the tool result
   so the transcript and your screen can be checked against each other.
 - A policy the agent cannot loosen from inside the repo (see below).
-- The CLI enforces the same policy: an agent that shells out to `hush run` or
-  `hush export` meets the same prompt.
+- The CLI enforces the same approval: an agent that shells out to `hush run`
+  or `hush export` meets the same prompt. Interpreters the MCP tools refuse
+  outright are, in a terminal, shown on that prompt with a warning instead.
 
 **Turn on**
 

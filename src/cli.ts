@@ -49,7 +49,7 @@ import { serveUi } from "./ui.ts";
 import {
   usedSets, composeSets, librarySets, loadLinks, saveLinks, openGlobal,
   globalVaultName, globalVaultExists, globalVaultPath, namedVaults, saveConfig,
-  ensureProjectVault, writeProjectDotfiles, suggestSets,
+  ensureProjectVault, writeProjectDotfiles, suggestSets, LIBRARY_DEFAULT, linkNameFor,
 } from "./library.ts";
 import { VERSION } from "./version.ts";
 import { assess } from "./posture.ts";
@@ -646,7 +646,7 @@ function dieNotSetUp(): never {
  * a typo is refused by name rather than silently dropped.
  */
 async function manualPick(sets: ReturnType<typeof librarySets>): Promise<string[]> {
-  info(`Which sets should this folder use? ${dim("(space-separated, enter for none)")}`);
+  info(`Which sets should this folder use? ${dim("(space-separated, enter to skip)")}`);
   if (sets.length) info(dim(`  ${sets.map((s) => shown(s.name)).join(", ")}`));
   const typed = (await askLine("> ")).split(/\s+/).filter(Boolean);
   if (!typed.length) return [];
@@ -711,8 +711,8 @@ async function askAgentQuestion(hushDir: string, a: Args): Promise<void> {
  * prompt can never appear, so every run is refused. Neither was said anywhere.
  */
 function describePolicyEffect(): void {
-  info(dim("  every hush run here now asks first — yours too — and node, python, bash and"));
-  info(dim("  other interpreters are refused (run a script instead). Undo: rm .hush/policy.json"));
+  info(dim("  every hush run here now asks first, yours too. Your agent's tools also cannot"));
+  info(dim("  run node, python, bash and the like. Undo: rm .hush/policy.json"));
   if (!approvalPromptAvailable()) {
     warn("this machine has no way to show an approval prompt (no desktop dialog or fingerprint");
     warn("reader), so every hush run here will be refused until .hush/policy.json is removed.");
@@ -727,7 +727,7 @@ function describePolicyEffect(): void {
  * path (dieNotSetUp) never gets here at all, so this never has to guess at an
  * answer nobody typed.
  */
-async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Args): Promise<void> {
+async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Args): Promise<boolean> {
   info(bold("This folder isn't set up for hush yet."));
 
   const sets = librarySets();
@@ -789,7 +789,7 @@ async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Arg
     } else {
       const ans = (await askLine(`Use these here? ${dim("[Y/n/edit]")} `)).trim().toLowerCase();
       if (ans === "n" || ans === "no") {
-        die("Nothing set up.", "hush use <set> when you're ready.");
+        picks = [];
       } else if (ans === "edit" || ans === "e") {
         picks = await manualPick(sets);
       }
@@ -797,15 +797,18 @@ async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Arg
     }
   }
 
-  saveLinks(loose.hushDir, picks);
+  // Declining is an answer, not an error: nothing is written, and the folder
+  // is asked again next time rather than marked as "set up with nothing".
+  if (!picks.length) {
+    info(dim("Nothing saved here.  hush use <set> whenever you want this folder to have some."));
+    return false;
+  }
+  saveLinks(loose.hushDir, picks.map((n) => linkNameFor("library", n)));
   writeProjectDotfiles(loose.hushDir);
-  info(
-    picks.length
-      ? `${green("✓")} this folder uses ${picks.join(", ")}   ${dim("(.hush/envs.json — commit it if the team should too)")}`
-      : `${green("✓")} .hush/envs.json created   ${dim("(commit it if the team should too)")}`,
-  );
+  info(`${green("✓")} this folder uses ${picks.join(", ")}   ${dim("(.hush/envs.json — commit it if the team should too)")}`);
 
   await askAgentQuestion(loose.hushDir, a);
+  return true;
 }
 
 // ----------------------------------------------------------------- commands
@@ -864,7 +867,7 @@ async function cmdStart(a: Args): Promise<void> {
     }
     const chosen = library[Number((await askLine("\nWhich one? ")).trim()) - 1];
     if (!chosen) die("That was not one of the numbers above.");
-    useHere(loose.hushDir, chosen.name, a);
+    useHere(loose.hushDir, linkNameFor("library", chosen.name), a);
     info(`${green("✓")} this project now uses ${bold(chosen.label)}`);
     return finishStart(loose, a, devCommand);
   }
@@ -1165,7 +1168,7 @@ async function cmdLs(a: Args): Promise<void> {
     return out(
       JSON.stringify(
         {
-          library: libSets.map((s) => ({ ...s, used: used.has(s.name) })),
+          library: libSets.map((s) => ({ ...s, used: used.has(linkNameFor("library", s.name)) })),
           project: project ? project.sets().map((s) => ({ ...s, used: used.has(s.name) })) : [],
           setUp,
         },
@@ -1177,9 +1180,9 @@ async function cmdLs(a: Args): Promise<void> {
 
   const line = (s: { name: string; label: string; description?: string; whenToUse?: string; keys: string[] }, where: "library" | "project") => {
     // The library's default is the one set with a meaning beyond its name.
-    const role = where === "library" && s.name === "default" ? dim("  — your global environment, under everything") : "";
+    const role = where === "library" && s.name === "default" ? dim("  — your catch-all; hush use default --library to use it in a folder") : "";
     info(
-      `  ${used.has(s.name) ? green("●") : " "} ${bold(s.label)} ${dim(`(${shown(s.name)})`)}  ${dim(`${s.keys.length} key(s)`)}${role}`,
+      `  ${used.has(linkNameFor(where, s.name)) ? green("●") : " "} ${bold(s.label)} ${dim(`(${shown(s.name)})`)}  ${dim(`${s.keys.length} key(s)`)}${role}`,
     );
     if (s.description) info(`      ${dim(s.description)}`);
     if (s.whenToUse) info(`      ${dim("when: " + s.whenToUse)}`);
@@ -1558,7 +1561,10 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
   // `hush start` rather than at `hush id --create`, a step it would skip.
   if (!isSetUp(loose) && !interactiveSetup()) dieNotSetUp();
   const id = requireIdentity();
-  if (!isSetUp(loose)) await runSetupDialogue(loose, a);
+  if (!isSetUp(loose) && !(await runSetupDialogue(loose, a))) {
+    // Declined: run it anyway, with nothing injected, and say so plainly.
+    process.stderr.write(dim("hush: running without secrets\n"));
+  }
 
   const extra = collectExtraSets(a);
   const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
@@ -1600,8 +1606,16 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
   const specs = repeat(a, "materialize").map(parseMaterializeSpec);
   const materializePlan = specs.length ? describeMaterialize(specs, secrets) : [];
 
+  // The deny list (node, python, bash, curl, …) exists for the agent's tools,
+  // where nobody typed the command. Here it becomes a warning in the approval
+  // prompt rather than a refusal: the prompt is the control that holds (an
+  // agent shelling out to `hush run` still has to get past a dialog it cannot
+  // click), and refusing `hush node server.js` or `hush bun dev` to the person
+  // who typed it is exactly the friction 1Password's `op run` and varlock do
+  // not impose. An allowCommands list the person wrote still narrows.
+  const riskyCommand = policy?.denyCommands.includes(basename(argv[0])) ?? false;
   if (policy) {
-    checkCommand(policy, argv[0]);
+    checkCommand({ ...policy, denyCommands: [] }, argv[0]);
     checkScopes(policy, layers);
     // Materialising is a reveal, not a run: it writes plaintext to a path the
     // caller chose, which an agent holding a file-read tool could then read.
@@ -1634,6 +1648,9 @@ async function runCommand(a: Args, argv: string[]): Promise<void> {
           `Using sets:  ${layers.join(", ") || "(none)"}`,
           `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
           `Directory:  ${process.cwd()}`,
+          ...(riskyCommand
+            ? [`Note:  ${basename(argv[0])} can print or send any injected value — allow it only if you started this`]
+            : []),
           approvalCoverageLine(policy, argv[0], layers),
         ],
         // Built by runScope() — the same helper mcp.ts's hush_run calls — so a
@@ -2705,7 +2722,10 @@ async function cmdDoctor(_a: Args): Promise<void> {
   check(
     true,
     "sets",
-    [...projectNames, ...libraryNames].map((s) => s + (used.has(s) ? " ●" : "")).join(", ") + dim("   ● = used by this project"),
+    [
+      ...projectNames.map((s) => s + (used.has(s) ? " ●" : "")),
+      ...libraryNames.map((s) => s + (used.has(linkNameFor("library", s)) ? " ●" : "")),
+    ].join(", ") + dim("   ● = used by this project"),
   );
 
   const root = loc.hushDir.replace(/[/\\]\.hush$/, "");
@@ -3045,7 +3065,8 @@ async function cmdUse(a: Args): Promise<void> {
     // actually running anything afterward.
     if (!isSetUp(loose)) {
       if (!interactiveSetup()) dieNotSetUp();
-      return runSetupDialogue(loose, a);
+      await runSetupDialogue(loose, a);
+      return;
     }
     const used = usedSets(loose.hushDir);
     const library = librarySets();
@@ -3057,15 +3078,28 @@ async function cmdUse(a: Args): Promise<void> {
     info(bold("This project uses:") + dim("  (in resolution order — later wins)"));
     const width = Math.max(...used.map((n) => n.length));
     for (const name of used) {
-      const source = loose.vault?.hasSet(name) ? "project" : library.some((s) => s.name === name) ? "library" : "missing";
+      const source = name === LIBRARY_DEFAULT
+        ? library.some((s) => s.name === "default") ? "library" : "missing"
+        : loose.vault?.hasSet(name) ? "project" : library.some((s) => s.name === name) ? "library" : "missing";
       info(`  ${name.padEnd(width)}  ${dim(source)}`);
     }
     return;
   }
 
-  const names = a._.map(convertLegacyPin);
   const library = librarySets();
-  const unknown = names.filter((n) => !loose.vault?.hasSet(n) && !library.some((s) => s.name === n));
+  // `default` is this project's own; the library's is `default --library`
+  // (recorded as library:default), since nothing from the library reaches a
+  // folder until the folder asks for it.
+  const names = a._.map(convertLegacyPin).map((n) =>
+    n === "default" && (bool(a, "library") || !loose.vault?.hasSet("default")) && library.some((s) => s.name === "default")
+      ? LIBRARY_DEFAULT
+      : n,
+  );
+  const unknown = names.filter(
+    (n) =>
+      !loose.vault?.hasSet(n) &&
+      !library.some((s) => s.name === n || (n === LIBRARY_DEFAULT && s.name === "default")),
+  );
   if (unknown.length) {
     const known = [...new Set([...(loose.vault ? loose.vault.envNames() : []), ...library.map((s) => s.name)])];
     die(`No set called "${unknown[0]}".`, `you have: ${known.length ? known.join(", ") : "none yet"}`);

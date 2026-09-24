@@ -48,7 +48,7 @@ import {
 import {
   librarySets, loadLinks, saveLinks, openGlobal, usedSets,
   globalVaultName, globalVaultExists, namedVaults, saveConfig,
-  writeProjectDotfiles, ensureProjectVault, suggestSets,
+  writeProjectDotfiles, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor,
 } from "./library.ts";
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
@@ -191,11 +191,11 @@ function resolutionLines(vault: Vault | null, libraryVault: Vault | null, used: 
       first = false;
     };
     if (name === "default") {
-      const libDefault = libraryVault?.sets().find((s) => s.name === "default" && s.keys.length);
-      const projDefault = vault?.hasSet("default");
-      if (libDefault) push("default", "— your global environment", false);
-      if (projDefault) push("default", "(this folder)", false);
-      if (!libDefault && !projDefault) push("default", "(this folder, once you add one)", false);
+      push("default", vault?.hasSet("default") ? "(this folder)" : "(this folder, once you add one)", false);
+      return;
+    }
+    if (name === LIBRARY_DEFAULT) {
+      push("default", libraryVault?.hasSet("default") ? "(library)" : "(not found)", true);
       return;
     }
     const projSet = vault?.sets().find((s) => s.name === name);
@@ -382,8 +382,11 @@ function state(ctx: UiCtx) {
     source: s.source ?? "",
     keys: s.keys,
     secrets: libraryVault ? describe(libraryVault, s.name) : [],
-    used: used.includes(s.name),
-    position: positionOf(s.name),
+    // What the page sends to /api/link: the library's default is recorded as
+    // library:default, because a plain "default" means this folder's own.
+    link: linkNameFor("library", s.name),
+    used: used.includes(linkNameFor("library", s.name)),
+    position: positionOf(linkNameFor("library", s.name)),
   }));
 
   // A folder with no marker at all gets offered a one-click setup: what its
@@ -956,7 +959,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
       }
 
       writeProjectDotfiles(ctx.hushDir);
-      saveLinks(ctx.hushDir, use as string[]);
+      saveLinks(ctx.hushDir, (use as string[]).map((u) => (existing?.hasSet(u) ? u : linkNameFor("library", u))));
 
       let policyKept = false;
       if (agent) {
@@ -1645,7 +1648,7 @@ function setRow(set,where){
   nameWrap.append(nm);
 
   const descFallback=(where==="library"&&set.name==="default")
-    ?"your global environment — under everything, in every folder":"what is this for?";
+    ?"your catch-all — used only in folders you add it to":"what is this for?";
   nameWrap.append(editableRow(set,where,"description",set.description,descFallback,"description for "+set.label));
   nameWrap.append(editableRow(set,where,"whenToUse",set.whenToUse,"When to use it","when to use "+set.label));
   main.append(nameWrap);
@@ -1663,7 +1666,7 @@ function setRow(set,where){
     const use=$('<button type="button" class="quiet'+(set.used?" on":"")+'">'+esc(useLabel)+'</button>');
     use.title=set.used?"Stop using it in this folder":"Use it in this folder";
     use.onclick=async()=>{
-      const r=await api("/api/link",{name:set.name,use:!set.used});
+      const r=await api("/api/link",{name:set.link||set.name,use:!set.used});
       await refresh(r);toast(set.used?"dropped "+set.name:"this project now uses "+set.name);
     };
     useWrap.append(use);

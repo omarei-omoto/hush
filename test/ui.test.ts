@@ -1643,25 +1643,34 @@ describe("ui server — the Agent section's endpoints", () => {
   });
 
   test("/api/state's resolution list explains what a run gets, without ever carrying a value", async () => {
-    // Give the library's own "default" set a key too, so this project's run
-    // gets both floors — the library's global default and this folder's own
-    // default — and "default" prints as two lines under one usedIndex.
+    // A key in the library's own "default" set does not reach this folder
+    // until the folder adds it: the library is a catalog, not a floor.
     await api("/api/secret", { where: "library", scope: "default", key: "GLOBAL_FLOOR_KEY", value: "global_floor_value" });
 
-    const s = (await (await api("/api/state")).json()) as {
+    type State = {
       used: string[];
+      library: { name: string; link: string; used: boolean }[];
       resolution: { usedIndex: number; first: boolean; name: string; label: string; note: string; removable: boolean }[];
     };
-    assert.ok(s.resolution.length >= s.used.length, "fewer resolution lines than used entries");
-    // "default" is two floors, not one — the library's global default (when it
-    // has keys) and the project's own default both print as usedIndex 0.
-    const defaultLines = s.resolution.filter((l) => l.usedIndex === 0);
-    assert.equal(defaultLines.length, 2, "expected both the global and this-folder default lines");
-    assert.equal(defaultLines.filter((l) => l.first).length, 1, "exactly one line per usedIndex must carry the reorder controls");
-    assert.ok(defaultLines.some((l) => l.note.includes("your global environment")));
-    assert.ok(defaultLines.some((l) => l.note === "(this folder)"));
-    assert.ok(!JSON.stringify(s.resolution).includes(SECRET_VALUE), "a value reached the resolution list");
-    assert.ok(!JSON.stringify(s.resolution).includes("global_floor_value"), "a value reached the resolution list");
+    const before = (await (await api("/api/state")).json()) as State;
+    assert.ok(before.resolution.length >= before.used.length, "fewer resolution lines than used entries");
+    assert.ok(!before.resolution.some((l) => l.note === "(library)" && l.label === "default"), "the library default leaked in");
+    const libDefault = before.library.find((l) => l.name === "default")!;
+    assert.equal(libDefault.link, "library:default");
+    assert.equal(libDefault.used, false);
+
+    // Added from the page, it shows up as its own removable line.
+    await api("/api/link", { name: libDefault.link, use: true });
+    const after = (await (await api("/api/state")).json()) as State;
+    assert.ok(after.library.find((l) => l.name === "default")!.used);
+    const line = after.resolution.find((l) => l.name === "library:default");
+    assert.ok(line && line.note === "(library)" && line.removable, JSON.stringify(after.resolution));
+    assert.ok(after.resolution.some((l) => l.name === "default" && l.note === "(this folder)"));
+    for (const st of [before, after]) {
+      assert.ok(!JSON.stringify(st.resolution).includes(SECRET_VALUE), "a value reached the resolution list");
+      assert.ok(!JSON.stringify(st.resolution).includes("global_floor_value"), "a value reached the resolution list");
+    }
+    await api("/api/link", { name: libDefault.link, use: false });
   });
 
   test("/api/state's agent status is read fresh off disk, matching what hush doctor checks", async () => {

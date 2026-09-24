@@ -385,11 +385,9 @@ describe("fuzz: usedSets / composeSets order", () => {
             const expectedMissing: string[] = [];
             const expectedSecrets: Record<string, string> = {};
             for (const name of names) {
+              // The library's default is opt-in (library:default), and no
+              // link here names it, so it never contributes.
               if (name === "default") {
-                if (globalHasKeys) {
-                  expectedLayers.push(`${globalVaultName()}:default`);
-                  expectedSecrets.GLOBAL_ONLY = "everywhere";
-                }
                 if (hasProject) expectedLayers.push("default");
                 continue;
               }

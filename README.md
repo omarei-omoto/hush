@@ -169,9 +169,13 @@ A set lives in one of two places:
 - **This project** — `.hush/vault.json`, committed, shared with your team.
 
 A project *uses* sets. Its own `default` set is always used, as the floor;
-everything else layers on top in the order you added it, later wins. Under
-even that sits your library's `default` — your **global environment**,
-injected in every folder (`hush add K=v --library` with no `--to` lands there).
+everything else layers on top in the order you added it, later wins.
+
+**Your library is a catalog, not a floor.** Nothing in it reaches a folder
+until that folder asks: `hush use <set>`, or tell your agent which ones you want
+and it adds them. Its `default` set is your catch-all (`hush add K=v --library`
+with no `--to` lands there); use it in a folder with
+`hush use default --library`. Add more from the library any time.
 `.hush/envs.json` records only the *names* — a teammate who clones the repo
 gets "this project uses a set called acme-production" and supplies their own.
 
@@ -533,10 +537,13 @@ descriptions explain themselves — you just have to say so each time.
 
 `.hush/policy.json` controls what it may run — through the MCP tools *and*
 through the CLI, so an agent that shells out to `hush run` or `hush export`
-meets the same policy and the same approval prompt. Anything that exists to dump
-or re-encode the environment is denied by default — shells, `env`, `base64`,
+meets the same approval prompt. For the agent's tools, anything that exists to
+dump or re-encode the environment is denied outright — shells, `env`, `base64`,
 `curl`, and every interpreter, because `node -e` can write the whole environment
-to a file that output redaction never sees:
+to a file that output redaction never sees. In your terminal the same commands
+are not refused: `hush node server.js` goes to the approval prompt with a
+warning line, the way `op run` asks rather than blocks. `allowCommands` still
+narrows both:
 
 ```json
 {

@@ -4,6 +4,28 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### Changed — asks instead of refusing, and the library stays a library
+
+**Breaking (pre-1.0):** your library's `default` set is no longer injected into
+every folder. The library is a catalog: nothing in it reaches a project until
+that project adds it. To keep the old behaviour in a folder, run
+`hush use default --library` there. It is recorded as `library:default` in
+`.hush/envs.json`, and you can add more from the library later.
+
+- **Your own commands are no longer refused.** With a `.hush/policy.json`, the
+  CLI used to refuse `hush node server.js`, `hush python app.py`,
+  `hush bash deploy.sh` and a bun project's `hush dev`, all to the person who
+  typed them. varlock gates nothing and 1Password's `op run` asks rather than
+  blocks, so hush now does the same. With `run` approval on, these commands go
+  to the approval prompt with a warning line. An agent shelling out to
+  `hush run` still has to get a human to click Allow on that exact command.
+  The agent's MCP tools keep the hard deny, and an `allowCommands` list you
+  wrote still narrows both.
+- **The setup questions in a new folder can be declined.** Answering `n` (or
+  picking nothing) runs your command with nothing injected, says so, and
+  writes nothing. The folder is asked again next time. It used to exit with
+  "Nothing set up."
+
 ### Less that hush does to a project without asking
 
 - **`hush install-mcp` and `hush install-skill` show what they will write, and

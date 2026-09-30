@@ -55,6 +55,7 @@ import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from ".
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 import { isTrustError } from "./integrity.ts";
+import { withoutChain } from "./audit.ts";
 
 const TOKEN = randomBytes(24).toString("base64url");
 
@@ -1105,7 +1106,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
             // Never render a field named "value" — belt and suspenders on top
             // of audit() itself never writing one (see the red-team test).
             const { value: _drop, ...rest } = parsed;
-            return rest;
+            return withoutChain(rest);
           } catch {
             return null;
           }

@@ -6,7 +6,7 @@
  * pointer. The second form is how one team vault serves many repos.
  */
 import {
-  existsSync, mkdirSync, readFileSync, appendFileSync,
+  existsSync, mkdirSync, readFileSync,
   openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, statSync, realpathSync,
 } from "node:fs";
 import { dirname, join, resolve, isAbsolute } from "node:path";
@@ -1447,19 +1447,8 @@ export class Vault {
 
 // -------------------------------------------------------------------- audit
 
-/** Local, append-only access log. Never committed — it records what *you* read. */
-/** Rotate at this size so a long-lived machine cannot fill the disk. */
-const AUDIT_MAX_BYTES = 2 * 1024 * 1024;
-
-export function audit(hushDir: string, event: Record<string, unknown>): void {
-  try {
-    mkdirSync(hushDir, { recursive: true });
-    const path = join(hushDir, "audit.log");
-    if (existsSync(path) && statSync(path).size > AUDIT_MAX_BYTES) {
-      renameSync(path, `${path}.1`); // keeps exactly one previous generation
-    }
-    appendFileSync(path, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n");
-  } catch {
-    /* auditing must never break the command */
-  }
-}
+/**
+ * The audit log moved to src/audit.ts when it became a hash chain. Re-exported
+ * here because every surface already imports it from the vault module.
+ */
+export { audit } from "./audit.ts";

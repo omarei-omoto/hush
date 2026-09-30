@@ -204,6 +204,13 @@ The CLI says so every time.
 **Git history is permanent.** A deleted secret remains in history as ciphertext.
 If the vault key ever leaks, so does everything the history contains.
 
+**The audit log shows an edit; it does not prevent one.** `.hush/audit.log` is
+a hash chain — each line carries the SHA-256 of the line above, the first a
+random salt — and `hush audit verify` names the first line that does not follow.
+Anything running as you can still rewrite the whole file and recompute the
+chain, or cut lines off the end. A log nobody on the machine can rewrite has to
+live somewhere else.
+
 **No zeroisation.** Decrypted values live in JS strings and are collected
 whenever the runtime feels like it. A core dump or swap file may contain them.
 

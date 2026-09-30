@@ -883,6 +883,7 @@ hardening
   hush biometry [setup|test]    gate approvals behind Touch ID
   hush age                      use a YubiKey / Secure Enclave / TPM via age
   hush verify                   check the vault decrypts and has not been rolled back
+  hush audit [verify]           what hush did here; verify checks nothing was edited out
   hush rotate                   new vault key, same values
 
 agents

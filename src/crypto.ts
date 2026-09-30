@@ -215,3 +215,20 @@ export function unwrapDek(w: Wrap, id: Identity): Buffer {
 }
 
 export const newDek = (): Buffer => randomBytes(32);
+
+/**
+ * A commitment to one generation of a vault's data key, safe to store and show.
+ *
+ * The vault file does not say who chose its data key: anyone can mint one and
+ * wrap it to every member's public key, since those are in the file. What a
+ * member *can* notice is that the key behind a given (vault, generation) is not
+ * the one it was the last time they looked — no legitimate operation re-keys a
+ * vault without moving to a new generation. HKDF output reveals nothing about
+ * its input, so the commitment can sit in `~/.hush/seen/` and, later, in a
+ * signed vault header.
+ */
+export function dekCommit(dek: Buffer, vaultId: string, generation: number): string {
+  return Buffer.from(
+    hkdfSync("sha256", dek, Buffer.from(vaultId, "utf8"), Buffer.from(`hush/dek-commit/${generation}`), 16),
+  ).toString("hex");
+}

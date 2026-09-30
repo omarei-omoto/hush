@@ -43,8 +43,11 @@ before(async () => {
     stdio: ["ignore", "pipe", "pipe"],
     // HUSH_NO_DIALOG: no test here should ever pop a real approval dialog on
     // the machine running the suite; a gated action refuses instead.
+    // HOME too: the Agent section reads the user-wide agent configs
+    // (~/.codex/config.toml), and a real one registering hush on the machine
+    // running the suite made "not registered yet" fail there and nowhere else.
     env: {
-      ...process.env, HUSH_HOME: home, HUSH_IDENTITY: encodeSecret(id),
+      ...process.env, HOME: home, HUSH_HOME: home, HUSH_IDENTITY: encodeSecret(id),
       HUSH_BIOMETRY: "off", HUSH_NO_DIALOG: "1", NO_COLOR: "1",
     },
   });

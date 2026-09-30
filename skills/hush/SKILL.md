@@ -66,6 +66,13 @@ variables, with a 4-digit code. The tool result tells you the code and the
 decision. If it comes back denied or timed out, tell the user plainly and stop —
 do not retry in a loop or look for another route to the same credential.
 
+**If hush says the vault changed and nobody accepted it** ("membership changed",
+"a different vault", "the data key … is not the one this machine saw"), stop and
+tell the user exactly what it says. Someone added a member, rotated the key, or
+replaced the vault, and only a person who has checked with their teammates may
+accept that. **Never run `hush team accept` yourself** — accepting a member you
+did not verify hands them every secret added from then on.
+
 ## Calling an API directly
 
 `hush_run` needs a program that already knows how to authenticate itself. When

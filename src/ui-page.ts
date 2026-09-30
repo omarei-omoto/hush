@@ -1514,6 +1514,13 @@ function render(){
   renderShell();
   const page=document.getElementById("page");clear(page);
   const r=route();
+  // A vault that changed without anyone here accepting it: nothing in it is
+  // decrypted, and the way out is a terminal command, on every section.
+  if(S.trust&&S.trust.length){
+    const lines=h("div",null);
+    S.trust.forEach(function(l,i){lines.append(h(i===0?"b":"div",{text:l}))});
+    page.append(h("div",{class:"banner warn",role:"alert",style:"margin-bottom:14px"},icon("alert"),lines));
+  }
   if(r==="project")renderProject(page);
   else if(r==="library")renderLibrary(page);
   else if(r==="team")renderTeam(page);

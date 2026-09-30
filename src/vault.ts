@@ -223,6 +223,39 @@ export function assertValueSize(key: string, value: string): void {
   }
 }
 
+/**
+ * What a trust check needs to see of a vault: who can open it and the data key
+ * behind its current generation. See integrity.ts.
+ */
+export interface TrustView {
+  vaultId: string;
+  path: string;
+  generation: number;
+  recipients: Record<string, { name: string; pk: string }>;
+  dek: Buffer;
+}
+
+/**
+ * How the vault asks "has a person on this machine accepted this?".
+ *
+ * Injected rather than imported, so the check applies wherever `hush` itself
+ * runs (the CLI turns it on in main(), and the MCP server and the app run under
+ * that same main) while code that uses this module as a library — tests, a
+ * script — never writes pins into somebody's real ~/.hush as a side effect.
+ */
+export interface TrustHook {
+  /** Throw (TrustError) rather than let an unaccepted vault be decrypted. */
+  verify(view: TrustView): void;
+  /** This machine itself wrote the vault as it now stands: pin it. */
+  record(view: TrustView): void;
+}
+
+let trustHook: TrustHook | null = null;
+
+export function setTrustHook(hook: TrustHook | null): void {
+  trustHook = hook;
+}
+
 export interface LinkFile {
   vault: string;
   env?: string;
@@ -646,6 +679,12 @@ export class Vault {
   private structural = false;
   /** Remembered so a replay can re-seal under the newer data key. */
   private opener: Opener | null = null;
+  /**
+   * A data key this instance knows is legitimate for `data.dek.generation`:
+   * one it minted itself, or one that passed the trust check. What a save pins,
+   * since a vault this machine just wrote is by definition one it accepts.
+   */
+  private trusted: { generation: number; dek: Buffer } | null = null;
 
   /** True when at least one member uses age, so hardware is worth waking. */
   private get usesAge(): boolean {
@@ -698,6 +737,7 @@ export class Vault {
     };
     const v = new Vault(path, data);
     v.dekCache = { fp, dek };
+    v.trusted = { generation: 1, dek };
     v.save();
     return v;
   }
@@ -746,6 +786,35 @@ export class Vault {
   save(): void {
     mkdirSync(dirname(this.path), { recursive: true });
     withVaultLock(this.path, () => this.saveLocked());
+    // What this machine just wrote is what it accepts: a member it added, a
+    // rotation it made. Only when the key in hand belongs to the generation on
+    // disk — a save that never touched the data key pins nothing.
+    if (trustHook && this.trusted && this.trusted.generation === this.data.dek.generation) {
+      trustHook.record(this.trustView(this.trusted.dek));
+    }
+  }
+
+  /** The shape the trust check reads. See integrity.ts. */
+  trustView(dek: Buffer): TrustView {
+    const recipients: TrustView["recipients"] = {};
+    for (const [fp, r] of Object.entries(this.data.recipients)) recipients[fp] = { name: r.name, pk: r.pk };
+    return { vaultId: this.data.id, path: this.path, generation: this.data.dek.generation, recipients, dek };
+  }
+
+  /**
+   * The data key *without* the trust check, for showing a person what changed
+   * (`hush team accept`, `hush verify`). Never used to open or seal a value:
+   * that is exactly what the check exists to stop.
+   */
+  dekForReview(id: Opener): Buffer {
+    for (const c of this.myCandidates(id)) {
+      const wrap = this.data.dek.wraps[c.fp];
+      if (!wrap) continue;
+      return isAgeWrap(wrap)
+        ? unwrapDekWithAge(wrap.age, id.age!.identityPath)
+        : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
+    }
+    throw new Error(`Your key is not a recipient of vault "${this.data.name}".`);
   }
 
   /**
@@ -786,6 +855,9 @@ export class Vault {
       }
       this.data = fresh.data;
       this.dekCache = null;
+      // The copy on disk is someone else's write. Its key counts as checked
+      // only if replaying a value onto it went through the trust check.
+      this.trusted = fresh.trusted;
     }
 
     this.writeAtomically();
@@ -840,6 +912,15 @@ export class Vault {
       const dek = isAgeWrap(wrap)
         ? unwrapDekWithAge(wrap.age, id.age!.identityPath)
         : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
+
+      // Unwrapping proves the key was wrapped *to* you, not *by* a member: a
+      // non-member can wrap a key of their choosing to every public key in the
+      // file. So before anything is opened or sealed with it, the vault has to
+      // be one a person on this machine accepted (V-1, integrity.ts).
+      const generation = this.data.dek.generation;
+      const known = this.trusted?.generation === generation && this.trusted.dek.equals(dek);
+      if (trustHook && !known) trustHook.verify(this.trustView(dek));
+      this.trusted = { generation, dek };
 
       this.dekCache = { fp: c.fp, dek };
       return dek;
@@ -1346,6 +1427,8 @@ export class Vault {
     }
     // Drop the cache: the next reader re-derives from their own wrap.
     this.dekCache = null;
+    // Minted here, so it needs no check — and the save that follows pins it.
+    this.trusted = { generation, dek };
     return count;
   }
 

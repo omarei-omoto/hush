@@ -54,6 +54,7 @@ import {
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
+import { isTrustError } from "./integrity.ts";
 
 const TOKEN = randomBytes(24).toString("base64url");
 
@@ -357,14 +358,27 @@ function state(ctx: UiCtx) {
     return i === -1 ? null : i;
   };
 
-  const describe = (v: Vault, scope: string) =>
-    v.list(scope).map((i) => ({
-      key: i.key,
-      preview: preview(v.get(id, scope, i.key)),
-      updatedBy: i.updatedBy,
-      updatedAt: i.updatedAt,
-      note: i.note ?? "",
-    }));
+  // A vault whose membership or key changed without anyone here accepting it
+  // is not decrypted — not even for a masked preview (V-1). The page still
+  // loads, with the previews blank and the reason at the top, because the
+  // answer is a terminal command a person runs, not a button an agent that
+  // can see this page's URL could press.
+  let trust: string[] | null = null;
+  const describe = (v: Vault, scope: string) => {
+    try {
+      return v.list(scope).map((i) => ({
+        key: i.key,
+        preview: preview(v.get(id, scope, i.key)),
+        updatedBy: i.updatedBy,
+        updatedAt: i.updatedAt,
+        note: i.note ?? "",
+      }));
+    } catch (e) {
+      if (!isTrustError(e)) throw e;
+      trust ??= e.message.split("\n").map((l) => l.trim()).filter(Boolean);
+      return [];
+    }
+  };
 
   const projectSets = vault
     ? vault.sets().map((s) => ({
@@ -441,6 +455,7 @@ function state(ctx: UiCtx) {
 
   return {
     vault: vault ? vault.data.name : null,
+    trust,
     me: { name: meName, pk: publicKeyOf(id) },
     defaultEnv: ctx.defaultEnv,
     folder: { root: ctx.root, state: fState, hushDir: ctx.hushDir },
@@ -1164,6 +1179,11 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
           const message = err instanceof Error ? err.message : String(err);
           if (isValidationError(err) || /body too large|invalid JSON/.test(message)) {
             return json(res, 400, { error: message.split("\n")[0] });
+          }
+          // Not the caller's mistake and not a fault: a person has to accept
+          // a change to the vault first. The whole message, which ends with how.
+          if (isTrustError(err)) {
+            return json(res, 409, { error: message.split("\n").map((l) => l.trim()).filter(Boolean).join(" "), trust: true });
           }
           throw err;
         }

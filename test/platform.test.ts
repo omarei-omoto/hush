@@ -54,7 +54,10 @@ describe("F-7: finding a program on Windows", () => {
     try {
       assert.equal(onPath("npm", dir, "win32"), join(dir, "npm.cmd"));
       assert.equal(onPath("node.exe", dir, "win32"), join(dir, "node.exe"));
-      assert.equal(onPath("npm", dir, "darwin"), join(dir, "npm"));
+      // The POSIX branch splits PATH on ":", so it can only be simulated with a
+      // POSIX path: on a real Windows runner, dir is "C:\…" and the drive
+      // letter would split it. (No Mac has drive letters.)
+      if (process.platform !== "win32") assert.equal(onPath("npm", dir, "darwin"), join(dir, "npm"));
     } finally {
       if (prev === undefined) delete process.env.PATHEXT;
       else process.env.PATHEXT = prev;

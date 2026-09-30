@@ -35,13 +35,13 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform } from "node:os";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { ASSET_FILES } = await import(join(root, "src", "assets.ts"));
-const { VERSION } = await import(join(root, "src", "version.ts"));
-const { PAGE } = await import(join(root, "src", "ui-page.ts"));
+const { ASSET_FILES } = await import(pathToFileURL(join(root, "src", "assets.ts")).href);
+const { VERSION } = await import(pathToFileURL(join(root, "src", "version.ts")).href);
+const { PAGE } = await import(pathToFileURL(join(root, "src", "ui-page.ts")).href);
 
 /** Release name → Bun target. Every x64 target uses the baseline build: it runs on CPUs without AVX2, and under Rosetta, which has none. */
 export const TARGETS = {

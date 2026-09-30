@@ -177,9 +177,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # A native command's failure does not stop PowerShell; check each one.
           node scripts/build-binaries.mjs --target windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:HUSH_TEST_BINARY = Join-Path $env:GITHUB_WORKSPACE 'release\hush-windows-x64.exe'
           node --test test/binary.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   fuzz:
     name: deeper fuzzing

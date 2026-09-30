@@ -13,11 +13,11 @@
  */
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const { Vault } = await import(join(root, "src", "vault.ts"));
-const { generateIdentity, encodeSecret, decodeSecret } = await import(join(root, "src", "crypto.ts"));
+const { Vault } = await import(pathToFileURL(join(root, "src", "vault.ts")).href);
+const { generateIdentity, encodeSecret, decodeSecret } = await import(pathToFileURL(join(root, "src", "crypto.ts")).href);
 
 const i = process.argv.indexOf("--out");
 const out = i === -1 ? join(root, "examples", "hush-demo") : process.argv[i + 1];

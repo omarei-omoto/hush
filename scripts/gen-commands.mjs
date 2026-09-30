@@ -12,13 +12,13 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const target = join(root, "docs", "guide", "commands.md");
 
 export async function commandsPage() {
-  const { FULL_HELP } = await import(join(root, "src", "cli", "help.ts"));
+  const { FULL_HELP } = await import(pathToFileURL(join(root, "src", "cli", "help.ts")).href);
   const plain = FULL_HELP.replace(/\x1b\[[0-9;]*m/g, "")
     .split("\n")
     // The version line changes every release and says nothing a reader needs here.

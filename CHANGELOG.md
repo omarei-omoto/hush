@@ -4,6 +4,62 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.7.0 — 2026-09-30
+
+### Vault merges go key by key
+
+Two branches that both touched `.hush/vault.json` used to conflict as a wall of
+base64, and taking one side dropped the other's secrets.
+
+- `hush merge-driver --install` (once per clone) hands vault merges to hush.
+  Keys added on either side are kept. A rotation or a removal on one branch
+  wins, and everything from the other branch is re-sealed under the new key; a
+  member added on the other branch is given it. Both branches rotating is
+  refused, not guessed at.
+- A key changed on both branches keeps this branch's value, and `hush merge
+  status` lists it (set, key, who, when — never a value). `hush merge pick KEY
+  --ours|--theirs` settles each; every hush command mentions an open choice
+  until it is made.
+- Without the driver, git still stops on the vault as before, and `hush merge`
+  finishes the merge from the three versions git kept.
+- The committed `.hush/.gitattributes` still says `-merge`: git falls back to a
+  line-by-line text merge when a named driver is not configured, so the driver
+  is switched on per clone in `.git/info/attributes` and git config instead.
+- `hush doctor` says whether this clone has it.
+
+### Nine coding agents
+
+`hush install-mcp` and `hush install-skill` now know **Gemini CLI**, **VS
+Code** (Copilot agent mode), **Windsurf**, **Zed**, **Cline** and **Continue**
+as well as Claude Code, Codex and Cursor — each in the file its own
+documentation names. Zed's settings file keeps every comment (the entry is
+inserted, not re-serialised). Codex, Gemini CLI and Zed share
+`.agents/skills/`, so the skill is written once for all three.
+
+### The audit log is a hash chain
+
+Each line of `.hush/audit.log` carries the SHA-256 of the line above it.
+`hush audit` shows the log; `hush audit verify` names the first line that does
+not follow — an edit, a removal, an insertion or a reorder. It makes an edit
+visible, not impossible (SECURITY.md says so).
+
+### The app's link keeps its token out of history
+
+`hush ui` now prints `http://127.0.0.1:…/#t=<token>`. The fragment never
+reaches a server or a log; the page reads it, wipes it from the address bar and
+keeps it for the tab. The page itself no longer contains the token. It also
+refuses to be framed by another page.
+
+### Under the hood
+
+- `src/cli.ts` is split into `src/cli/` (shared helpers) and one file per
+  command in `src/commands/`. No behaviour change.
+- `npm run build:check` builds `dist/` twice and fails on any difference; CI and
+  the release run it, and releases publish with npm provenance. `RELEASING.md`
+  describes the process.
+- `.hush/.gitignore` for new projects also ignores `audit.log.*` (the rotated
+  log and its lock) and `merge-conflicts.json`.
+
 ## 0.6.0 — 2026-09-30
 
 **Upgrade recommended for every team vault.**

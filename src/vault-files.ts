@@ -243,6 +243,15 @@ export const trimNote = (note?: string): string | undefined => {
  * Notes, member names, environment names and the vault's own name all go
  * through here before they are displayed.
  */
+/**
+ * A message on its way to a terminal, with every control character except the
+ * newline made visible and harmless. A vault file is written by whoever can
+ * commit to the repository, and its strings — a member's name, the vault id —
+ * end up inside hush's own warnings. An escape sequence there could clear the
+ * screen and repaint "Treat it as forged" as something reassuring.
+ */
+export const withoutControls = (s: string): string => s.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu, "\ufffd");
+
 export function safeText(s: unknown, max = MAX_NOTE_CHARS): string | undefined {
   if (typeof s !== "string") return undefined;
   // Strip C0, DEL and C1 — the whole escape-sequence alphabet — but keep every
@@ -600,7 +609,7 @@ export function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = loc
 export function assertVaultShape(data: VaultFile, path: string): void {
   const bad = (why: string): never => {
     throw new Error(
-      `The vault at ${path} is malformed: ${why}.\n` +
+      `The vault at ${path} is malformed: ${withoutControls(why)}.\n` +
         `  A vault is not merged line by line. After a git merge: hush merge (it merges key by key).`,
     );
   };
@@ -614,6 +623,9 @@ export function assertVaultShape(data: VaultFile, path: string): void {
   const isGeneration = (x: unknown): x is number =>
     typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= MAX_GENERATION;
 
+  // The id and the member fingerprints are names hush prints and pins by, and
+  // hush has only ever written plain ones (vlt_ and 16 hex digits).
+  if (typeof data.id !== "string" || !/^[A-Za-z0-9_.:-]{1,80}$/.test(data.id)) bad("its id is not one hush writes");
   if (!isObject(data.dek)) bad("it has no data key");
   if (!isGeneration(data.dek.generation)) {
     bad(`the key generation is ${JSON.stringify(data.dek.generation)} rather than a positive whole number`);
@@ -623,6 +635,7 @@ export function assertVaultShape(data: VaultFile, path: string): void {
   if (!isObject(data.envs)) bad("the environments are not an object");
 
   for (const [fp, r] of Object.entries(data.recipients)) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(fp)) bad("a member's fingerprint is not one hush writes");
     if (!isObject(r) || typeof r.pk !== "string" || typeof r.name !== "string") {
       bad(`member "${fp.slice(0, 12)}" is missing a name or a public key`);
     }

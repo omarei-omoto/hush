@@ -5,7 +5,7 @@
  */
 import { resolve as resolvePath, sep } from "node:path";
 import { realpathSync } from "node:fs";
-import { resolveVaultPath, Vault, audit, ValidationError } from "./vault.ts";
+import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
 import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
@@ -35,7 +35,8 @@ function requireArg(args: Record<string, unknown>, name: string, tool: string): 
 }
 
 const text = (s: string) => ({ content: [{ type: "text", text: s }] });
-export const errText = (s: string) => ({ content: [{ type: "text", text: s }], isError: true });
+/** An error for the agent. Scrubbed like the terminal's: some of it came from the vault file. */
+export const errText = (s: string) => ({ content: [{ type: "text", text: withoutControls(s) }], isError: true });
 
 // ------------------------------------------------------------------ server
 

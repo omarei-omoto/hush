@@ -130,6 +130,76 @@ describe("V-1b: the header is signed", () => {
     t.cleanup();
   });
 
+  test("an admin who was removed cannot sign their way back in", () => {
+    // Removal pins, like everything else: once this machine has seen bob
+    // removed by an admin it trusts, bob's signature is a stranger's again,
+    // even though his key was an admin's a moment ago.
+    const t = signedTeam();
+    t.alice.run(["team", "add", "bob", t.bob.key, "--role", "admin"]);
+    t.alice.run(["team", "add", "mallory", t.mallory.key]);
+    assert.equal(t.mallory.run(printBase).code, 0, "mallory could not read the vault she was added to");
+    // His real fingerprint: the one this machine pinned as an admin's.
+    const bobFp = Object.entries(t.data().recipients).find(([, r]) => r.name === "bob")![0];
+    const removed = t.alice.run(["team", "rm", "bob"]);
+    assert.equal(removed.code, 0, removed.out);
+    assert.equal(t.mallory.run(printBase).code, 0, "a removal signed by a trusted admin was refused");
+
+    // Bob, removed, re-adds himself as an admin — with his real, once-trusted
+    // signing key — and signs. His wrap is a copy of the key he can no longer
+    // unwrap, so he plants nothing; the point is the membership change.
+    const d = t.data();
+    assert.ok(!d.recipients[bobFp], "bob is still listed after team rm");
+    d.recipients[bobFp] = {
+      name: "bob", pk: encodePub(t.bob.id.pub), role: "admin", addedAt: "x", spk: encodeSpk(signerForIdentity(t.bob.id).spk),
+    };
+    d.signature = { by: bobFp, sig: signerForIdentity(t.bob.id).sign(headerBytes(d)).toString("base64") };
+    t.write(d);
+    assert.ok(verifyHeader(d).ok, "the forged vault should be internally consistent");
+    const r = t.mallory.run(printBase);
+    assert.notEqual(r.code, 0, "a removed admin's signature was accepted:\n" + r.out);
+    assert.match(r.out, /admin this machine has not seen before/);
+    t.cleanup();
+  });
+
+  test("a signature from another vault does not carry over, even by the same admin", () => {
+    // Alice signs two vaults with the same key. A signature is over one vault's
+    // id and members, so lifting it from her other vault onto this one — after
+    // adding someone here — fails.
+    const t = signedTeam();
+    const other = mkdtempSync(join(tmpdir(), "hush-v3-other-"));
+    t.alice.run(["init", "other", "--as", "alice", "--no-agent"], { cwd: other });
+    const otherData = JSON.parse(readFileSync(join(other, ".hush", "vault.json"), "utf8")) as VaultFile;
+    const d = t.data();
+    d.recipients["c".repeat(16)] = { name: "mallory", pk: encodePub(t.mallory.id.pub), role: "admin", addedAt: "x" };
+    d.signature = otherData.signature;
+    assert.equal(d.signature!.by, Object.keys(d.recipients).find((fp) => d.recipients[fp].name === "alice"), "the same admin, the same fingerprint");
+    assert.equal(verifyHeader(d).ok, false, "another vault's signature verified here");
+    t.write(d);
+    const r = t.alice.run(printBase);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /signature does not match/);
+    rmSync(other, { recursive: true, force: true });
+    t.cleanup();
+  });
+
+  test("a forged vault cannot write escape codes into the warning about it", () => {
+    // The member's name comes from the file. If it reached the terminal raw,
+    // it could clear the screen and repaint "Treat it as forged" as anything.
+    const t = signedTeam();
+    t.alice.run(["team", "add", "bob", t.bob.key]);
+    t.bob.run(["verify"]);
+    const d = t.data();
+    const bobFp = Object.entries(d.recipients).find(([, r]) => r.name === "bob")![0];
+    d.recipients[bobFp].name = "bob\u001b[2J\u001b[H\u001b[32m✓ all good\u001b[0m";
+    d.signature = { by: bobFp, sig: signerForIdentity(t.bob.id).sign(headerBytes(d)).toString("base64") };
+    t.write(d);
+    const r = t.bob.run(printBase);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /not an admin/);
+    assert.ok(!r.out.includes("\u001b[2J") && !r.out.includes("\u001b[H"), `an escape code from the vault reached the terminal:\n${JSON.stringify(r.out)}`);
+    t.cleanup();
+  });
+
   test("a change signed by an admin this machine has never seen is held for a person to check", () => {
     const t = signedTeam();
     t.alice.run(["team", "add", "bob", t.bob.key]);

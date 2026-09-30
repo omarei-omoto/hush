@@ -1,7 +1,7 @@
 /**
  * Terminal output: colour, the one-line helpers, and dying with a message.
  */
-import { safeText } from "../vault.ts";
+import { safeText, withoutControls } from "../vault.ts";
 
 // ------------------------------------------------------------------- output
 
@@ -19,7 +19,7 @@ export const out = (s = ""): void => void process.stdout.write(s + "\n");
 /** Indent every line of a multi-line block, so a pasted snippet stays aligned. */
 export const indent = (s: string, pad: string): string => pad + s.split("\n").join("\n" + pad);
 export const info = (s: string): void => out(s);
-export const warn = (s: string): void => void process.stderr.write(yellow(`! ${s}`) + "\n");
+export const warn = (s: string): void => void process.stderr.write(yellow(`! ${withoutControls(s)}`) + "\n");
 
 /**
  * A vault-supplied name on its way to the terminal. Set names are an identity,
@@ -30,7 +30,9 @@ export const warn = (s: string): void => void process.stderr.write(yellow(`! ${s
 export const shown = (name: string, max = 80): string => safeText(name, max) ?? "<unprintable>";
 
 export function die(message: string, hint?: string): never {
-  process.stderr.write(red(`✗ ${message}`) + "\n");
-  if (hint) process.stderr.write(dim(`  ${hint}`) + "\n");
+  // An error message can carry text from a vault file or another program;
+  // none of it gets to drive the terminal.
+  process.stderr.write(red(`✗ ${withoutControls(message)}`) + "\n");
+  if (hint) process.stderr.write(dim(`  ${withoutControls(hint)}`) + "\n");
   process.exit(1);
 }

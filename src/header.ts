@@ -22,7 +22,7 @@
  * can write a value; the header decides *who* holds keys, not what they write.
  */
 import { canonicalJson, dekCommit, decodeSpk, verifySignature, type Signer } from "./crypto.ts";
-import type { VaultFile } from "./vault-files.ts";
+import { safeText, type VaultFile } from "./vault-files.ts";
 
 const DOMAIN = "hush/v3/header\n";
 
@@ -87,13 +87,15 @@ export function verifyHeader(data: VaultFile): HeaderCheck {
   if (!sig) return { ok: false, why: "it is not signed" };
   const signer = data.recipients[sig.by];
   if (!signer) return { ok: false, why: "it is signed by someone who is not a member" };
-  if (signer.role !== "admin" || signer.ci) return { ok: false, why: `it is signed by ${signer.name}, who is not an admin` };
-  if (!signer.spk) return { ok: false, why: `${signer.name} has no signing key in the vault` };
+  // The name comes from the file: whoever forged it chose it.
+  const name = safeText(signer.name, 64) ?? "someone";
+  if (signer.role !== "admin" || signer.ci) return { ok: false, why: `it is signed by ${name}, who is not an admin` };
+  if (!signer.spk) return { ok: false, why: `${name} has no signing key in the vault` };
   let spk: Buffer;
   try {
     spk = decodeSpk(signer.spk);
   } catch {
-    return { ok: false, why: `${signer.name}'s signing key is malformed` };
+    return { ok: false, why: `${name}'s signing key is malformed` };
   }
   if (!verifySignature(spk, headerBytes(data), Buffer.from(sig.sig, "base64"))) {
     return { ok: false, why: "the signature does not match the header — it was changed after it was signed" };

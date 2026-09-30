@@ -4,7 +4,7 @@
  */
 import { existsSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
-import { resolveVaultPath, namedVaultPath, setTrustHook } from "./vault.ts";
+import { resolveVaultPath, namedVaultPath, setTrustHook, withoutControls } from "./vault.ts";
 import { serveMcp } from "./mcp.ts";
 import { serveUi } from "./ui.ts";
 import { VERSION } from "./version.ts";
@@ -162,7 +162,7 @@ main().catch((e) => {
   if (isTrustError(e)) {
     // Several lines, and the last two are the way out: printed as a block
     // rather than one red paragraph.
-    const [first, ...rest] = e.message.split("\n");
+    const [first, ...rest] = withoutControls(e.message).split("\n");
     process.stderr.write(red(`✗ ${first}`) + "\n");
     for (const line of rest) process.stderr.write(`${line}\n`);
     process.exit(1);

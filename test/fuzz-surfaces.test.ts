@@ -547,3 +547,159 @@ describe("fuzz: saveLinks / loadLinks", () => {
     }
   });
 });
+
+describe("fuzz: what a forged vault can put in hush's own warnings", () => {
+  // The vault file is written by whoever can commit to the repository, and its
+  // strings reach the very messages that say "treat it as forged". A control
+  // character there could clear the screen and repaint the warning. Whatever
+  // a forged file carries — in a name, the signer, the id, a fingerprint, a
+  // set name — hush either refuses to load it, or says so in clean lines.
+  const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const NASTY = ["\u001b[2J", "\u001b[31m", "\u0007", "\r", "\u009b", "\u0000", "\u001b]0;title\u0007", "\b\b\b", "\t"];
+
+  test("no control character from the file reaches a trust message or a load error", async () => {
+    const home = mkdtempSync(join(tmpdir(), "hush-fuzz-trust-home-"));
+    const saved = process.env.HUSH_HOME;
+    process.env.HUSH_HOME = home;
+    try {
+      const { encodePub } = await import("../src/crypto.ts");
+      const { pendingChanges, recordTrusted, describeTrustProblems } = await import("../src/integrity.ts");
+      const { verifyHeader } = await import("../src/header.ts");
+      const owner = generateIdentity();
+      const bob = generateIdentity();
+      const dir = mkdtempSync(join(tmpdir(), "hush-fuzz-trust-"));
+      const path = join(dir, "vault.json");
+      const v = Vault.create(path, "t", { name: "owner", pub: owner.pub, priv: owner.priv });
+      v.set(owner, "default", "K", "value-1");
+      v.set(owner, "prod", "P", "value-2");
+      v.addRecipient(owner, "bob", encodePub(bob.pub), "member");
+      v.save();
+      recordTrusted(Vault.open(path).reviewView(owner));
+      const original = JSON.stringify(Vault.open(path).data);
+
+      for (const seed of seeds([11, 23, 37, 41])) {
+        const r = rng(seed);
+        for (let round = 0; round < rounds(40); round++) {
+          const d = JSON.parse(original);
+          const junk = () => randomLabel(r, 1 + Math.floor(r() * 6)) + pick(r, NASTY) + randomLabel(r, 3);
+          const fps = Object.keys(d.recipients);
+          const bobFp = fps.find((fp) => d.recipients[fp].name === "bob")!;
+          const where = pick(r, ["signer name", "member signs", "member name", "id", "fingerprint", "set name", "added member"] as const);
+          if (where === "signer name") d.recipients[d.signature.by].name = junk();
+          else if (where === "member signs") {
+            d.recipients[bobFp].name = junk();
+            d.signature.by = bobFp;
+          } else if (where === "member name") d.recipients[bobFp].name = junk();
+          else if (where === "id") d.id = junk();
+          else if (where === "fingerprint") {
+            const nf = junk();
+            d.recipients[nf] = d.recipients[bobFp];
+            d.dek.wraps[nf] = d.dek.wraps[bobFp];
+          } else if (where === "set name") {
+            const ns = junk();
+            d.envs[ns] = d.envs.prod;
+            delete d.envs.prod;
+          } else {
+            const nfp = "0123456789abcdef";
+            d.recipients[nfp] = { ...d.recipients[bobFp], name: junk(), pk: encodePub(generateIdentity().pub) };
+            d.dek.wraps[nfp] = d.dek.wraps[bobFp];
+          }
+          const context = `seed ${seed} round ${round}: ${where}`;
+          // Collect first, assert after: an assertion inside the try would be
+          // caught below and read as a load error, and the test could not fail.
+          const lines: string[] = [];
+          try {
+            const w = Vault.fromData(path, d);
+            const check = verifyHeader(w.data);
+            if (!check.ok) lines.push(check.why);
+            lines.push(...describeTrustProblems(pendingChanges(w.reviewView(owner))));
+          } catch (e) {
+            lines.push(...String((e as Error).message).split("\n"));
+          }
+          for (const line of lines) assert.ok(!CONTROL.test(line), `${context}: ${JSON.stringify(line)}`);
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    } finally {
+      process.env.HUSH_HOME = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("fuzz: the signed header's canonical form", () => {
+  // Two properties of hush/v3's signature (src/header.ts): re-ordering keys
+  // (as any JSON tool may, and as git merges do) never breaks it; changing any
+  // field it covers always does.
+  test("any key order verifies; any change to a signed field does not", async () => {
+    const { encodePub } = await import("../src/crypto.ts");
+    const { verifyHeader } = await import("../src/header.ts");
+    const owner = generateIdentity();
+    const dir = mkdtempSync(join(tmpdir(), "hush-fuzz-header-"));
+    const path = join(dir, "vault.json");
+    const v = Vault.create(path, "h", { name: "owner", pub: owner.pub, priv: owner.priv });
+    v.set(owner, "default", "K", "value");
+    v.set(owner, "prod", "P", "value");
+    v.addRecipient(owner, "admin2", encodePub(generateIdentity().pub), "admin", { spk: "hush_spk_" + "A".repeat(43) });
+    v.addRecipient(owner, "member", encodePub(generateIdentity().pub), "member");
+    v.addRecipient(owner, "scoped", encodePub(generateIdentity().pub), "member", { sets: ["prod"] });
+    v.save();
+    const signed = JSON.parse(JSON.stringify(Vault.open(path).data));
+    assert.ok(verifyHeader(signed).ok);
+    rmSync(dir, { recursive: true, force: true });
+
+    const shuffle = <T>(r: () => number, xs: T[]): T[] => {
+      const out = [...xs];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(r() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    };
+    const reorder = (r: () => number, x: unknown): unknown =>
+      Array.isArray(x)
+        ? x.map((y) => reorder(r, y))
+        : x && typeof x === "object"
+          ? Object.fromEntries(shuffle(r, Object.entries(x)).map(([k, y]) => [k, reorder(r, y)]))
+          : x;
+
+    const fps = Object.keys(signed.recipients);
+    const someFp = (r: () => number) => pick(r, fps);
+    const envOf = (d: any) => Object.keys(d.setKeys ?? {})[0];
+    const MUTATIONS: [string, (d: any, r: () => number) => void][] = [
+      ["a member's name", (d, r) => { d.recipients[someFp(r)].name += "x"; }],
+      ["a member's key", (d, r) => { d.recipients[someFp(r)].pk = encodePub(generateIdentity().pub); }],
+      ["a signing key", (d) => { d.recipients[fps.find((f) => d.recipients[f].spk)!].spk = "hush_spk_" + "B".repeat(43); }],
+      ["a role", (d) => { const f = fps.find((x) => d.recipients[x].role === "member" && !d.recipients[x].sets)!; d.recipients[f].role = "admin"; }],
+      ["a member's sets", (d) => { const f = fps.find((x) => d.recipients[x].sets)!; d.recipients[f].sets = ["prod", "default"]; }],
+      ["a scope removed", (d) => { const f = fps.find((x) => d.recipients[x].sets)!; delete d.recipients[f].sets; }],
+      ["the ci flag", (d) => { const f = fps.find((x) => d.recipients[x].role === "member" && !d.recipients[x].sets)!; d.recipients[f].ci = true; }],
+      ["the key type", (d, r) => { d.recipients[someFp(r)].type = "age"; }],
+      ["the key generation", (d) => { d.dek.generation += 1; }],
+      ["the key commitment", (d) => { d.dek.commit = "0".repeat(d.dek.commit.length); }],
+      ["a key wrap removed", (d) => { const f = Object.keys(d.dek.wraps).find((x) => !d.recipients[x].spk || d.recipients[x].role !== "admin")!; delete d.dek.wraps[f]; }],
+      ["a member added", (d) => { d.recipients["0123456789abcdef"] = { name: "new", pk: encodePub(generateIdentity().pub), role: "member", addedAt: "x" }; }],
+      ["a member removed", (d) => { const f = fps.find((x) => d.recipients[x].role === "member" && !d.recipients[x].sets)!; delete d.recipients[f]; delete d.dek.wraps[f]; }],
+      ["a set key's generation", (d) => { d.setKeys[envOf(d)].generation += 1; }],
+      ["a set key's commitment", (d) => { const k = d.setKeys[envOf(d)]; k.commit = "0".repeat(k.commit.length); }],
+      ["a set key wrap removed", (d) => { const k = d.setKeys[envOf(d)]; delete k.wraps[Object.keys(k.wraps)[0]]; }],
+      ["the vault id", (d) => { d.id = "vlt_0000000000000000"; }],
+      ["the vault name", (d) => { d.name += "x"; }],
+    ];
+
+    for (const seed of seeds([3, 5, 8, 13])) {
+      const r = rng(seed);
+      for (let round = 0; round < rounds(40); round++) {
+        const reordered = reorder(r, JSON.parse(JSON.stringify(signed))) as typeof signed;
+        const text = JSON.stringify(reordered, null, pick(r, [0, 1, 2, 4, "\t"] as const));
+        const back = JSON.parse(text);
+        assert.ok(verifyHeader(back).ok, `seed ${seed} round ${round}: re-ordering broke the signature: ${JSON.stringify(verifyHeader(back))}`);
+
+        const [what, mutate] = pick(r, MUTATIONS);
+        const mutated = JSON.parse(text);
+        mutate(mutated, r);
+        assert.equal(verifyHeader(mutated).ok, false, `seed ${seed} round ${round}: changing ${what} left the signature valid`);
+      }
+    }
+  });
+});

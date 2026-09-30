@@ -113,6 +113,66 @@ function flatten(v: Vault, id: Identity): Map<string, string> {
   return out;
 }
 
+/**
+ * Merge two branches of `base` and check the result against the plaintext
+ * model: the values, the conflicts, the members, who can decrypt what, the
+ * signature, and that no value leaks into the report. Shared by the pairwise
+ * matrix and the random-sequence fuzz below.
+ */
+function checkMerge(
+  base: ReturnType<typeof baseVault>,
+  ours: Vault,
+  theirs: Vault,
+  mA: Model,
+  mB: Model,
+  rotatesA: boolean,
+  rotatesB: boolean,
+): void {
+  const r = mergeVaults(base.data, ours.data, theirs.data, owner);
+
+  if (rotatesA && rotatesB) {
+    assert.ok(r.structural, "two rotations were merged instead of refused");
+    assert.match(r.structural!, /both branches changed the vault key/);
+    return;
+  }
+  assert.equal(r.structural, undefined, r.structural);
+  const expected = modelMerge(base.model, mA, mB);
+
+  const merged = Vault.fromData("merged", r.data!);
+  assert.deepEqual(
+    Object.fromEntries([...flatten(merged, owner)].sort()),
+    Object.fromEntries([...expected.values].sort()),
+    "the merged vault does not hold what a three-way merge of the values says",
+  );
+  assert.deepEqual(r.conflicts.map((c) => `${c.set}/${c.key}`).sort(), expected.conflicts);
+  assert.deepEqual(merged.members().map((m) => m.name).sort(), [...expected.members].sort());
+
+  // Every member can open it, and nobody else is wrapped in.
+  for (const [side, id] of Object.entries(joiners)) {
+    if (expected.members.has(`add-${side}`)) {
+      assert.ok(merged.canRead(id), `add-${side} is listed but cannot decrypt`);
+      flatten(merged, id);
+    }
+  }
+  assert.equal(merged.canRead(leaving), expected.members.has("remove-me"), "a removed member can still decrypt");
+  assert.deepEqual(merged.staleValues(), [], "a value was left under an older key");
+  if (merged.signed) assert.ok(verifyHeader(r.data!).ok, `the merged vault is not validly signed: ${JSON.stringify(verifyHeader(r.data!))}`);
+  // A scoped member reads their set and nothing else.
+  for (const [side, sid] of Object.entries(scopedIds)) {
+    if (!expected.members.has(`scoped-${side}`) || !merged.hasSet("staging") || !merged.isRestricted("staging")) continue;
+    assert.ok(merged.canReadSet(sid, "staging"), `scoped-${side} cannot read the set they were given`);
+    assert.ok(!merged.canReadSet(sid, "default"), `scoped-${side} can read a set they were not given`);
+    merged.materialize(sid, "staging");
+  }
+  assert.deepEqual(merged.unlistedWraps(), [], "a key wrap belongs to no listed member");
+
+  // Nothing a merge reports carries a value.
+  const reported = JSON.stringify({ c: r.conflicts, n: r.notes, s: r.structural });
+  for (const val of new Set([...mA.values.values(), ...mB.values.values()])) {
+    assert.ok(!reported.includes(val), `a value reached the merge report: ${val}`);
+  }
+}
+
 describe("F-1: merging two branches of a vault", () => {
   for (const opA of OPS) {
     for (const opB of OPS) {
@@ -124,52 +184,84 @@ describe("F-1: merging two branches of a vault", () => {
         const mB = clone(base.model);
         opA.apply(ours, mA, "ours");
         opB.apply(theirs, mB, "theirs");
-
-        const r = mergeVaults(base.data, ours.data, theirs.data, owner);
-
-        if (opA.rotates && opB.rotates) {
-          assert.ok(r.structural, "two rotations were merged instead of refused");
-          assert.match(r.structural!, /both branches changed the vault key/);
-          return;
-        }
-        assert.equal(r.structural, undefined, r.structural);
-        const expected = modelMerge(base.model, mA, mB);
-
-        const merged = Vault.fromData("merged", r.data!);
-        assert.deepEqual(
-          Object.fromEntries([...flatten(merged, owner)].sort()),
-          Object.fromEntries([...expected.values].sort()),
-          "the merged vault does not hold what a three-way merge of the values says",
-        );
-        assert.deepEqual(r.conflicts.map((c) => `${c.set}/${c.key}`).sort(), expected.conflicts);
-        assert.deepEqual(merged.members().map((m) => m.name).sort(), [...expected.members].sort());
-
-        // Every member can open it, and nobody else is wrapped in.
-        for (const [side, id] of Object.entries(joiners)) {
-          if (expected.members.has(`add-${side}`)) {
-            assert.ok(merged.canRead(id), `add-${side} is listed but cannot decrypt`);
-            flatten(merged, id);
-          }
-        }
-        assert.equal(merged.canRead(leaving), expected.members.has("remove-me"), "a removed member can still decrypt");
-        assert.deepEqual(merged.staleValues(), [], "a value was left under an older key");
-        if (merged.signed) assert.ok(verifyHeader(r.data!).ok, `the merged vault is not validly signed: ${JSON.stringify(verifyHeader(r.data!))}`);
-        // A scoped member reads their set and nothing else.
-        for (const [side, sid] of Object.entries(scopedIds)) {
-          if (!expected.members.has(`scoped-${side}`) || !merged.hasSet("staging") || !merged.isRestricted("staging")) continue;
-          assert.ok(merged.canReadSet(sid, "staging"), `scoped-${side} cannot read the set they were given`);
-          assert.ok(!merged.canReadSet(sid, "default"), `scoped-${side} can read a set they were not given`);
-          merged.materialize(sid, "staging");
-        }
-        assert.deepEqual(merged.unlistedWraps(), [], "a key wrap belongs to no listed member");
-
-        // Nothing a merge reports carries a value.
-        const reported = JSON.stringify({ c: r.conflicts, n: r.notes, s: r.structural });
-        for (const val of new Set([...mA.values.values(), ...mB.values.values()])) {
-          assert.ok(!reported.includes(val), `a value reached the merge report: ${val}`);
-        }
+        checkMerge(base, ours, theirs, mA, mB, opA.rotates, opB.rotates);
       });
     }
+  }
+});
+
+describe("F-1: random sequences of changes on both branches", () => {
+  // The matrix above is one operation per side. Real branches carry several:
+  // this applies 1–4 random ones per side (values set and deleted, a member
+  // added, a rotation or a removal) and holds the result to the same checks.
+  // Seeded and reproducible; HUSH_FUZZ_SCALE multiplies the rounds, as in
+  // test/fuzz.test.ts.
+  const SCALE = Math.max(1, Number(process.env.HUSH_FUZZ_SCALE ?? 1) || 1);
+  const rng = (seed: number) => {
+    let x = seed || 1;
+    return () => {
+      x ^= x << 13; x >>>= 0; x ^= x >> 17; x ^= x << 5; x >>>= 0;
+      return x / 0x100000000;
+    };
+  };
+  const KEYS = ["KEY_C", "KEY_D", "KEY_M", "KEEP", "NEW_1", "NEW_2"];
+  const ENVS = ["default", "staging"];
+
+  /** Apply `n` random changes to one side; returns whether any rotated the vault key. */
+  function randomChanges(r: () => number, v: Vault, m: Model, side: string, n: number, log: string[]): boolean {
+    let rotated = false;
+    let added = false;
+    for (let i = 0; i < n; i++) {
+      const roll = r();
+      const env = ENVS[Math.floor(r() * ENVS.length)];
+      const key = KEYS[Math.floor(r() * KEYS.length)];
+      if (roll < 0.5) {
+        const value = `${side}-${i}-${Math.floor(r() * 1e6)}`;
+        v.set(owner, env, key, value);
+        m.values.set(`${env}/${key}`, value);
+        log.push(`${side}: set ${env}/${key}`);
+      } else if (roll < 0.7) {
+        if (!m.values.has(`${env}/${key}`)) continue;
+        v.delete(env, key);
+        m.values.delete(`${env}/${key}`);
+        log.push(`${side}: delete ${env}/${key}`);
+      } else if (roll < 0.8 && !added) {
+        v.addRecipient(owner, `add-${side}`, encodePub(joiners[side].pub));
+        m.members.add(`add-${side}`);
+        added = true;
+        log.push(`${side}: team add`);
+      } else if (roll < 0.9 && m.members.has("remove-me")) {
+        v.removeRecipient(owner, "remove-me");
+        m.members.delete("remove-me");
+        rotated = true;
+        log.push(`${side}: team rm`);
+      } else if (!rotated) {
+        v.rotate(owner);
+        rotated = true;
+        log.push(`${side}: rotate`);
+      }
+    }
+    return rotated;
+  }
+
+  for (let seed = 1; seed <= 24 * SCALE; seed++) {
+    test(`seed ${seed}`, () => {
+      const r = rng(seed * 2654435761);
+      const base = baseVault();
+      const ours = Vault.fromData("ours", JSON.parse(JSON.stringify(base.data)));
+      const theirs = Vault.fromData("theirs", JSON.parse(JSON.stringify(base.data)));
+      const mA = clone(base.model);
+      const mB = clone(base.model);
+      const log: string[] = [];
+      const rotA = randomChanges(r, ours, mA, "ours", 1 + Math.floor(r() * 4), log);
+      const rotB = randomChanges(r, theirs, mB, "theirs", 1 + Math.floor(r() * 4), log);
+      try {
+        checkMerge(base, ours, theirs, mA, mB, rotA, rotB);
+      } catch (e) {
+        (e as Error).message += `\n  seed ${seed}: ${log.join("; ")}`;
+        throw e;
+      }
+    });
   }
 });
 

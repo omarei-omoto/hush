@@ -39,7 +39,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, realpathSync } from
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { dekCommit, SCHEME_V3 } from "./crypto.ts";
-import { safeText, type Vault, type TrustView } from "./vault.ts";
+import { safeText, withoutControls, type Vault, type TrustView } from "./vault.ts";
 import { verifyHeader, setKeyCommit } from "./header.ts";
 
 /**
@@ -542,5 +542,7 @@ export function describeTrustProblems(p: Pending): string[] {
   } else {
     lines.push("  If you expected this:  hush team accept", "  If you did not:        hush team reject   (how to undo it)");
   }
-  return lines;
+  // Every line, not just the fields known to come from the file: the next
+  // field someone adds to a message should not have to remember.
+  return lines.map(withoutControls);
 }

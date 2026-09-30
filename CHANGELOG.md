@@ -61,6 +61,10 @@ checks these paths; tell us what breaks.
   `/usr/bin/swiftc`, and only if it is root-owned and not writable by others,
   in an environment with nothing the caller can use to redirect it. Upgrading
   is recommended if you use `"biometry": "required"`.
+- Text from a vault file — a member's name, the vault's id — can no longer put
+  terminal control characters into hush's warnings and errors, including the
+  one that says a vault looks forged. A vault id or member fingerprint hush
+  would never write is refused when the vault is loaded.
 
 ### Docs
 

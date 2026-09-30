@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Red-team reproduction — NOT run by `npm test`.
+ * Red-team reproduction — NOT run by `npm test`. Fixed in 0.6.0: the floor is
+ * now created whenever an agent is set up, and test/floor.test.ts covers the
+ * redirect as a real test. Kept as the original record of the finding.
  *
  * Finding: "HUSH_VAULT redirect bypasses the repo's own policy.json when no
  * floor is configured" — see docs/RED-TEAM.md.

@@ -111,7 +111,7 @@ describe("hush level", () => {
     const p = project();
     const parsed = JSON.parse(p.run(["level", "--json"]).out) as { rung: number; checks: unknown[] };
     assert.equal(typeof parsed.rung, "number");
-    assert.equal(parsed.checks.length, 6);
+    assert.equal(parsed.checks.length, 7);
     p.cleanup();
   });
 

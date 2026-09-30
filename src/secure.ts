@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Vault, ValidationError } from "./vault.ts";
 import { assess, shouldNudge, recordNudge, snooze, type Posture } from "./posture.ts";
-import { loadIdentity, migrateIdentityToKeychain, publicKeyOf } from "./identity.ts";
+import { loadIdentity, migrateIdentityToKeychain, publicKeyOf, hushHome } from "./identity.ts";
+import { ensureFloor } from "./policy.ts";
 import { ensureHelper, biometryStatus, type BiometryDeps } from "./biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin, recipientsForIdentity } from "./age.ts";
 import { parseEnvFile } from "./scan.ts";
@@ -234,6 +235,14 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
       out(
         `  ${dim(`An "Allow" lasts ${durationPhrase(ttl)} — the dialog's second button says so.`)}`,
       );
+      break;
+    }
+
+    case "floor": {
+      const floor = ensureFloor(hushHome());
+      out(`  ${green("✓")} ${floor.created ? "wrote" : "already there:"} ${floor.path}`);
+      out(`  ${dim("An empty floor is enough: the default approvals now apply wherever hush runs,")}`);
+      out(`  ${dim("and no repository's policy.json can go below what this file says.")}`);
       break;
     }
 

@@ -9,8 +9,9 @@
  * short enough to implement here rather than take an SDK for.
  */
 import { createInterface } from "node:readline";
-import { join } from "node:path";
-import { resolveVaultPath, Vault, audit } from "./vault.ts";
+import { join, resolve as resolvePath, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { resolveVaultPath, Vault, audit, ValidationError } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
 import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
@@ -407,6 +408,36 @@ function loadCtx(): Ctx {
   };
 }
 
+/**
+ * The directory hush_check_repo may scan: the project, or somewhere inside it.
+ *
+ * It only ever reports variable *names*, never file contents or values, but
+ * its description says "the current codebase" and an agent pointing it at
+ * `/etc` or a sibling checkout got an answer (docs/RED-TEAM.md). Real paths on
+ * both sides, so a symlink inside the project that leads out of it is outside.
+ * A monorepo is covered: the root is the repository's, not the package's.
+ */
+export function confinedScanRoot(requested: unknown, root: string): string {
+  if (requested === undefined || requested === null || requested === "") return root;
+  if (typeof requested !== "string") throw new ValidationError(`"path" must be a string.`);
+  const real = (p: string): string | null => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const base = real(root) ?? resolvePath(root);
+  const target = real(resolvePath(root, requested));
+  if (!target) throw new ValidationError(`No such directory in this project: ${requested.slice(0, 200)}`);
+  if (target !== base && !target.startsWith(base + sep)) {
+    throw new ValidationError(
+      `"${requested.slice(0, 200)}" is outside this project (${root}). hush_check_repo scans the project hush was started in.`,
+    );
+  }
+  return target;
+}
+
 interface ListedSet {
   name: string;
   label: string;
@@ -473,7 +504,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
       checkEnv(ctx.policy, set);
       const key = requireArg(args, "key", "hush_describe_secret");
       if (!ctx.vault.has(set, key)) {
-        return text(`"${key}" is NOT set in set "${set}". Use hush_request_secret to ask for it.`);
+        return text(`"${key}" is NOT set in set "${set}". Use hush_add_secret to have the human add it.`);
       }
       const value = ctx.vault.get(ctx.identity, set, key);
       const meta = ctx.vault.list(set).find((i) => i.key === key)!;
@@ -513,7 +544,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
     case "hush_check_repo": {
       const env = args?.env || ctx.defaultEnv;
       checkEnv(ctx.policy, env);
-      const root = args?.path || ctx.root;
+      const root = confinedScanRoot(args?.path, ctx.root);
       const usages = scanRepo(root);
       const r = reconcile(usages, ctx.vault.list(env).map((i) => i.key));
       audit(ctx.hushDir, { actor: "mcp", action: "check", env, missing: r.missing.length });
@@ -528,7 +559,7 @@ async function callTool(name: string, args: any): Promise<unknown> {
         for (const m of r.missing.slice(0, 40)) {
           lines.push(`  ${m.name}   (used in ${m.sites.slice(0, 2).join(", ")})`);
         }
-        lines.push("", "Ask the human to add these with hush_request_secret.");
+        lines.push("", "Add them with hush_add_secret — the human types each value on their own screen.");
       }
       if (r.unused.length) {
         lines.push("", `In vault but unreferenced: ${r.unused.join(", ")}`);

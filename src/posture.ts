@@ -19,6 +19,7 @@ import { biometryStatus } from "./biometry.ts";
 import { identityPlugin, ageIdentityPath, ageAvailable } from "./age.ts";
 import { loadPolicy } from "./mcp.ts";
 import { globalVaultExists } from "./library.ts";
+import { mcpRegistrations } from "./agents.ts";
 
 export type Rung = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -110,6 +111,23 @@ export function assessRisk(vault: Vault): Risk {
   return { weight: Math.min(weight, 3), reasons };
 }
 
+/** Whether any coding agent has hush registered for this project (or user-wide). */
+function agentNear(projectRoot: string | null): boolean {
+  if (!projectRoot) return false;
+  const read = (p: string): string | null => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  try {
+    return mcpRegistrations(projectRoot, process.env, read).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function assess(vault: Vault | null, hushDir: string | null, projectRoot: string | null): Posture {
   const id = loadIdentity();
   const policy = hushDir ? loadPolicy(hushDir) : null;
@@ -165,6 +183,18 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       pass: Boolean(policy?.requireApproval.includes("run")),
       command: 'set "requireApproval": ["run","add","reveal","request"] in .hush/policy.json',
       why: "otherwise an agent can use your keys without you seeing it happen",
+    },
+    {
+      rung: 3,
+      id: "floor",
+      gap: "an agent could reach the vault with no policy at all",
+      label: "your own policy floor keeps approvals on in every folder",
+      // Only a gap once an agent is actually set up near this project: without
+      // a floor, a copy of the vault opened through HUSH_VAULT from a folder
+      // with no policy.json runs ungated (docs/RED-TEAM.md, finding 4).
+      pass: existsSync(join(hushHome(), "policy.json")) || !agentNear(projectRoot),
+      command: "hush secure floor",
+      why: "without it, an agent that opens a copy of the vault from another folder meets no approval at all",
     },
     {
       rung: 4,

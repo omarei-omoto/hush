@@ -32,7 +32,7 @@ import { preview, MIN_REDACTABLE } from "./redact.ts";
 import { serveMcp, loadPolicy, DEFAULT_POLICY, type Policy } from "./mcp.ts";
 import {
   checkCommand, checkScopes, checkHost, runScope, requestScope,
-  approvalCoverageLine, requestCoverageLine, readPolicyFile, policyWeakenings,
+  approvalCoverageLine, requestCoverageLine, readPolicyFile, policyWeakenings, ensureFloor,
 } from "./policy.ts";
 import {
   parseHeader, prepare, requestWithSecrets, renderRequest, requestSummary, statusLine,
@@ -705,7 +705,20 @@ async function askAgentQuestion(hushDir: string, a: Args): Promise<void> {
     );
   }
   info(`${green("✓")} approvals on  ${dim("— hush install-mcp when you're ready")}`);
+  ensureFloorSaying();
   describePolicyEffect();
+}
+
+/**
+ * Write the empty policy floor if there is none, and say so in one line. An
+ * agent is about to be near the vault; see policy.ts's ensureFloor for why the
+ * file's existence is what matters.
+ */
+function ensureFloorSaying(): void {
+  const floor = ensureFloor(hushHome());
+  if (floor.created) {
+    info(`${green("✓")} wrote ${cyan(floor.path)} ${dim("(your policy floor — no repo can switch approvals off below it)")}`);
+  }
 }
 
 /**
@@ -2658,7 +2671,14 @@ async function cmdInstallMcp(a: Args): Promise<void> {
   // is no less a change to the project than an agent's config file.
   const plan = pending.map((p) => ({ name: p.agent.name, file: p.file, note: outsideNote(p.file, root) }));
   if (writePolicy) plan.unshift({ name: "Policy", file: policyPath, note: "approvals on for every hush run here" });
+  // The floor goes on the same list: it is the file that keeps approvals on
+  // when the agent reaches the vault some other way (red-team finding 4).
+  const floorPath = join(hushHome(), "policy.json");
+  const writeFloor = !existsSync(floorPath);
+  if (writeFloor) plan.unshift({ name: "Floor", file: floorPath, note: "your user config — no repo can go below it" });
   const go = await confirmWrites(a, plan);
+  if (writeFloor && go.shift()) ensureFloorSaying();
+  else if (writeFloor) info(dim("  Floor: skipped — a copy of this vault opened elsewhere would have no policy"));
   if (writePolicy && go.shift()) {
     // Serialised from the live defaults rather than retyped. The hand-written
     // copy that used to live here is how a setting that no longer exists
@@ -2869,7 +2889,7 @@ async function cmdDoctor(_a: Args): Promise<void> {
   // and, when the repo tried to loosen something it sets, exactly what got
   // refused rather than leaving that invisible.
   const floorPath = join(hushHome(), "policy.json");
-  check(existsSync(floorPath), "policy floor", existsSync(floorPath) ? floorPath : "none — only .hush/policy.json gates this project");
+  check(existsSync(floorPath), "policy floor", existsSync(floorPath) ? floorPath : "none — hush secure floor makes one (a copy of the vault opened elsewhere has no policy without it)");
   const weakenings = policyWeakenings(readPolicyFile(floorPath), readPolicyFile(join(loc.hushDir, "policy.json")));
   for (const w of weakenings) info(`    ${dim(w)}`);
 
@@ -3386,7 +3406,7 @@ async function cmdSecure(a: Args): Promise<void> {
   const vault = loc && existsSync(loc.vaultPath) ? Vault.open(loc.vaultPath) : null;
   const root = loc ? loc.hushDir.replace(/[/\\]\.hush$/, "") : null;
 
-  const explicit = ["biometry", "hardware", "approval", "keychain", "no-plaintext"]
+  const explicit = ["biometry", "hardware", "approval", "keychain", "no-plaintext", "floor"]
     .find((id) => bool(a, id)) ?? a._[0];
   // `--for 30m` sets how long an "Allow" lasts, which is also how someone with
   // approvals already on asks for a longer window.
@@ -3504,6 +3524,9 @@ async function cmdInstallSkill(a: Args): Promise<void> {
     }
     info(dim(`  Force one anyway with: hush install-skill --for codex`));
   }
+
+  // An agent that has been taught to use hush is an agent near the vault.
+  if (written.length) ensureFloorSaying();
 
   info("");
   if (written.length) info("Your coding agent now knows to:");

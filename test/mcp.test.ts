@@ -7,7 +7,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1045,6 +1045,63 @@ describe("hush_request", () => {
         !names.some((n) => n.includes(forbidden)),
         `the tool list exposes "${forbidden}": ${names.join(", ")}`,
       );
+    }
+    p.cleanup();
+  });
+});
+
+describe("hush_check_repo stays in the project (S-2)", () => {
+  const textOf = (s: Session, id: number) => s.replies.find((r) => r.id === id)?.result?.content?.[0]?.text ?? "";
+  const isErr = (s: Session, id: number) => Boolean(s.replies.find((r) => r.id === id)?.result?.isError);
+
+  test("a path outside the project — absolute, ../, or through a symlink — is refused", async () => {
+    const p = project();
+    const outside = mkdtempSync(join(tmpdir(), "hush-mcp-outside-"));
+    writeFileSync(join(outside, "leak.js"), "process.env.OUTSIDE_ONLY_VAR\n");
+    symlinkSync(outside, join(p.root, "escape"));
+    const s = await talk(p, [
+      init,
+      call(1, "hush_check_repo", { path: outside }),
+      call(2, "hush_check_repo", { path: "../" }),
+      call(3, "hush_check_repo", { path: "escape" }),
+      call(4, "hush_check_repo", { path: "/etc" }),
+    ]);
+    for (const id of [1, 2, 3, 4]) {
+      assert.ok(isErr(s, id), `path ${id} was scanned:\n${textOf(s, id)}`);
+      assert.match(textOf(s, id), /outside this project/);
+      assert.doesNotMatch(textOf(s, id), /OUTSIDE_ONLY_VAR/);
+    }
+    rmSync(outside, { recursive: true, force: true });
+    p.cleanup();
+  });
+
+  test("the project itself and a folder inside it are scanned", async () => {
+    const p = project();
+    mkdirSync(join(p.root, "packages", "app"), { recursive: true });
+    writeFileSync(join(p.root, "packages", "app", "index.js"), "process.env.INSIDE_VAR\n");
+    const s = await talk(p, [init, call(1, "hush_check_repo", {}), call(2, "hush_check_repo", { path: "packages/app" })]);
+    for (const id of [1, 2]) {
+      assert.ok(!isErr(s, id), textOf(s, id));
+      assert.match(textOf(s, id), /INSIDE_VAR/);
+    }
+    p.cleanup();
+  });
+});
+
+describe("tool text only names tools that exist", () => {
+  test("every hush_* name the server or the skill mentions is a real tool", async () => {
+    const p = project();
+    const s = await talk(p, [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }]);
+    const real = new Set(
+      (s.replies.find((r) => r.id === 1)!.result as unknown as { tools: { name: string }[] }).tools.map((t) => t.name),
+    );
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const file of ["../src/mcp.ts", "../skills/hush/SKILL.md"]) {
+      const text = readFileSync(join(here, file), "utf8");
+      const mentioned = new Set(text.match(/\bhush_[a-z_]+\b/g) ?? []);
+      for (const name of mentioned) {
+        assert.ok(real.has(name), `${file} mentions ${name}, which is not a tool (have: ${[...real].join(", ")})`);
+      }
     }
     p.cleanup();
   });

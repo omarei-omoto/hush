@@ -57,7 +57,7 @@ hush team rm sam                # re-keys the vault, re-seals every value
 - **Using it** — [Sets](#sets) · [Coming from another tool](#coming-from-another-tool) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [Credentials that are a file](#credentials-that-are-a-file) · [The app](#the-app)
 - **Checking config** — [What a value should look like](#what-a-value-should-look-like) · [Finding what a codebase needs](#finding-what-a-codebase-needs)
 - **Agents** — [What your agent gets](#what-your-agent-gets) · [Adding a key off-transcript](#adding-a-key-without-pasting-it-into-the-chat) · [Approvals](#approving-what-runs) · [Policy](#what-the-agent-may-run)
-- **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [CI](#ci)
+- **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [Membership changes](#when-someone-else-changes-who-can-read-it) · [CI](#ci)
 - **Hardening** — [The security ladder](#the-security-ladder) · [Touch ID](#touch-id) · [Hardware keys](#hardware-keys)
 - **Reference** — [Commands](#commands) · [How the crypto works](#how-the-crypto-works) · [What hush does not do](#what-hush-does-not-do)
 - **Contributing** — [Development](#development) · [Contributing](#contributing-1) · [License](#license)
@@ -85,9 +85,10 @@ cd hush && node src/cli.ts --help
 
 Node will not strip TypeScript types for anything under `node_modules`, so an
 installed copy cannot run `src/`. The tarball ships JavaScript in `dist/` (built
-by `npm run build`, run automatically by `prepack`), and the `hush` command
-prefers `dist/` when it exists and falls back to `src/` otherwise — so a clone
-and an install behave identically. Still zero runtime dependencies.
+by `npm run build`, run automatically by `prepack`). The `hush` command decides
+by where it lives, not by what exists: under `node_modules` it runs `dist/`; in
+a checkout (including one `npm link`ed) it runs `src/`, so a stale build can
+never shadow your edits. Still zero runtime dependencies.
 
 </details>
 
@@ -697,8 +698,31 @@ hush team rm sam
 That mints a **new data key**, re-encrypts every value under it, and re-wraps it
 for everyone except Sam. Sam's old checkout of the repo decrypts nothing new.
 
-> hush tells you the honest part too: Sam can still use any value he already
+> hush tells you the honest part too: Sam can still use any value they already
 > read. Rotate those at the provider. No tool can undo a value someone saw.
+
+## When someone else changes who can read it
+
+The vault file travels through git, and anyone who can get a change merged can
+put a vault there — including one they built themselves, wrapped to every
+member's public key and to their own. So each machine remembers who it has
+accepted. When you pull a vault with a member *you* did not add, hush stops:
+
+```
+✗ This vault's membership changed, and nobody on this machine accepted it:
+  new: dana  hush_pk_Q2hlY2sgd2l0aC…  (fingerprint 5c1e0d9a7b3f2e41)
+  …
+  If you expected this:  hush team accept
+  If you did not:        hush team reject   (how to undo it)
+```
+
+Nothing is decrypted or added until you decide — a member added by someone who
+is not a real teammate would read every secret added from then on. Check with
+whoever added them (`hush team accept` shows the commit and author), then accept.
+Removals and key rotations by teammates go through on their own; a rotation is
+mentioned once. Your coding agent is told never to accept on your behalf, and
+with approvals on, `hush team accept` asks on your screen like any other gated
+action.
 
 ## CI
 
@@ -847,6 +871,7 @@ sharing
   hush team ls
   hush team add <name> <pk>     re-wraps the key for them; commit and they're in
   hush team rm <name>           removes them and re-encrypts everything
+  hush team accept|reject       someone else changed who can read the vault — check, then decide
   hush id [--create]            show or create this machine's key
   hush link <vault> [--env e]   point this repo at a vault you already have
 
@@ -888,15 +913,25 @@ Vault files hold only ciphertext and public keys. Your private key never leaves 
   DEK (random 32B) ─────┼─ wrapped for sam ────┼──► .hush/vault.json
         │               └─ wrapped for ci ─────┘      (commit this)
         │
-        └─► AES-256-GCM per value, AAD = "hush/v1|<env>|<KEY>"
+        └─► AES-256-GCM per value, AAD = "hush/v2|<generation>|<env>|<KEY>"
 ```
 
 - **Per-value:** AES-256-GCM under the vault's data key. The AAD binds the
-  ciphertext to its `env|KEY` slot, so values cannot be swapped between slots.
+  ciphertext to its `env|KEY` slot and to the key generation that sealed it, so
+  values cannot be swapped between slots and a generation number cannot be
+  edited to fake freshness.
 - **Per-recipient:** the DEK is wrapped once per member — ephemeral X25519 →
   ECDH → HKDF-SHA256 → AES-256-GCM. This is the age/ECIES construction.
 - **Adding a member** re-wraps the existing DEK. Nothing is re-encrypted.
 - **Removing a member** mints a new DEK generation and re-seals every value.
+- **Pinning.** Encrypting to a public key says nothing about who did it, and
+  every member's public key is in the file — so anyone can build a vault that
+  opens for your whole team. Each machine therefore remembers, per vault, the
+  members it accepted, a commitment to the data key behind each generation
+  (`HKDF(DEK, vault id, generation)`, which reveals nothing about the key), and
+  which vault lives at which path. A member it did not add, a different key
+  for a generation it has seen, or a different vault in the same place is
+  refused until you run `hush team accept`.
 - **Your private key** lives in the macOS Keychain, or `~/.hush/identity` at
   mode 0600. It is never in a vault file, never in a repo, and is stripped from
   the environment of anything `hush run` launches.
@@ -905,12 +940,12 @@ The vault file holds ciphertext, public keys, and metadata. That is all:
 
 ```json
 {
-  "scheme": "hush/v1",
+  "scheme": "hush/v2",
   "dek": { "generation": 2, "wraps": { "a1b2…": { "epk": "…", "ct": "…" } } },
   "recipients": { "a1b2…": { "name": "ana", "pk": "hush_pk_…", "role": "admin" } },
   "envs": {
     "default": {
-      "DATABASE_URL": { "iv": "…", "ct": "…", "tag": "…", "gen": 2,
+      "DATABASE_URL": { "iv": "…", "ct": "…", "tag": "…", "gen": 2, "v": 2,
                         "updatedBy": "ana", "updatedAt": "2026-01-01T00:00:00Z" }
     }
   }

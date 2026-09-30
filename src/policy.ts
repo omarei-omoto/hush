@@ -12,7 +12,8 @@
  * checks that read an already-loaded Policy, the merge that builds one, and
  * the approval-scope helpers both surfaces share.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { ttlLabel } from "./dialogs.ts";
 import { ValidationError } from "./vault.ts";
 import type { Policy } from "./mcp.ts";
@@ -328,4 +329,30 @@ export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>):
   }
 
   return lines;
+}
+
+/**
+ * Make sure `~/.hush/policy.json`, the floor, exists — even empty.
+ *
+ * Its *existence* is what matters most. With no floor, a copy of a committed
+ * vault opened through HUSH_VAULT from a folder with no policy.json of its own
+ * ran with no policy at all: `hush get` printed a value with no prompt even when
+ * the real project required fingerprint approval (docs/RED-TEAM.md, finding 4).
+ * With any floor present, the default approvals apply to every invocation.
+ *
+ * Called at the moments an agent is being brought near the vault — agreeing
+ * that one will be, `hush install-mcp`, `hush install-skill` — and by `hush
+ * secure floor`. Never overwrites: a floor someone wrote is theirs.
+ */
+export function ensureFloor(home: string): { created: boolean; path: string } {
+  const path = join(home, "policy.json");
+  if (existsSync(path)) return { created: false, path };
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  try {
+    // wx: if something appeared since the check, it is left alone.
+    writeFileSync(path, "{}\n", { mode: 0o600, flag: "wx" });
+    return { created: true, path };
+  } catch {
+    return { created: false, path };
+  }
 }

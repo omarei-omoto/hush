@@ -19,7 +19,8 @@ to the latest release only.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | yes |
+| 0.6.x | yes |
+| < 0.6 | no — upgrade; see the CHANGELOG for what changed |
 
 ## What is in scope
 
@@ -30,7 +31,7 @@ Anything that lets someone read a secret they should not be able to:
   them — including through `hush_run`'s output.
 - Reaching the local UI from another machine, or without the session token.
 - A revoked member still being able to decrypt.
-- Getting a value out through `hush_request` / `hush_request`: in a header the
+- Getting a value out through `hush request` / `hush_request`: in a header the
   caller named, in a query string or body it opted into, or reflected back in a
   response the redactor failed to mask.
 - `hush_request` reaching a host the policy does not allow, being redirected to
@@ -169,9 +170,11 @@ pointing at the copy, from being opened from a directory that has no
 `policy.json` of its own. With no `~/.hush/policy.json` floor configured,
 that reverts to "no policy anywhere for this invocation," which is opt-in by
 design for a project that was never set up for an agent, not for a copy of
-one that was. **Set a floor if an agent can set environment variables when it
-spawns `hush`** — true of any agent with a shell — even an empty
-`~/.hush/policy.json` is enough to keep `requireApproval` from disappearing.
+one that was. **Since 0.6.0 hush writes an empty floor whenever an agent is set
+up** (`hush install-mcp`, `hush install-skill`, and saying yes to "will an AI
+agent use secrets here?"), and `hush level` / `hush doctor` flag a machine with
+an agent registered and no floor. Even an empty `~/.hush/policy.json` is enough
+to keep `requireApproval` from disappearing; `hush secure floor` writes one.
 The floor and the approval now hold on their own terms: the floor keeps the
 *policy* in force, and the approval is answered by a dialog or a fingerprint,
 neither of which the caller can supply.

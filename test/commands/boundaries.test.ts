@@ -66,7 +66,8 @@ describe("hush stays out of places it was not asked into", () => {
       mkdirSync(join(fakeHome, ".claude"), { recursive: true });
       const bin = join(p.home, "bin");
       mkdirSync(bin);
-      symlinkSync(join(dirname(CLI), "..", "bin", "hush.js"), join(bin, "hush"));
+      // The binary, when the suite runs against one (npm run test:binary).
+      symlinkSync(process.env.HUSH_TEST_BINARY ?? join(dirname(CLI), "..", "bin", "hush.js"), join(bin, "hush"));
       p.env.HOME = fakeHome;
       p.env.PATH = bin;
       const r = p.run(["install-mcp"]);

@@ -69,7 +69,24 @@ hush team rm sam                # re-keys the vault, re-seals every value
 
 ## Install
 
-Needs Node ≥ 22.6.
+One file, no Node needed — macOS, Linux (glibc and musl), and Windows (beta):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/omarei-omoto/hush/main/scripts/install.sh | sh
+brew install omarei-omoto/tap/hush
+```
+
+```powershell
+irm https://raw.githubusercontent.com/omarei-omoto/hush/main/scripts/install.ps1 | iex
+scoop install https://github.com/omarei-omoto/hush/releases/latest/download/hush.json
+```
+
+The installer refuses a binary whose sha256 is not the one in the release's
+`SHA256SUMS`, checks its build-provenance attestation too when the GitHub CLI is
+signed in, and installs to `~/.local/bin` without sudo. To check a download by
+hand: `gh attestation verify hush-darwin-arm64 --repo omarei-omoto/hush`.
+
+Or from npm, with Node ≥ 22.6:
 
 ```bash
 npm install -g @omarei/hush
@@ -823,16 +840,17 @@ could read.
 In GitHub Actions:
 
 ```yaml
-- uses: actions/setup-node@v4
-  with: { node-version: 22 }
 - uses: omarei-omoto/hush@v1
   with:
     identity: ${{ secrets.HUSH_IDENTITY }}
+    version: 1.0.0
 - run: hush run -- npm test
 ```
 
-The action masks the identity, installs hush, and checks the identity can read
-the vault before any later step needs it. In a job, `hush run` also has GitHub
+The action masks the identity, installs the hush binary for the runner — no
+Node needed; the sha256 and the build-provenance attestation are checked before
+it runs (`install: npm` uses the npm package instead) — and checks the identity
+can read the vault before any later step needs it. In a job, `hush run` also has GitHub
 mask every injected value line by line, so GitHub's own log redaction applies on
 top of hush's — only for a CI identity, so an agent on a laptop setting
 `GITHUB_ACTIONS` itself gets nothing printed. Anywhere else,
@@ -1164,6 +1182,14 @@ which explains why that is stated so bluntly.
 
 ```bash
 HUSH_FUZZ_SCALE=40 node --test test/fuzz.test.ts   # the same search, 40x deeper
+```
+
+The single-file binary is built with [Bun](https://bun.sh) (the version is
+pinned in `.bun-version`), and the whole suite runs against it:
+
+```bash
+npm run build:binaries                                  # this machine's; --all for every target
+HUSH_TEST_BINARY=$PWD/release/hush-darwin-arm64 npm run test:binary
 ```
 
 ## Contributing

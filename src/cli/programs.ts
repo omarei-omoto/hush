@@ -5,6 +5,7 @@ import { existsSync, readFileSync, statSync, accessSync, realpathSync, constants
 import { join, dirname, extname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { onPath as whichOnPath } from "../which.ts";
+import { standalone } from "../assets.ts";
 
 export function readIfExists(path: string): string | null {
   try {
@@ -69,6 +70,14 @@ export function packageManagerFor(dir: string): "bun" | "pnpm" | "yarn" | "npm" 
  * absolute path to this entry point, which is at least the right program.
  */
 export function selfCommand(args: string[]): { command: string; args: string[] } {
+  // The single-file binary is its own entry point.
+  if (standalone()) {
+    const onPathHush = onPath("hush");
+    try {
+      if (onPathHush && realpathSync(onPathHush) === realpathSync(process.execPath)) return { command: "hush", args };
+    } catch { /* fall through to the absolute path */ }
+    return { command: process.execPath, args };
+  }
   // src/cli.ts from a checkout, dist/cli.js from an install: the entry point
   // one directory up from this file, in this file's own extension.
   const here = fileURLToPath(import.meta.url);

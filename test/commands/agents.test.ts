@@ -7,6 +7,9 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync, rmSync } from "node
 import assert from "node:assert/strict";
 import { project } from "../helpers/cli.ts";
 
+/** Set when the suite runs against the single-file binary (test/helpers/binary-shim.ts). */
+const BINARY = process.env.HUSH_TEST_BINARY;
+
 // Setup in a vault-less folder ends with "hush install-mcp when you're ready";
 // that promise has to hold without a vault.
 describe("agent registration in a folder that only uses library sets", () => {
@@ -53,8 +56,13 @@ describe("agent registration in a folder that only uses library sets", () => {
 
       const config = readFileSync(join(fakeHome, ".codex", "config.toml"), "utf8");
       assert.match(config, /^\[mcp_servers\.hush\]$/m, "no hush section was written for Codex");
-      assert.match(config, /^command = "node"$/m);
-      assert.match(config, /^args = \[".*cli\.ts", "mcp"\]$/m);
+      if (BINARY) {
+        // The single-file binary is its own entry point (npm run test:binary).
+        assert.ok(config.includes(`command = ${JSON.stringify(BINARY)}\nargs = ["mcp"]`), config);
+      } else {
+        assert.match(config, /^command = "node"$/m);
+        assert.match(config, /^args = \[".*cli\.ts", "mcp"\]$/m);
+      }
       assert.ok(
         !existsSync(join(p.root, ".mcp.json")),
         "wrote Claude Code's file for a Codex-only machine — the tick would mean nothing",
@@ -81,7 +89,7 @@ describe("agent registration in a folder that only uses library sets", () => {
       const r = p.run(["install-mcp"]);
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /No coding agent detected/);
-      assert.match(r.out, /codex mcp add hush -- node/);
+      assert.ok(r.out.includes(`codex mcp add hush -- ${BINARY ?? "node"}`), r.out);
       assert.ok(!existsSync(join(p.root, ".mcp.json")), "wrote a file no agent reads");
       assert.ok(!existsSync(join(fakeHome, ".codex", "config.toml")), "wrote a config for an agent that is not here");
 
@@ -91,8 +99,8 @@ describe("agent registration in a folder that only uses library sets", () => {
       const cursor = JSON.parse(readFileSync(join(p.root, ".cursor", "mcp.json"), "utf8")) as {
         mcpServers: { hush: { command: string; args: string[] } };
       };
-      assert.equal(cursor.mcpServers.hush.command, "node");
-      assert.deepEqual(cursor.mcpServers.hush.args.slice(1), ["mcp"]);
+      assert.equal(cursor.mcpServers.hush.command, BINARY ?? "node");
+      assert.deepEqual(cursor.mcpServers.hush.args.slice(BINARY ? 0 : 1), ["mcp"]);
     } finally {
       p.cleanup();
     }

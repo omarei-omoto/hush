@@ -12,9 +12,19 @@ inputs:
       Store it as a repository or environment secret and pass it here.
     required: true
   version:
-    description: The hush version to install from npm (a version or a range; pin it).
+    description: >
+      The hush version to install. Pin it: an exact version (1.0.0) for the
+      binary, or a version or range for npm. "latest" takes the newest release.
     required: false
     default: latest
+  install:
+    description: >
+      "binary" (the default) downloads the single-file build for this runner,
+      checks its sha256 against the release's SHA256SUMS and its GitHub
+      build-provenance attestation, and needs no Node. "npm" installs the
+      package instead, and needs Node 22.6 or later on the runner.
+    required: false
+    default: binary
 
 runs:
   using: composite
@@ -43,7 +53,38 @@ runs:
           echo "HUSH_NO_NUDGE=1"
         } >> "$GITHUB_ENV"
 
-    - name: install hush
+    # The binary: the same installer people run (scripts/install.sh), from this
+    # very checkout of the action, into the runner's temp directory. It refuses
+    # a download whose sha256 or attestation does not check out.
+    - name: install hush (binary)
+      if: inputs.install == 'binary' && runner.os != 'Windows'
+      shell: bash
+      env:
+        HUSH_ACTION_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/hush-bin"
+        v="$HUSH_ACTION_VERSION"; [ "$v" = latest ] && v=""
+        HUSH_VERSION="$v" HUSH_INSTALL_DIR="$dir" sh "$GITHUB_ACTION_PATH/scripts/install.sh"
+        echo "$dir" >> "$GITHUB_PATH"
+
+    - name: install hush (binary, Windows)
+      if: inputs.install == 'binary' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        HUSH_ACTION_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:RUNNER_TEMP 'hush-bin'
+        $env:HUSH_VERSION = if ($env:HUSH_ACTION_VERSION -eq 'latest') { '' } else { $env:HUSH_ACTION_VERSION }
+        $env:HUSH_INSTALL_DIR = $dir
+        & (Join-Path $env:GITHUB_ACTION_PATH 'scripts\install.ps1')
+        Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+    - name: install hush (npm)
+      if: inputs.install == 'npm'
       shell: bash
       env:
         HUSH_ACTION_VERSION: ${{ inputs.version }}
@@ -57,6 +98,13 @@ runs:
         # package carries provenance tying it to the hush repository's release.
         npm install --global --no-fund --no-audit "@omarei/hush@${HUSH_ACTION_VERSION}"
         hush --version
+
+    - name: check the install option
+      if: inputs.install != 'binary' && inputs.install != 'npm'
+      shell: bash
+      run: |
+        echo "::error title=hush::install is \"binary\" or \"npm\""
+        exit 1
 
     - name: check the identity can read the vault
       shell: bash

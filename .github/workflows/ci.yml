@@ -88,6 +88,51 @@ jobs:
           ./node_modules/.bin/hush run --quiet -- sh -c 'echo "$CI_KEY"' | grep -q 'redacted:CI_KEY'
           ./node_modules/.bin/hush verify
 
+  binary:
+    name: the single-file binary · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      # One pin for every build of the binary: .bun-version.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: npm ci
+      - name: build, twice — the same source must give the same bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:binaries
+          node scripts/build-binaries.mjs --out /tmp/again
+          diff release/SHA256SUMS /tmp/again/SHA256SUMS
+      - name: install age
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y age
+          else
+            brew install age
+          fi
+      # The whole suite, with every CLI invocation going to the binary
+      # (test/helpers/binary-shim.ts), plus the binary's own checks.
+      - name: the suite against the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$(ls "$PWD"/release/hush-* | head -1)"
+          echo "testing $bin"
+          HUSH_TEST_BINARY="$bin" npm run test:binary 2>&1 | tee /tmp/test.out
+      - name: summary
+        if: always()
+        shell: bash
+        run: grep -E '^# (tests|pass|fail|skipped)' /tmp/test.out || true
+
   windows:
     name: windows (beta) · the real Windows paths
     runs-on: windows-latest
@@ -125,6 +170,16 @@ jobs:
           node $cli verify
           $hook = node $cli hook powershell | Out-String
           if ($hook -notmatch 'ConvertFrom-Json') { throw "no PowerShell hook" }
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: the Windows binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/build-binaries.mjs --target windows-x64
+          $env:HUSH_TEST_BINARY = Join-Path $env:GITHUB_WORKSPACE 'release\hush-windows-x64.exe'
+          node --test test/binary.test.ts
 
   fuzz:
     name: deeper fuzzing

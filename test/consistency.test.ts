@@ -35,7 +35,16 @@ const cliFiles = [
 const cli = cliFiles.map(read).join("\n");
 const ui = read("src/ui.ts") + "\n" + read("src/ui-api.ts") + "\n" + read("src/ui-state.ts");
 const skill = read("skills/hush/SKILL.md");
-const readme = read("README.md");
+/**
+ * The user docs: the README (the front page) and the guide pages its sections
+ * moved to (D-2). Checks that used to read the README read all of them.
+ */
+const guidePages = readdirSync(join(root, "docs", "guide"))
+  .filter((f) => f.endsWith(".md"))
+  .sort()
+  .map((f) => `docs/guide/${f}`);
+const userDocs = ["README.md", ...guidePages];
+const readme = userDocs.map(read).join("\n");
 const security = read("SECURITY.md");
 
 /**
@@ -132,17 +141,50 @@ describe("docs describe the code that exists", () => {
     assert.match(readme, /anything after hush/i, "the README never explains pass-through");
   });
 
-  test("internal doc links resolve", () => {
-    for (const [name, doc] of [
-      ["README.md", readme],
-      ["SECURITY.md", security],
-      ["docs/BIOMETRY.md", read("docs/BIOMETRY.md")],
-    ] as const) {
-      for (const m of doc.matchAll(/\]\((\.\/[^)#]+|docs\/[^)#]+)\)/g)) {
-        const target = m[1].replace(/^\.\//, "");
-        assert.ok(existsSync(join(root, target)), `${name} links to missing ${target}`);
+  test("every relative link in the docs resolves, anchor included", () => {
+    // The README's sections moved into docs/guide/ (D-2) with every link
+    // rewritten; this is what says none was missed, and none rots later. Each
+    // link is resolved from its own file's directory, as GitHub and the docs
+    // site both resolve it, and a #fragment must be a heading in the target.
+    const slug = (h: string) => h.toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
+    const anchorsOf = (text: string) => {
+      const seen: Record<string, number> = {};
+      const out = new Set<string>();
+      let fence = false;
+      for (const line of text.split("\n")) {
+        if (line.startsWith("```")) fence = !fence;
+        const m = !fence && /^#{1,6} (.+)$/.exec(line);
+        if (!m) continue;
+        const s = slug(m[1]);
+        seen[s] = (seen[s] ?? 0) + 1;
+        out.add(seen[s] > 1 ? `${s}-${seen[s] - 1}` : s);
+      }
+      return out;
+    };
+    const files = [
+      ...["README.md", "SECURITY.md", "CONTRIBUTING.md", "RELEASING.md", "RESEARCH.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md"],
+      ...(readdirSync(join(root, "docs"), { recursive: true }) as string[])
+        .map((f) => f.split("\\").join("/"))
+        .filter((f) => f.endsWith(".md") && f !== "PLAN-1.0.md")
+        .map((f) => `docs/${f}`),
+    ].filter((f) => existsSync(join(root, f)));
+    let checked = 0;
+    for (const file of files) {
+      const text = read(file);
+      const prose = text.replace(/```[\s\S]*?```/g, "");
+      for (const m of prose.matchAll(/\]\(([^)\s]+)\)/g)) {
+        const target = m[1];
+        if (/^[a-z]+:/i.test(target) || target.startsWith("//")) continue;
+        const [path, frag] = target.split("#");
+        const dest = path ? join(dirname(join(root, file)), path) : join(root, file);
+        assert.ok(existsSync(dest), `${file} links to ${target}, which does not exist`);
+        if (frag && dest.endsWith(".md")) {
+          assert.ok(anchorsOf(readFileSync(dest, "utf8")).has(frag), `${file} links to ${target}, which is not a heading there`);
+        }
+        checked++;
       }
     }
+    assert.ok(checked > 100, `only ${checked} links checked — is the pattern still matching?`);
   });
 });
 
@@ -349,7 +391,7 @@ describe("examples in the docs are real", () => {
     assert.ok(pkg.homepage.includes(slug!), "homepage points somewhere else");
 
     const docs = [
-      "README.md",
+      ...userDocs,
       "CONTRIBUTING.md",
       "SECURITY.md",
       "CODE_OF_CONDUCT.md",
@@ -382,7 +424,7 @@ describe("examples in the docs are real", () => {
     // What does have to hold is that the docs tell people to install the package
     // that actually exists, which is what caught the README recommending the
     // unrelated `hush` package somebody else owns.
-    for (const doc of ["README.md", "CONTRIBUTING.md"]) {
+    for (const doc of [...userDocs, "CONTRIBUTING.md"]) {
       for (const m of read(doc).matchAll(/npm install(?: -g)? (@[a-z0-9-]+\/[a-z0-9-]+)/g)) {
         assert.equal(m[1], pkg.name, `${doc} tells people to install ${m[1]}`);
       }
@@ -403,7 +445,7 @@ describe("examples in the docs are real", () => {
     // middle of itself — every heading twice, the second copy authoritative and
     // the first stale. It reads as plausible prose for as long as nobody
     // scrolls, which is exactly the kind of rot these checks exist for.
-    for (const doc of ["README.md", "SECURITY.md", "RESEARCH.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "RESEARCH.md", "docs/BIOMETRY.md"]) {
       const headings = [...read(doc).matchAll(/^(#{1,3}) (.+)$/gm)].map((m) => m[0]);
       const seen = new Set<string>();
       for (const h of headings) {
@@ -435,7 +477,7 @@ describe("examples in the docs are real", () => {
     const slug = (h: string) =>
       h.toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
 
-    for (const doc of ["README.md", "SECURITY.md", "CONTRIBUTING.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "CONTRIBUTING.md"]) {
       const text = read(doc);
       // GitHub disambiguates repeated headings with -1, -2, …
       const seen: Record<string, number> = {};
@@ -483,7 +525,7 @@ describe("examples in the docs are real", () => {
     // A hand-edited example with a trailing comma is not a typo in prose: it is
     // a config file someone will copy, and it will not load. This caught one the
     // moment it was written.
-    for (const doc of ["README.md", "SECURITY.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "docs/BIOMETRY.md"]) {
       const text = read(doc);
       const blocks = [...text.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]);
       for (const [i, body] of blocks.entries()) {
@@ -555,7 +597,7 @@ describe("prose does not state facts that drift", () => {
     //
     // docs/AUDIT.md is exempt: it is a record of what was true during a
     // particular pass, not a claim about the present.
-    for (const doc of ["README.md", "SECURITY.md", "CONTRIBUTING.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "CONTRIBUTING.md", "docs/BIOMETRY.md"]) {
       const claim = read(doc).match(/\b\d+\s+tests?\b/i);
       assert.equal(claim, null, `${doc} claims a test count: ${claim?.[0]}`);
     }
@@ -571,7 +613,7 @@ describe("prose does not state facts that drift", () => {
       const claim = src.match(/(?:about|roughly|~)\s*(?:\d+|forty|fifty|sixty|hundred)[\s-]*lines/i);
       assert.equal(claim, null, `src/${f} claims a line count: ${claim?.[0]}`);
     }
-    for (const doc of ["README.md", "SECURITY.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "docs/BIOMETRY.md"]) {
       const claim = read(doc).match(/(?:about|roughly|~)\s*\d+\s*lines/i);
       assert.equal(claim, null, `${doc} claims a line count: ${claim?.[0]}`);
     }
@@ -605,5 +647,12 @@ describe("the seed issues a newcomer starts from", () => {
         assert.ok(existsSync(join(root, path)), `${f} points at ${path}, which does not exist`);
       }
     }
+  });
+});
+
+describe("the command reference", () => {
+  test("docs/guide/commands.md is exactly what hush help --all says", async () => {
+    const { commandsPage } = await import("../scripts/gen-commands.mjs");
+    assert.equal(read("docs/guide/commands.md"), await commandsPage(), "out of date — run npm run docs:commands");
   });
 });

@@ -1,0 +1,65 @@
+{
+  "scheme": "hush/v3",
+  "id": "vlt_8d3dabca8bee48df",
+  "name": "hush-demo",
+  "createdAt": "2026-09-30T10:15:01.245Z",
+  "dek": {
+    "generation": 1,
+    "wraps": {
+      "ad18f83b61ddbbb3": {
+        "epk": "z+bCXGX0W5LTtDWFF4tpcV/EhP8f+uaXeBSCIH9xzzo=",
+        "iv": "o/HG8KEEeIreglOc",
+        "ct": "ft88p8yu0/fDirwJPKrjTy8E47xSdWVxGCv9paTxpuI=",
+        "tag": "O81AT+2xMtmSALEb4XbWXA=="
+      }
+    },
+    "commit": "1b4caa74e8f22966337d085b60f6d33a"
+  },
+  "recipients": {
+    "ad18f83b61ddbbb3": {
+      "name": "demo",
+      "pk": "hush_pk_NQriHOy_rnznIVWmJLSy7e6OxhuBL4wEUeBZXi1vRXA",
+      "role": "admin",
+      "addedAt": "2026-09-30T10:15:01.245Z",
+      "type": "x25519",
+      "spk": "hush_spk_zOBqHj8drjpZB3RfQrpJ94ZCoe9KsodzgViccESC2Yw"
+    }
+  },
+  "envs": {
+    "default": {
+      "DEMO_API_KEY": {
+        "iv": "UGUXqpAzo1ITXm7n",
+        "ct": "GYeamW92iAx3L/Wm2I6l87rvRiqV9zCj+OpSGhZanmGh1Q==",
+        "tag": "3t3eQ/z0sCWcCcHJSnBYUQ==",
+        "gen": 1,
+        "v": 2,
+        "updatedAt": "2026-09-30T10:15:01.268Z",
+        "updatedBy": "demo"
+      },
+      "DATABASE_URL": {
+        "iv": "opX3Jbd+oeDKoMQi",
+        "ct": "gkgJKTlu9AmckE+ORPBXsndOLiRMMfrlwfkjFlWMkI5uBBXQRTLq+SoLvgvSipRXBY9hPz7XwUv1gg==",
+        "tag": "38M3koE2vXhJW83bNdG1/Q==",
+        "gen": 1,
+        "v": 2,
+        "updatedAt": "2026-09-30T10:15:01.268Z",
+        "updatedBy": "demo"
+      }
+    },
+    "staging": {
+      "DEMO_API_KEY": {
+        "iv": "+lfSOovPtPFHWlZW",
+        "ct": "qrOEstmlD9bVTgqtJI5FytMlq0+FE6qrT/DG3CI8xbKb",
+        "tag": "WFBS3nI7hQ41axX5rPv47w==",
+        "gen": 1,
+        "v": 2,
+        "updatedAt": "2026-09-30T10:15:01.268Z",
+        "updatedBy": "demo"
+      }
+    }
+  },
+  "signature": {
+    "by": "ad18f83b61ddbbb3",
+    "sig": "Re03FCmuPA4j85hk9t2N9PcCqEa2XhxlVB7r/7CFyf1A8lrS6d6yGwjW1MavGcC6vQ/7Hv2t9YlVoQ5KKjAfAA=="
+  }
+}

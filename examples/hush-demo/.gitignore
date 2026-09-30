@@ -1,0 +1,5 @@
+.env
+.env.*
+!.env.schema
+.hush/audit.log
+.hush/*.local.json

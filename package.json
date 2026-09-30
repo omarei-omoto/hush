@@ -52,6 +52,8 @@
     "test": "node --test test/*.test.ts test/commands/*.test.ts",
     "test:binary": "node --import ./test/helpers/binary-shim.ts --test test/*.test.ts test/commands/*.test.ts",
     "build:binaries": "node scripts/build-binaries.mjs",
+    "docs:commands": "node scripts/gen-commands.mjs",
+    "docs:build": "node scripts/gen-commands.mjs --check && node scripts/build-docs.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "build:check": "node scripts/check-reproducible.mjs",

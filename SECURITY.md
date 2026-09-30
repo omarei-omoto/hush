@@ -19,8 +19,8 @@ to the latest release only.
 
 | Version | Supported |
 |---|---|
-| 0.8.x | yes |
-| < 0.8 | no — upgrade; see the CHANGELOG for what changed |
+| 0.9.x | yes |
+| < 0.9 | no — upgrade; see the CHANGELOG for what changed |
 
 ## What is in scope
 

@@ -4,6 +4,8 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.9.0 — 2026-09-30
+
 Everything planned for 0.9: hush without Node, a key in the Secure Enclave,
 approvals for a machine nobody is sitting at, Windows in beta, and the docs as a
 site. No vault format change: a 0.8 vault opens unchanged, and 0.8 can open a

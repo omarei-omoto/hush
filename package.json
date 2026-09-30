@@ -1,6 +1,6 @@
 {
   "name": "@omarei/hush",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Envelope-encrypted team secrets your AI agent can use but never read. Zero dependencies, zero servers — your git repo is the backend.",
   "keywords": [
     "secrets",
@@ -58,7 +58,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "build:check": "node scripts/check-reproducible.mjs",
-    "prepack": "npm run build",
+    "prepack": "node scripts/check-pack.mjs && npm run build",
     "version": "node scripts/sync-version.mjs && git add src/version.ts server.json"
   },
   "publishConfig": {

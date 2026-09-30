@@ -377,9 +377,20 @@ hush install-mcp
 ```
 
 It looks for the coding agents on this machine and registers hush with each one
-it finds, in the file that agent actually reads: **Codex**
-(`~/.codex/config.toml`), **Claude Code** (`.mcp.json`), **Cursor**
-(`.cursor/mcp.json`). On a terminal it lists the files first and asks
+it finds, in the file that agent actually reads:
+
+| Agent | MCP config | Skill / rule |
+|---|---|---|
+| **Claude Code** | `.mcp.json` | `.claude/skills/hush/SKILL.md` |
+| **Codex** | `~/.codex/config.toml` | `.agents/skills/hush/SKILL.md` |
+| **Cursor** | `.cursor/mcp.json` | `.cursor/rules/hush.mdc` |
+| **Gemini CLI** | `.gemini/settings.json` | `.agents/skills/hush/SKILL.md` |
+| **VS Code** (Copilot) | `.vscode/mcp.json` | `.github/instructions/hush.instructions.md` |
+| **Windsurf** | `~/.config/devin/mcp_config.json` | `.windsurf/rules/hush.md` |
+| **Zed** | `~/.config/zed/settings.json` (comments kept) | `.agents/skills/hush/SKILL.md` |
+| **Cline** | `~/.cline/mcp.json` (CLI); the extension gets a line to paste | `.clinerules/hush.md` |
+| **Continue** | `.continue/mcpServers/hush.json` | `.continue/rules/hush.md` |
+ On a terminal it lists the files first and asks
 (`pick` to choose per agent; `--yes` skips the question). It never rewrites an
 entry you already have, and when it cannot write one it prints the line to
 paste instead of a tick that means nothing. The entry is a plain `hush mcp`
@@ -389,7 +400,7 @@ your teammates' machines too.
 If hush cannot see your agent (a fresh machine, an unusual setup):
 
 ```bash
-hush install-mcp --for codex        # or: claude-code, cursor
+hush install-mcp --for codex        # or: claude-code, cursor, gemini, vscode, windsurf, zed, cline, continue
 ```
 
 An existing entry is left alone; to point it at a different hush, edit that
@@ -528,10 +539,9 @@ hush install-skill --global   # every project
 
 Installs a skill telling your agent never to ask for a pasted key, to use
 `hush_run` rather than reading values, and how to pick a set when you name
-one. It goes where each agent looks for instructions: Codex reads
-`.agents/skills/hush/SKILL.md` (and `~/.agents/skills/…` for `--global`),
-Claude Code reads `.claude/skills/hush/SKILL.md`, and Cursor gets a rule at
-`.cursor/rules/hush.mdc`. Without it the tools still work — the tool
+one. It goes where each agent looks for instructions — the right-hand column
+of the table above. Codex, Gemini CLI and Zed share `.agents/skills/` (and
+`~/.agents/skills/` for `--global`), so one file serves all three. Without it the tools still work — the tool
 descriptions explain themselves — you just have to say so each time.
 
 `.hush/policy.json` controls what it may run — through the MCP tools *and*

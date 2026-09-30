@@ -3546,16 +3546,28 @@ async function cmdInstallSkill(a: Args): Promise<void> {
 
   const written: string[] = [];
   const pending: { name: string; dest: string; body: string; note?: string }[] = [];
+  // Several agents read the same place (Codex, Gemini CLI and Zed all read
+  // .agents/skills/): one file, named for all of them, written once.
+  const upToDate = new Map<string, string>();
   for (const agent of targets) {
     const dest = global ? agent.skill.global?.(process.env) : agent.skill.project(root);
     if (!dest) {
       warn(`${agent.name}: no ${global ? "global " : ""}skill location — nothing written for it.`);
       continue;
     }
+    const shared = pending.find((p) => p.dest === dest);
+    if (shared) {
+      shared.name += `, ${agent.name}`;
+      continue;
+    }
+    if (upToDate.has(dest)) {
+      upToDate.set(dest, `${upToDate.get(dest)}, ${agent.name}`);
+      continue;
+    }
     const body = agent.skill.transform ? agent.skill.transform(markdown, skillDescription(markdown)) : markdown;
     const before = existsSync(dest) ? readFileSync(dest, "utf8") : null;
     if (before === body) {
-      info(`${green("✓")} ${agent.name}: ${cyan(dest)} ${dim("(already up to date)")}`);
+      upToDate.set(dest, agent.name);
       written.push(dest);
       continue;
     }
@@ -3563,6 +3575,7 @@ async function cmdInstallSkill(a: Args): Promise<void> {
     pending.push({ name: agent.name, dest, body, note: before === null ? undefined : "replaces the file that is there" });
   }
 
+  for (const [dest, names] of upToDate) info(`${green("✓")} ${names}: ${cyan(dest)} ${dim("(already up to date)")}`);
   const go = await confirmWrites(a, pending.map((p) => ({ name: p.name, file: p.dest, note: p.note })));
   for (const [i, { name, dest, body }] of pending.entries()) {
     if (!go[i]) {

@@ -112,7 +112,7 @@ ${bold("flags")}
   --for <30m|1h>  (secure approval) how long the dialog's "Allow" lasts
   --json          machine-readable output where it makes sense
 
-${dim("Deprecated, still work — each prints a one-line notice: hush set,")}
+${dim("Deprecated, still work until hush 2.0 — each prints a one-line notice: hush set,")}
 ${dim("hush accounts, hush env ls / env / env use / env drop / env new, --with a:b, use a=b.")}
 
 ${dim("Vault files hold only ciphertext and public keys. Your private key never leaves this machine.")}

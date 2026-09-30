@@ -52,7 +52,7 @@ export async function cmdEnv(a: Args): Promise<void> {
 
   switch (sub) {
     case "new": {
-      warn("`hush env new` is deprecated; use `hush add <file>` instead.");
+      warn("`hush env new` is deprecated (removed in hush 2.0); use `hush add <file>` instead.");
       const label = rest.join(" ").trim();
       const from = str(a, "from");
       if (!label || !from) die('Usage: hush env new <name> --from <file> [--description <text>] [--when <text>]');
@@ -130,14 +130,14 @@ export async function cmdEnv(a: Args): Promise<void> {
     }
 
     case "use": {
-      warn("`hush env use` is deprecated; use `hush use` instead.");
+      warn("`hush env use` is deprecated (removed in hush 2.0); use `hush use` instead.");
       const name = rest[0];
       if (!name) die("Usage: hush env use <name>");
       return cmdUse({ _: [name], rest: [], flags: {} });
     }
 
     case "drop": {
-      warn("`hush env drop` is deprecated; use `hush use --not` instead.");
+      warn("`hush env drop` is deprecated (removed in hush 2.0); use `hush use --not` instead.");
       const name = rest[0];
       if (!name) die("Usage: hush env drop <name>");
       return cmdUse({ _: [], rest: [], flags: { not: name } });

@@ -192,7 +192,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       });
       const footer =
         name === "hush_list_accounts"
-          ? "\n\n(hush_list_accounts is deprecated, use hush_list_sets — this is the same list.)"
+          ? "\n\n(hush_list_accounts is deprecated and will be removed in hush 2.0; use hush_list_sets — this is the same list.)"
           : "";
       return text(
         `${all.length} set(s) available:\n${lines.join("\n")}\n\n` +

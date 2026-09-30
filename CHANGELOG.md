@@ -4,6 +4,80 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+Everything planned for 0.9: hush without Node, a key in the Secure Enclave,
+approvals for a machine nobody is sitting at, Windows in beta, and the docs as a
+site. No vault format change: a 0.8 vault opens unchanged, and 0.8 can open a
+vault written by this version, unless it has an enclave member (below).
+
+### A key in the Secure Enclave, with nothing to install
+
+`hush id --enclave` makes a P-256 key inside the Mac's Secure Enclave. It cannot
+be copied off the machine, and every use asks for your fingerprint (or the
+Mac's password), enforced by the enclave. `hush secure --hardware` now offers
+this first on a Mac: it makes the key, adds it to the vault as you, and tells
+you to retire the software key. No Apple Developer ID is involved; see
+docs/BIOMETRY.md for how. An enclave member appears as `hush_se_…`, and as
+`enclave` in `hush team ls`. **A vault with an enclave member needs this
+version to open.**
+
+### hush without Node: one file, an installer, Homebrew
+
+- Single-file binaries for macOS (arm64, x64), Linux (x64, arm64, glibc and
+  musl) and Windows (x64). The build is byte-for-byte reproducible, and the
+  whole test suite runs against the binary.
+- `curl -fsSL …/scripts/install.sh | sh` (and `install.ps1` on Windows)
+  installs one. It refuses a binary whose sha256 is not in the release's
+  `SHA256SUMS`, checks the build-provenance attestation when the GitHub CLI is
+  signed in, and needs no sudo.
+- Homebrew (`brew install omarei-omoto/tap/hush`), Scoop and winget manifests
+  are generated for each release. The GitHub Action installs the checked binary
+  by default and no longer needs Node.
+- The binary does not load `.env` or `bunfig.toml` from the working directory;
+  Bun-built programs do by default.
+
+### Approvals where there is no desktop
+
+Over SSH, in a devcontainer, on a server, there was no one to ask, so every
+gated action was refused. Now `hush approvals pair` on the server and
+`hush approvals accept` on your laptop pair the two. From then on, an approval
+the server cannot show itself goes to your laptop (`hush approvals listen`):
+the usual dialog, or Touch ID, and a signed answer back. The relay in between
+can neither read nor forge a request or an answer, and cannot replay one.
+`hush relay serve` runs one yourself; with `ssh -R` nobody else is involved.
+The protocol is in docs/RELAY.md.
+
+### Windows, in beta
+
+`npm install` now works on Windows. Your key is kept with DPAPI, approvals are
+a native Windows dialog, `hush run npm …` works through `npm.cmd`, secret
+files get owner-only ACLs, and there is a PowerShell hook. A Windows CI job
+checks these paths; tell us what breaks.
+
+### Security
+
+- The macOS helpers (Touch ID, Secure Enclave) are now compiled only with
+  `/usr/bin/swiftc`, and only if it is root-owned and not writable by others,
+  in an environment with nothing the caller can use to redirect it. Upgrading
+  is recommended if you use `"biometry": "required"`.
+
+### Docs
+
+- The README is now a front page. Everything else is in a guide
+  (docs/guide/, and a site at omarei-omoto.github.io/hush), unedited apart
+  from links.
+- The command reference is generated from `hush help --all`. The old one had
+  fallen behind.
+- A demo repository with a public, test-only key (`examples/hush-demo`), a
+  contributor's map of the code (docs/ARCHITECTURE.md), and the brief for an
+  external security review (docs/REVIEW-SCOPE.md).
+
+### Fixed
+
+- `hush verify` counted a member who reads only some sets as "without a key
+  wrap".
+- `hush install-mcp` and the git merge driver register the binary itself when
+  hush is the single-file build.
+
 ## 0.8.0 — 2026-09-30
 
 **Breaking: vault format hush/v3.** A signed vault can be opened only by hush

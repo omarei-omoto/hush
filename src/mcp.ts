@@ -176,7 +176,7 @@ const TOOLS = [
       type: "object",
       properties: {
         set: { type: "string", description: "Which set to list (default: the project's default set)." },
-        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
+        env: { type: "string", description: "Deprecated alias for \"set\", removed in hush 2.0." },
       },
     },
   },
@@ -194,7 +194,7 @@ const TOOLS = [
   {
     name: "hush_list_accounts",
     description:
-      "Deprecated, use hush_list_sets — this returns exactly the same thing. Kept registered " +
+      "Deprecated (removed in hush 2.0), use hush_list_sets — this returns exactly the same thing. Kept registered " +
       "so a skill file written before sets replaced accounts still works.",
     inputSchema: { type: "object", properties: {} },
   },
@@ -238,9 +238,9 @@ const TOOLS = [
           type: "object",
           additionalProperties: { type: "string" },
           description:
-            "Deprecated alias for sets: {\"fal\":\"acme\"} means the set named \"fal/acme\". Prefer sets.",
+            "Deprecated alias for sets (removed in hush 2.0): {\"fal\":\"acme\"} means the set named \"fal/acme\". Prefer sets.",
         },
-        env: { type: "string", description: "Deprecated: the base set for this run, layered under sets. Prefer sets." },
+        env: { type: "string", description: "Deprecated (removed in hush 2.0): the base set for this run, layered under sets. Prefer sets." },
       },
       required: ["command"],
     },
@@ -315,10 +315,10 @@ const TOOLS = [
           enum: ["project", "library"],
           description: "Where to create a new set: this project's vault (default) or the user's own library.",
         },
-        service: { type: "string", description: "Deprecated alias: e.g. 'fal'. hush knows which variables it needs." },
-        account: { type: "string", description: "Deprecated, used with service — together they mean set \"service/account\"." },
+        service: { type: "string", description: "Deprecated alias (removed in hush 2.0): e.g. 'fal'. hush knows which variables it needs." },
+        account: { type: "string", description: "Deprecated (removed in hush 2.0), used with service — together they mean set \"service/account\"." },
         key: { type: "string", description: "A single variable name, if this isn't a known service." },
-        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
+        env: { type: "string", description: "Deprecated alias for \"set\", removed in hush 2.0." },
         why: { type: "string", description: "Shown to the user so they know what they are approving." },
       },
     },
@@ -351,7 +351,7 @@ const TOOLS = [
       properties: {
         key: { type: "string" },
         set: { type: "string" },
-        env: { type: "string", description: "Deprecated alias for \"set\", kept for one release." },
+        env: { type: "string", description: "Deprecated alias for \"set\", removed in hush 2.0." },
       },
       required: ["key"],
     },

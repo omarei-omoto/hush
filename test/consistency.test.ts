@@ -656,3 +656,39 @@ describe("the command reference", () => {
     assert.equal(read("docs/guide/commands.md"), await commandsPage(), "out of date — run npm run docs:commands");
   });
 });
+
+describe("deprecations say when they end", () => {
+  // 1.0's promise (PLAN §1, "Semver means something"): an alias is either gone
+  // or kept with a stated removal version. A notice that just says
+  // "deprecated" leaves a script's author guessing how long they have.
+  test("every deprecation notice and deprecated MCP field names hush 2.0", () => {
+    const sources = [...cliFiles, "src/mcp.ts", "src/mcp-tools.ts"];
+    let seen = 0;
+    for (const f of sources) {
+      for (const line of read(f).split("\n")) {
+        const notice = /warn\(.*deprecated|description: "Deprecated|"Deprecated|is deprecated/i.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line);
+        if (!notice) continue;
+        seen++;
+        assert.match(line, /hush 2\.0/, `${f}: a deprecation without a removal version:\n${line.trim()}`);
+      }
+    }
+    assert.ok(seen >= 15, `only ${seen} deprecation notices found — is the pattern still matching?`);
+  });
+});
+
+describe("the security claims name their tests", () => {
+  // SECURITY.md's "What it protects" table says which tests hold each claim.
+  // A renamed or deleted test would leave a claim pointing at nothing.
+  test("every test file and test name SECURITY.md and ARCHITECTURE.md cite exists", () => {
+    let cited = 0;
+    for (const doc of ["SECURITY.md", "docs/ARCHITECTURE.md"]) {
+      for (const m of read(doc).matchAll(/`(test\/[\w./-]+\.test\.ts)`(?: \("([^"]+?)(?:…)?"\))?/g)) {
+        const [, file, name] = m;
+        assert.ok(existsSync(join(root, file)), `${doc} cites ${file}, which does not exist`);
+        if (name) assert.ok(read(file).includes(name), `${doc} cites "${name}" in ${file}, which has no such test`);
+        cited++;
+      }
+    }
+    assert.ok(cited >= 25, `only ${cited} citations found — is the pattern still matching?`);
+  });
+});

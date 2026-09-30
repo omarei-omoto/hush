@@ -174,7 +174,7 @@ export function collectExtraSets(a: Args): string[] {
   for (const spec of list(a, "with")) {
     const { service, account } = parseColonPair(spec);
     const name = setNameFor(service, account);
-    warn(`--with ${spec} is deprecated; use --use ${name} instead.`);
+    warn(`--with ${spec} is deprecated (removed in hush 2.0); use --use ${name} instead.`);
     extra.push(name);
   }
   extra.push(...list(a, "env"));
@@ -193,6 +193,6 @@ export function convertLegacyPin(spec: string): string {
   const m = spec.match(/^([A-Za-z0-9_.-]+)=([A-Za-z0-9_.-]+)$/);
   if (!m) return spec;
   const name = setNameFor(m[1], m[2]);
-  warn(`"${spec}" is deprecated; use "${name}" instead.`);
+  warn(`"${spec}" is deprecated (removed in hush 2.0); use "${name}" instead.`);
   return name;
 }

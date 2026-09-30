@@ -14,7 +14,7 @@ describe("hush get --copy", () => {
    * The platform's first clipboard candidate, symlinked to the stub. Doing it
    * per-platform keeps the test honest on macOS and on CI's ubuntu alike.
    */
-  function clipboardEnv(): { env: NodeJS.ProcessEnv; read: () => string; dir: string } {
+  function clipboardEnv(): { env: NodeJS.ProcessEnv; read: () => string; argv: () => string; dir: string } {
     const dir = mkdtempSync(join(tmpdir(), "hush-clip-"));
     const name = platform() === "darwin" ? "pbcopy" : "wl-copy";
     symlinkSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "clipboard-stub"), join(dir, name));
@@ -23,6 +23,7 @@ describe("hush get --copy", () => {
       dir,
       env: { PATH: `${dir}:${process.env.PATH ?? ""}`, HUSH_TEST_CLIPBOARD: out },
       read: () => (existsSync(out) ? readFileSync(out, "utf8") : ""),
+      argv: () => (existsSync(out + ".argv") ? readFileSync(out + ".argv", "utf8") : ""),
     };
   }
 
@@ -33,6 +34,8 @@ describe("hush get --copy", () => {
       const r = p.run(["get", "STRIPE_SECRET_KEY", "--copy", "--yes"]);
       assert.equal(r.code, 0, r.out);
       assert.equal(clip.read(), "sk_live_cli", "the clipboard did not receive the value");
+      assert.ok(clip.argv(), "the clipboard tool's arguments were not recorded");
+      assert.ok(!clip.argv().includes("sk_live_cli"), "the value was passed in argv, visible to every process");
       assert.doesNotMatch(r.out, /sk_live_cli/, "the value was printed as well as copied");
       assert.match(r.out, /copied STRIPE_SECRET_KEY to the clipboard/);
       assert.match(r.out, /11 characters/, "the confirmation should say how much was copied");

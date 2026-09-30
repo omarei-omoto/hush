@@ -121,12 +121,12 @@ export async function cmdLs(a: Args): Promise<void> {
 
 /** `hush envs` / `hush env` / `hush env ls` — pre-unification names for `hush ls`. */
 export async function cmdEnvs(a: Args): Promise<void> {
-  warn("`hush envs` / `hush env` is deprecated; use `hush ls` instead.");
+  warn("`hush envs` / `hush env` is deprecated (removed in hush 2.0); use `hush ls` instead.");
   return cmdLs(a);
 }
 
 /** `hush accounts` — pre-unification name for `hush ls`. */
 export async function cmdAccounts(a: Args): Promise<void> {
-  warn("`hush accounts` is deprecated; use `hush ls` instead.");
+  warn("`hush accounts` is deprecated (removed in hush 2.0); use `hush ls` instead.");
   return cmdLs(a);
 }

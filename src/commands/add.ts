@@ -24,7 +24,7 @@ import { promptLine, promptSecret } from "../cli/prompts.ts";
  * never going to see either.
  */
 export async function cmdSet(a: Args): Promise<void> {
-  warn("`hush set` is deprecated; use `hush add KEY=value` instead.");
+  warn("`hush set` is deprecated (removed in hush 2.0); use `hush add KEY=value` instead.");
   const key = a._[0];
   if (!key) die("Usage: hush set <KEY> [--env <env>] [--note <text>]");
   const to = str(a, "to") ?? str(a, "env") ?? "default";
@@ -210,7 +210,7 @@ async function cmdAddService(a: Args, service: string): Promise<void> {
   let slug: string;
   if (accountAlias !== undefined) {
     const aliasName = setNameFor(service, accountAlias);
-    warn(`--account is deprecated; use --as "${aliasName}" instead.`);
+    warn(`--account is deprecated (removed in hush 2.0); use --as "${aliasName}" instead.`);
     slug = aliasName;
     asLabel ??= aliasName;
   } else if (asLabel) {

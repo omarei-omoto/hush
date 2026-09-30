@@ -78,7 +78,7 @@ describes.
 | **A vault this machine did not accept is refused, not used.** Members, data-key commitments and the header signature are all pinned. | `test/trust.test.ts` (the V-1 reproduction), `test/signed.test.ts` |
 | **Only an admin's signature changes who can read.** | `test/signed.test.ts`, `test/merge.test.ts` (the merge matrix) |
 | **The policy floor only tightens.** A repo's policy cannot drop below `~/.hush/policy.json`. | `test/floor.test.ts`, `test/policy.test.ts` |
-| **No file answers an approval.** An approval comes from a dialog, a fingerprint or a paired device's signature, never from anything the caller can write. | `test/approval.test.ts` ("a grant file cannot stand in for an approval…"), `test/relay.test.ts` |
+| **No file answers an approval.** An approval comes from a dialog, a fingerprint or a paired device's signature, never from anything the caller can write. | `test/commands/policy.test.ts` ("a grant file cannot stand in for an approval…"), `test/approval.test.ts`, `test/relay.test.ts` |
 | **Nothing in the environment makes an approval easier.** Test seams are parameters, not variables. | `test/biometry.test.ts`, `test/approval.test.ts` |
 | **Values never touch disk in a run.** | `test/commands/run.test.ts` ("while the command runs, no file under the project, HUSH_HOME or tmp holds the value"), `test/materialize.test.ts` (the one deliberate exception, removed afterwards) |
 | **The audit log cannot be edited quietly.** | `test/audit.test.ts` |

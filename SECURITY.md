@@ -108,22 +108,24 @@ read before you trust it with anything real.
 
 ### What it protects
 
-| | How |
-|---|---|
-| Secrets at rest in your repo | AES-256-GCM per value, under a per-vault data key |
-| A value moved between slots | AAD binds each ciphertext to `env\|KEY` — a staging URL cannot be pasted into the prod slot |
-| Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism |
-| Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new |
-| A vault replaced by someone who is not a member | hush/v3: an admin signs the header (members, roles, key commitments); every member checks the signature against admins it already trusts, and that the key it unwrapped matches. Every machine also pins what it has accepted, so an unsigned or downgraded copy is refused |
-| Some people seeing only some sets | A set can have a key of its own, wrapped only for full members and the scoped members given it; `hush ci create` makes CI identities that are scoped by construction |
-| Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output |
-| A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed |
-| A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` |
-| A credential reaching the clipboard instead of the terminal | `hush get --copy` pipes it to `pbcopy`/`wl-copy`/`xclip`, resolved from `PATH`, never through argv |
-| A value of the wrong shape | `.env.schema` rules, checked before anything runs or is sent; messages carry the rule and the length, never the value |
-| A key entering a transcript | `hush_add_secret` opens a native input box; the value goes keyboard → vault |
-| Silent use of a credential | Approval dialog naming the command, accounts and variables, optionally gated on Touch ID |
-| Key theft from disk | Only with a hardware identity — see below |
+Each row names the tests that fail if the control is removed.
+
+| | How | Held by |
+|---|---|---|
+| Secrets at rest in your repo | AES-256-GCM per value, under a per-vault data key | `test/crypto-properties.test.ts`, `test/scheme-conformance.test.ts` |
+| A value moved between slots | AAD binds each ciphertext to `env\|KEY` — a staging URL cannot be pasted into the prod slot | `test/hush.test.ts` ("AAD binds a ciphertext to its env and key"), `test/crypto-properties.test.ts` |
+| Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism | `test/scheme-conformance.test.ts`, `test/hush.test.ts` |
+| Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new | `test/hush.test.ts` ("removing a member revokes them and re-seals every value") |
+| A vault replaced by someone who is not a member | hush/v3: an admin signs the header (members, roles, key commitments); every member checks the signature against admins it already trusts, and that the key it unwrapped matches. Every machine also pins what it has accepted, so an unsigned or downgraded copy is refused | `test/trust.test.ts`, `test/signed.test.ts` |
+| Some people seeing only some sets | A set can have a key of its own, wrapped only for full members and the scoped members given it; `hush ci create` makes CI identities that are scoped by construction | `test/signed.test.ts` ("a scoped member reads dev, not prod…") |
+| Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output | `test/mcp.test.ts` ("never returns a secret value, only its effects"), `test/fuzz-surfaces.test.ts` |
+| A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed | `test/request.test.ts` ("a redirect to another host is refused…") |
+| A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` | `test/materialize.test.ts` |
+| A credential reaching the clipboard instead of the terminal | `hush get --copy` pipes it to `pbcopy`/`wl-copy`/`xclip`, resolved from `PATH`, never through argv | `test/commands/get.test.ts` ("the value goes to the clipboard and never to stdout") |
+| A value of the wrong shape | `.env.schema` rules, checked before anything runs or is sent; messages carry the rule and the length, never the value | `test/schema.test.ts` ("a failure message never contains the value") |
+| A key entering a transcript | `hush_add_secret` opens a native input box; the value goes keyboard → vault | `test/mcp.test.ts` (`hush_add_secret`) |
+| Silent use of a credential | Approval dialog naming the command, accounts and variables, optionally gated on Touch ID | `test/approval.test.ts`, `test/commands/policy.test.ts`, `test/relay.test.ts` |
+| Key theft from disk | Only with a hardware identity — see below | `test/hardware-path.test.ts`, `test/enclave.test.ts` |
 
 ### The ladder
 

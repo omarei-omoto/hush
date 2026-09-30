@@ -4,9 +4,9 @@
 import { Vault, resolveVaultPath, slugifyEnv } from "../vault.ts";
 import { requireIdentity } from "../identity.ts";
 import { loadLinks, saveLinks, openGlobal, globalVaultName, namedVaults } from "../library.ts";
-import { type Args, bool, str } from "../cli/args.ts";
+import { type Args, bool, repeat, str } from "../cli/args.ts";
 import { cmdEnvs } from "../commands/ls.ts";
-import { ctx } from "../cli/context.ts";
+import { ctx, resolveSetName } from "../cli/context.ts";
 import { bold, die, dim, green, info, warn } from "../cli/output.ts";
 import { cmdAddFile } from "../commands/add.ts";
 import { cmdUse } from "../commands/use.ts";
@@ -91,16 +91,39 @@ export async function cmdEnv(a: Args): Promise<void> {
     }
 
     case "describe": {
-      const name = rest[0];
-      if (!name) die("Usage: hush env describe <name> [--description <text>] [--when <text>] [--label <text>]");
+      const typedName = rest[0];
+      if (!typedName) {
+        die(
+          "Usage: hush env describe <name> [--description <text>] [--when <text>] [--label <text>] [--only-in <folder>…] [--anywhere]",
+          'e.g. hush env describe "FAL MODIO" --only-in "~/code/modio-*"',
+        );
+      }
+      // An unquoted "~/code/modio-*" is expanded by the shell into several
+      // folders, and only the first would reach --only-in; the rest land here.
+      if (rest.length > 1) {
+        die(
+          `Unexpected: ${rest.slice(1).join(" ")}`,
+          'Quote a folder pattern so the shell leaves it alone: --only-in "~/code/modio-*"',
+        );
+      }
+      const onlyIn = repeat(a, "only-in");
+      if (onlyIn.length && bool(a, "anywhere")) die("--only-in and --anywhere say opposite things; pick one.");
       const { vault, save, where } = target();
+      // The name as shown ("FAL MODIO") or as stored ("fal-modio"), the same
+      // as --use accepts.
+      const name = vault.sets().find((x) => x.label === typedName)?.name ?? resolveSetName(typedName, [vault]);
+      // Only what was given: a flag left out keeps its current value.
       vault.describeEnv(name, {
         label: str(a, "label"),
         description: str(a, "description"),
         whenToUse: str(a, "when"),
+        ...(onlyIn.length ? { onlyIn } : bool(a, "anywhere") ? { onlyIn: [] } : {}),
       });
       save();
       info(`${green("✓")} updated ${bold(name)} in ${where}`);
+      const now = vault.envMeta(name).onlyIn;
+      if (now?.length) info(dim(`  only usable in ${now.join(", ")} — hush refuses it anywhere else, for people and agents alike`));
+      else if (bool(a, "anywhere")) info(dim("  usable in any folder again"));
       return;
     }
 

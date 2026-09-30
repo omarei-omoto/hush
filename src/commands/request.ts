@@ -89,10 +89,12 @@ export async function cmdRequest(a: Args): Promise<void> {
   }
 
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing, unreadable } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, unreadable, blocked } = composeSets(loose.vault, id, loose.hushDir, extra);
   // A scoped member or CI identity in a project that also uses sets they were
   // never given: skipped, and said, so a missing variable has an explanation.
   if (unreadable.length) process.stderr.write(dim(`hush: not yours to read, skipped: ${unreadable.join(", ")}\n`));
+  // A set limited to other folders: skipped, and said, for the same reason.
+  for (const b of blocked) warn(`skipped ${b.name}: it is only for ${b.onlyIn.join(", ")}`);
 
   const policy = policyFor(loose.hushDir);
   if (policy) {

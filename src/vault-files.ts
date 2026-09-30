@@ -117,6 +117,12 @@ export interface EnvMeta {
   createdAt?: string;
   /** Where it came from, when it was imported from a file. */
   source?: string;
+  /**
+   * Folders this set may be used in (library.ts, onlyInAllows): a run anywhere
+   * else is refused. Absent means anywhere. "~/code/modio-*" covers every
+   * project whose folder matches, and every folder inside one.
+   */
+  onlyIn?: string[];
 }
 
 export interface VaultFile {
@@ -251,6 +257,74 @@ export const trimNote = (note?: string): string | undefined => {
  * screen and repaint "Treat it as forged" as something reassuring.
  */
 export const withoutControls = (s: string): string => s.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu, "\ufffd");
+
+// ------------------------------------------------------- where a set may be used
+
+/**
+ * A folder pattern for a set's `onlyIn`: an absolute path or one starting with
+ * "~", where "*" matches within one folder name, "**" across folders and "?"
+ * one character. Relative paths are refused: "relative to what" would depend
+ * on where the command happened to run.
+ */
+export function assertOnlyInPattern(pattern: unknown): void {
+  const p = typeof pattern === "string" ? pattern.trim() : "";
+  if (!p) throw new ValidationError("--only-in needs a folder, like ~/code/modio-*");
+  if (p.length > 300) throw new ValidationError("That folder pattern is too long (300 characters at most).");
+  if (/[\u0000-\u001f\u007f]/.test(p)) throw new ValidationError("A folder pattern cannot contain control characters.");
+  if (!(p === "~" || p.startsWith("~/") || p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p))) {
+    throw new ValidationError(`"${p}" is not a full path. Use one like ~/code/modio-* or /Users/you/work/modio.`);
+  }
+}
+
+const expandHome = (p: string, home: string): string => (p === "~" ? home : p.startsWith("~/") ? home + p.slice(1) : p);
+const slashes = (p: string): string => p.replace(/\\/g, "/");
+
+function globToRegExp(glob: string, caseInsensitive: boolean): RegExp {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      // "**/" is zero or more whole folders; a trailing "**" is anything.
+      if (glob[i + 2] === "/") {
+        re += "(?:.*/)?";
+        i += 2;
+      } else {
+        re += ".*";
+        i += 1;
+      }
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, caseInsensitive ? "i" : "");
+}
+
+/**
+ * May a set restricted to `patterns` be used at `place` (an absolute folder:
+ * the project's root, or the working directory outside a project)? Yes if a
+ * pattern matches that folder or any folder containing it, so "~/work/modio"
+ * covers "~/work/modio/api" too. Case-insensitive where the file system
+ * usually is (macOS, Windows).
+ */
+export function onlyInAllows(
+  patterns: readonly string[],
+  place: string,
+  opts: { home: string; platform: string },
+): boolean {
+  const ci = opts.platform === "darwin" || opts.platform === "win32";
+  const tidy = (p: string) => slashes(p).replace(/(.)\/+$/, "$1");
+  const candidates: string[] = [];
+  for (let p = tidy(place); ; ) {
+    candidates.push(p);
+    const up = p.replace(/\/[^/]*$/, "") || "/";
+    if (up === p) break;
+    p = up;
+  }
+  return patterns.some((pattern) => {
+    const re = globToRegExp(tidy(expandHome(slashes(pattern.trim()), slashes(opts.home))), ci);
+    return candidates.some((c) => re.test(c));
+  });
+}
 
 export function safeText(s: unknown, max = MAX_NOTE_CHARS): string | undefined {
   if (typeof s !== "string") return undefined;

@@ -9,7 +9,7 @@ import { loadIdentity, createIdentity, hushHome } from "../identity.ts";
 import { scanRepo } from "../scan.ts";
 import { loadPolicy, DEFAULT_POLICY, type Policy } from "../mcp.ts";
 import { ensureFloor } from "../policy.ts";
-import { usedSets, librarySets, loadLinks, saveLinks, openGlobal, ensureProjectVault, writeProjectDotfiles, suggestSets, linkNameFor } from "../library.ts";
+import { usedSets, librarySets, loadLinks, saveLinks, openGlobal, ensureProjectVault, writeProjectDotfiles, suggestSets, linkNameFor, placeOf, allowedAt } from "../library.ts";
 import { checkAndRecord, describeRollback } from "../integrity.ts";
 import { approvalPromptAvailable } from "../approval.ts";
 import { bold, cyan, die, dim, green, info, red, shown, warn, yellow } from "../cli/output.ts";
@@ -403,7 +403,9 @@ export function describePolicyEffect(): void {
 export async function runSetupDialogue(loose: { hushDir: string; root: string }, a: Args): Promise<boolean> {
   info(bold("This folder isn't set up for hush yet."));
 
-  const sets = librarySets();
+  // Only what may be used here: a set kept for other folders is not offered.
+  const place = placeOf(loose.hushDir);
+  const sets = librarySets().filter((s) => !s.onlyIn || allowedAt(s.onlyIn, place));
   const usages = scanRepo(loose.root);
   const needed = usages.map((u) => u.name);
 

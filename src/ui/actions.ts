@@ -320,6 +320,7 @@ function setCard(where,set,ctx){
   const bits=[];
   if(set.description)bits.push(set.description);
   if(set.whenToUse)bits.push("Use for: "+set.whenToUse);
+  if(set.onlyIn&&set.onlyIn.length)bits.push("Only in "+set.onlyIn.join(", ")+(set.usableHere===false?" — not usable in this folder":""));
   if(floor&&!set.description)bits.push("Always applied first. Keys that only this project needs go here.");
   if(bits.length)card.append(h("div",{class:"desc",text:bits.join(" · ")}));
   if(set.secrets&&set.secrets.length){

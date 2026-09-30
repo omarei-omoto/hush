@@ -4,7 +4,7 @@
  * file); `Vault` (vault.ts) adds how a vault is made and who can read it.
  */
 import { sealValue, openValue, ValidationError, type Opener } from "./crypto.ts";
-import { assertScopeName, assertKeyName, assertValueSize, trimNote, safeText, type SecretEntry, type EnvMeta } from "./vault-files.ts";
+import { assertScopeName, assertKeyName, assertValueSize, assertOnlyInPattern, trimNote, safeText, type SecretEntry, type EnvMeta } from "./vault-files.ts";
 import { VaultCore } from "./vault-core.ts";
 
 export abstract class VaultValues extends VaultCore {
@@ -122,6 +122,8 @@ export abstract class VaultValues extends VaultCore {
     description?: string;
     whenToUse?: string;
     source?: string;
+    /** Folders it may be used in; absent means anywhere. */
+    onlyIn?: string[];
     keys: string[];
     /** Has a key of its own, so scoped members can be given it (or kept out). */
     restricted: boolean;
@@ -142,6 +144,9 @@ export abstract class VaultValues extends VaultCore {
           description: safeText(meta.description, 500),
           whenToUse: safeText(meta.whenToUse, 500),
           source: safeText(meta.source, 200),
+          ...(Array.isArray(meta.onlyIn) && meta.onlyIn.length
+            ? { onlyIn: meta.onlyIn.map((p) => safeText(p, 300) ?? "?") }
+            : {}),
           keys: Object.keys(this.data.envs[name] ?? {})
             .sort()
             .map((key) => safeText(key, 64) ?? "<unprintable>"),
@@ -174,10 +179,16 @@ export abstract class VaultValues extends VaultCore {
     const current = this.data.meta[env] ?? {};
     const next: EnvMeta = { ...current };
     for (const field of ["label", "description", "whenToUse", "source"] as const) {
-      if (!(field in meta)) continue;
+      // A field that was not given is left alone; an empty one is cleared.
+      if (meta[field] === undefined) continue;
       const value = safeText(meta[field], field === "label" ? 80 : 500);
       if (value) next[field] = value;
       else delete next[field];
+    }
+    if (meta.onlyIn !== undefined) {
+      for (const p of meta.onlyIn) assertOnlyInPattern(p);
+      if (meta.onlyIn.length) next.onlyIn = [...new Set(meta.onlyIn.map((p) => p.trim()))];
+      else delete next.onlyIn;
     }
     next.createdAt ??= new Date().toISOString();
     this.data.meta[env] = next;

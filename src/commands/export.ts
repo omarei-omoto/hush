@@ -24,8 +24,9 @@ export async function cmdExport(a: Args): Promise<void> {
   // would have injected, so the shell hook and any generated .env disagreed
   // with what the app actually got at run time.
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, blocked } = composeSets(loose.vault, id, loose.hushDir, extra);
   if (missing.length) warn(`Not exported: ${missing.join(", ")} — your library does not have them.`);
+  for (const b of blocked) warn(`Not exported: ${b.name} — it is only for ${b.onlyIn.join(", ")}.`);
 
   // Used by the shell hook to know what to unset again on the way out. Reveals
   // no value, so this is never gated — the hook depends on it always working.

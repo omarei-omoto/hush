@@ -19,9 +19,10 @@
  * own environment, then any service accounts chosen for the run. The project
  * wins over the library, and an explicit `--with` wins over both.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, type EnvMeta } from "./vault.ts";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, onlyInAllows, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
@@ -128,8 +129,73 @@ export function linkNameFor(where: "library" | "project", name: string): string 
   return where === "library" && name === "default" ? LIBRARY_DEFAULT : name;
 }
 
+/**
+ * Where a command is running, for a set's "only in" rule: the project's root
+ * (the folder holding .hush), or the working directory outside a project. The
+ * real path, so a symlink cannot walk a set into a folder it is not allowed in.
+ */
+export function placeOf(hushDir: string | null): string {
+  const p = hushDir ? dirname(resolve(hushDir)) : process.cwd();
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+/** The folders a set is limited to, or null when it may be used anywhere. */
+export const onlyInOf = (vault: Vault | null, name: string): string[] | null => {
+  const onlyIn = vault?.hasSet(name) ? vault.envMeta(name).onlyIn : undefined;
+  return Array.isArray(onlyIn) && onlyIn.length ? onlyIn : null;
+};
+
+/**
+ * The place is a real path (placeOf), so the fixed part of each pattern — up
+ * to its first wildcard — is made real too: "/tmp/x" must match a project at
+ * "/private/tmp/x", and a code folder reached through a symlink must still
+ * match. The place itself is never un-resolved, so a symlink named like an
+ * allowed folder but pointing elsewhere is refused.
+ */
+function realPattern(pattern: string): string {
+  const p = pattern.trim();
+  const expanded = p === "~" ? homedir() : p.startsWith("~/") ? homedir() + p.slice(1) : p;
+  const firstWild = expanded.search(/[*?]/);
+  const literal = firstWild === -1 ? expanded : expanded.slice(0, expanded.lastIndexOf("/", firstWild));
+  if (!literal) return expanded;
+  try {
+    return realpathSync(literal) + expanded.slice(literal.length);
+  } catch {
+    return expanded;
+  }
+}
+
+export const allowedAt = (onlyIn: readonly string[], place: string): boolean =>
+  onlyInAllows(onlyIn.map(realPattern), place, { home: homedir(), platform: process.platform });
+
+/** The refusal, in one place, so every surface says the same thing. */
+export const onlyInMessage = (label: string, onlyIn: readonly string[], place: string): string =>
+  `Set "${label}" is only for ${onlyIn.join(", ")}, and this is ${place}. ` +
+  `Use it from one of those folders, or change where it may be used: hush env describe "${label}" --only-in <folder>`;
+
 export function saveLinks(hushDir: string, use: string[]): void {
   assertProjectHushDir(hushDir);
+  // A set that is only for other folders is refused here, when it is linked,
+  // rather than only later when a run skips it. Sets already linked are left
+  // alone: tightening a set's folders must not break an unrelated edit here.
+  const before = new Set(loadLinks(hushDir));
+  const added = use.filter((n) => !before.has(n));
+  if (added.length) {
+    const place = placeOf(hushDir);
+    const vaultFile = join(hushDir, "vault.json");
+    const project = existsSync(vaultFile) ? Vault.open(vaultFile) : null;
+    const library = openGlobal();
+    for (const link of added) {
+      const [vault, name] =
+        link === LIBRARY_DEFAULT ? [library, "default"] : project?.hasSet(link) ? [project, link] : [library, link];
+      const onlyIn = onlyInOf(vault, name);
+      if (onlyIn && !allowedAt(onlyIn, place)) throw new ValidationError(onlyInMessage(vault!.envLabel(name), onlyIn, place));
+    }
+  }
   mkdirSync(hushDir, { recursive: true });
   // Order is precedence (later wins), so the file keeps the order it was
   // given — never sorted — and mentioning a set again moves it to the end,
@@ -175,6 +241,11 @@ export interface Composed {
    * they were never given. Skipped, and said, rather than failing the run.
    */
   unreadable: string[];
+  /**
+   * Sets this project uses that are limited to other folders ("only in").
+   * Skipped and said; one asked for by name is refused outright instead.
+   */
+  blocked: { name: string; onlyIn: string[] }[];
 }
 
 /**
@@ -201,8 +272,23 @@ export function composeSets(
   const layers: string[] = [];
   const missing: string[] = [];
   const unreadable: string[] = [];
+  const blocked: { name: string; onlyIn: string[] }[] = [];
+  const place = placeOf(hushDir);
 
   const library = openGlobal();
+  /**
+   * A set limited to other folders: an error when the person or agent asked
+   * for it by name, otherwise skipped and reported. The same rule for every
+   * surface — run, request, get, export, the MCP tools — because they all
+   * resolve their sets here.
+   */
+  const fitsHere = (vault: Vault, name: string, typedAs: string): boolean => {
+    const onlyIn = onlyInOf(vault, name);
+    if (!onlyIn || allowedAt(onlyIn, place)) return true;
+    if (typed.has(typedAs)) throw new ValidationError(onlyInMessage(vault.envLabel(name), onlyIn, place));
+    blocked.push({ name: vault.envLabel(name), onlyIn });
+    return false;
+  };
   /**
    * A project set this identity may not read: an error when the person typed
    * it (`--use prod`), otherwise skipped and reported.
@@ -225,7 +311,7 @@ export function composeSets(
   for (const name of names) {
     if (name === "default") {
       // Only this project's own default. The library's is opt-in, below.
-      if (project?.hasSet("default") && allowed("default")) {
+      if (project?.hasSet("default") && allowed("default") && fitsHere(project, "default", "default")) {
         Object.assign(secrets, project.materialize(id, "default"));
         layers.push("default");
       }
@@ -235,6 +321,7 @@ export function composeSets(
       // An empty library default adds no layer, so the "using …" line stays
       // honest about what was actually injected.
       if (library?.hasSet("default")) {
+        if (!fitsHere(library, "default", LIBRARY_DEFAULT)) continue;
         if (library.sets().some((s) => s.name === "default" && s.keys.length)) {
           Object.assign(secrets, library.materialize(id, "default"));
           layers.push(`${globalVaultName()}:default`);
@@ -245,10 +332,11 @@ export function composeSets(
       continue;
     }
     if (project?.hasSet(name)) {
-      if (!allowed(name)) continue;
+      if (!allowed(name) || !fitsHere(project, name, name)) continue;
       Object.assign(secrets, project.materialize(id, name));
       layers.push(name);
     } else if (library?.hasSet(name)) {
+      if (!fitsHere(library, name, name)) continue;
       Object.assign(secrets, library.materialize(id, name));
       layers.push(`${globalVaultName()}:${name}`);
     } else if (typed.has(name)) {
@@ -265,7 +353,7 @@ export function composeSets(
     }
   }
 
-  return { secrets, layers, missing, unreadable };
+  return { secrets, layers, missing, unreadable, blocked };
 }
 
 // ---------------------------------------------------------- project files
@@ -394,6 +482,8 @@ export interface LibrarySet {
   description?: string;
   whenToUse?: string;
   source?: string;
+  /** Folders it may be used in; absent means anywhere. */
+  onlyIn?: string[];
   keys: string[];
 }
 
@@ -415,6 +505,7 @@ export function librarySets(): LibrarySet[] {
       description: s.description,
       whenToUse: s.whenToUse,
       source: s.source,
+      ...(s.onlyIn ? { onlyIn: s.onlyIn } : {}),
       keys: s.keys,
     }));
 }

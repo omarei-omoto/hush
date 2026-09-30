@@ -42,6 +42,8 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - name: the build is reproducible
+        run: npm run build:check
 
       - name: install age
         run: sudo apt-get update && sudo apt-get install -y age
@@ -74,5 +76,8 @@ jobs:
       # devDependencies are needed: `prepack` builds dist/ with tsc.
       - run: npm ci
 
-      # Provenance is attached automatically for a public package published this way.
-      - run: npm publish
+      # Provenance links the tarball to this workflow run and this commit, so
+      # anyone can check what they installed came from here (npm shows it on
+      # the package page). Trusted publishing attaches it anyway; the flag
+      # makes a publish that cannot attach it fail rather than go out without.
+      - run: npm publish --provenance --access public

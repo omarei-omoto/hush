@@ -65,6 +65,10 @@ jobs:
         with:
           node-version: "22.x"
       - run: npm ci
+      # The same source must build to the same bytes, twice, from two different
+      # directories — otherwise nobody can check a tarball against its commit.
+      - name: the build is reproducible
+        run: npm run build:check
       # Node refuses to strip types under node_modules, so an installed copy has
       # to run the built output. This is the check that would have caught the
       # package being completely unusable while every other test passed.

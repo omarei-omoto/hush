@@ -4,6 +4,60 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-30
+
+**Upgrade recommended for every team vault.**
+
+### hush notices when a vault's membership or key changes unexpectedly
+
+Each machine now remembers, per vault, the members it has accepted, a
+commitment to the data key behind each generation it has seen, and which vault
+lives at which path. When something changes that nobody on this machine did —
+a member someone else added, a different key where one was already seen, a
+different vault in the same place — hush refuses to decrypt or add anything
+there until a person looks:
+
+- `hush team accept` shows what changed (who was added, their fingerprint, and
+  the git commit and author that last touched the vault) and records it once
+  you confirm. With approvals on, it asks on screen like any other gated action.
+  Your agent is told never to run it for you.
+- `hush team reject` changes nothing and explains how to restore the vault from
+  before the change.
+- `hush team ls` marks members this machine has not accepted.
+- `hush verify` and `hush doctor` gain a trust check, and `hush verify` exits
+  non-zero over an unaccepted change instead of printing all green.
+- The MCP tools refuse with the same message, and `hush ui` loads with the
+  previews hidden and a banner saying what to run.
+
+Members removed and key rotations made by teammates go through on their own; a
+rotation made elsewhere is mentioned once. The first time a machine sees a vault
+it is accepted as it stands (trust on first use).
+
+**Behaviour change:** after a teammate adds someone, everyone else runs
+`hush team accept` once before their next `hush run`. That is the point.
+
+### The policy floor is created when an agent is set up
+
+`~/.hush/policy.json` — your floor, which no repository's policy can go below —
+now gets written (empty) whenever an agent is brought near a vault: `hush
+install-mcp` (it is on the "this will write" list), `hush install-skill`, and
+answering yes to "will an AI agent use secrets here?". Its existence is what
+keeps approvals on when a copy of the vault is opened from a folder with no
+policy of its own. `hush level` has a new rung-3 check for a machine with an
+agent registered and no floor, and `hush secure floor` writes one.
+
+### Fixed
+
+- `hush_check_repo` scanned any directory it was given, including outside the
+  project. It is now confined to the project root, with symlinks resolved.
+- Two MCP replies pointed at `hush_request_secret`, a tool that no longer
+  exists; they name `hush_add_secret`. A test now fails if any reply or the
+  agent skill names a tool the server does not have.
+- The UI test suite read the real `~/.codex/config.toml` of whoever ran it.
+- Docs: the supported-versions table, the README's description of how the
+  `hush` command chooses between `src/` and `dist/`, and the value AAD in "How
+  the crypto works" (it has bound the key generation since 0.4).
+
 ## 0.5.0 — 2026-09-24
 
 ### The app, redesigned around what you came to do

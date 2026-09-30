@@ -255,3 +255,13 @@ whenever the runtime feels like it. A core dump or swap file may contain them.
 ---
 
 Every defect found so far, and what changed, is in [docs/AUDIT.md](./docs/AUDIT.md).
+
+## Thanks
+
+People who reported a security problem in hush, with their permission to be
+named. There is no bounty; there is this list, a credit in the advisory and the
+changelog, and a fix you can watch land.
+
+*No external reports yet. The findings in [docs/RED-TEAM.md](./docs/RED-TEAM.md)
+and [docs/AUDIT.md](./docs/AUDIT.md) came from the project's own reviews. The
+first name here could be yours.*

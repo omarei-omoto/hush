@@ -1,0 +1,8 @@
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you build or set up with hush?
+      description: A workflow, an agent setup, a team rollout, a relay deployment — screenshots welcome (with values redacted).
+    validations:
+      required: true

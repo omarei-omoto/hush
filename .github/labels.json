@@ -1,0 +1,52 @@
+[
+  {
+    "name": "good first issue",
+    "color": "7057ff",
+    "description": "One function, one fixture, one test \u2014 the files are named in the issue"
+  },
+  {
+    "name": "help wanted",
+    "color": "008672",
+    "description": "Bigger than a first issue; the maintainer would welcome a hand"
+  },
+  {
+    "name": "agent-integration",
+    "color": "1d76db",
+    "description": "Teaching another coding agent about hush"
+  },
+  {
+    "name": "platform:windows",
+    "color": "0e8a16",
+    "description": "Windows-specific (beta)"
+  },
+  {
+    "name": "platform:linux",
+    "color": "0e8a16",
+    "description": "Linux-specific"
+  },
+  {
+    "name": "platform:macos",
+    "color": "0e8a16",
+    "description": "macOS-specific"
+  },
+  {
+    "name": "security",
+    "color": "b60205",
+    "description": "Hardening ideas that are not vulnerabilities (those go to a private advisory)"
+  },
+  {
+    "name": "needs-design",
+    "color": "fbca04",
+    "description": "Agree the approach in the issue before writing code"
+  },
+  {
+    "name": "idea",
+    "color": "c5def5",
+    "description": "A suggestion from the Idea form"
+  },
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "Something does not work as documented"
+  }
+]

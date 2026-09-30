@@ -1,0 +1,18 @@
+title: "[Idea] "
+labels: ["idea"]
+body:
+  - type: textarea
+    id: situation
+    attributes:
+      label: What are you trying to do?
+      description: The situation rather than the solution — "my agent keeps asking for the staging key" tells more than "add a flag".
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What do you do about it today?
+  - type: textarea
+    id: shape
+    attributes:
+      label: What you had in mind, if anything

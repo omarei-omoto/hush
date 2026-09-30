@@ -370,3 +370,51 @@ describe("hush run --materialize", () => {
     }
   });
 });
+
+describe("a run leaves no value on disk", () => {
+  // The invariant ARCHITECTURE.md names: the value exists in the child's
+  // environment and hush's memory, and nowhere a file could hold it. The child
+  // itself looks — while the run is live, which is when a temp file would exist
+  // — through the project, HUSH_HOME and anything new in the temp directory.
+  test("while the command runs, no file under the project, HUSH_HOME or tmp holds the value", () => {
+    const p = project();
+    try {
+      const probe = join(p.root, "probe.mjs");
+      writeFileSync(
+        probe,
+        `import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+const value = process.env.STRIPE_SECRET_KEY;
+if (!value) { console.log("no value injected"); process.exit(2); }
+const since = Number(process.argv[2]);
+let hits = 0, looked = 0;
+function walk(dir, onlyNew) {
+  let names = [];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    const path = join(dir, name);
+    let st;
+    try { st = statSync(path); } catch { continue; }
+    if (st.isDirectory()) { if (!onlyNew || st.mtimeMs >= since) walk(path, onlyNew); continue; }
+    if (onlyNew && st.mtimeMs < since) continue;
+    if (st.size > 1 << 20 || path === ${JSON.stringify(probe)}) continue;
+    looked++;
+    try { if (readFileSync(path).includes(value)) hits++; } catch {}
+  }
+}
+for (const d of process.argv.slice(3, -1)) walk(d, false);
+walk(process.argv.at(-1), true);
+console.log("looked=" + looked + " hits=" + hits);
+`,
+      );
+      const r = p.run(["run", "--", process.execPath, probe, String(Date.now() - 1000), p.root, p.home, tmpdir()]);
+      assert.equal(r.code, 0, r.out);
+      const m = /looked=(\d+) hits=(\d+)/.exec(r.out);
+      assert.ok(m, r.out);
+      assert.ok(Number(m[1]) > 0, "the probe looked at nothing");
+      assert.equal(m[2], "0", "a file on disk holds the injected value during the run");
+    } finally {
+      p.cleanup();
+    }
+  });
+});

@@ -578,3 +578,32 @@ describe("prose does not state facts that drift", () => {
   });
 
 });
+
+describe("the seed issues a newcomer starts from", () => {
+  // Each one names files to touch. A rename that leaves an issue pointing at a
+  // file that no longer exists is the first thing a new contributor would hit.
+  const dir = join(root, ".github", "seed-issues");
+  const labels = new Set((JSON.parse(read(".github/labels.json")) as { name: string }[]).map((l) => l.name));
+  const issues = readdirSync(dir).filter((f) => f.endsWith(".md"));
+
+  test("there are at least fifteen, each titled and labelled with labels that exist", () => {
+    assert.ok(issues.length >= 15, `only ${issues.length} seed issues`);
+    for (const f of issues) {
+      const text = read(`.github/seed-issues/${f}`);
+      const title = /^title: (.*)$/m.exec(text);
+      const labelLine = /^labels: (.*)$/m.exec(text);
+      assert.ok(title && labelLine, `${f} has no title or labels`);
+      for (const l of JSON.parse(labelLine[1]) as string[]) assert.ok(labels.has(l), `${f}: label "${l}" is not in labels.json`);
+    }
+  });
+
+  test("every file an issue tells someone to open exists", () => {
+    for (const f of issues) {
+      const text = read(`.github/seed-issues/${f}`);
+      // A file the issue asks someone to create is marked "(new)".
+      for (const [, path] of text.matchAll(/`((?:src|test|scripts|native|docs)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|md|swift|sh))`(?! \(new\))/g)) {
+        assert.ok(existsSync(join(root, path)), `${f} points at ${path}, which does not exist`);
+      }
+    }
+  });
+});

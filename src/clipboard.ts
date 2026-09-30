@@ -11,6 +11,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { onPath } from "./which.ts";
+import { system32 } from "./platform.ts";
 
 export interface ClipboardCommand {
   cmd: string;
@@ -20,6 +21,7 @@ export interface ClipboardCommand {
 /** In preference order: whichever exists is the one to use. */
 export function clipboardCandidates(platform: NodeJS.Platform = process.platform): ClipboardCommand[] {
   if (platform === "darwin") return [{ cmd: "pbcopy", args: [] }];
+  if (platform === "win32") return [{ cmd: "clip", args: [] }];
   return [
     { cmd: "wl-copy", args: [] },
     { cmd: "xclip", args: ["-selection", "clipboard"] },
@@ -43,7 +45,8 @@ export function findClipboard(
   platform: NodeJS.Platform = process.platform,
 ): { cmd: string; args: string[]; path: string } | null {
   for (const candidate of clipboardCandidates(platform)) {
-    const path = onPath(candidate.cmd);
+    // Windows: clip.exe from System32, never whatever PATH offers first.
+    const path = platform === "win32" ? system32(`${candidate.cmd}.exe`) : onPath(candidate.cmd);
     if (path) return { ...candidate, path };
   }
   return null;
@@ -66,6 +69,7 @@ export function copyToClipboard(
   const r = spawnSync(found.path, found.args, {
     input: text,
     stdio: ["pipe", "ignore", "ignore"],
+    windowsHide: true,
   });
   if (r.error) return { ok: false, via: found.cmd, reason: r.error.message };
   if (r.status !== 0) return { ok: false, via: found.cmd, reason: `${found.cmd} exited ${r.status}` };

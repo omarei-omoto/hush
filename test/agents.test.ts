@@ -11,6 +11,9 @@ import assert from "node:assert/strict";
 
 import {
   AGENTS,
+  mergeMcpVscode,
+  mergeMcpZed,
+  stripJsonc,
   mergeMcpJson,
   mergeMcpToml,
   renderMcp,
@@ -23,7 +26,10 @@ const entry = { command: "node", args: ["/usr/local/lib/hush/cli.ts", "mcp"] };
 describe("the agent table", () => {
   test("every agent says where its MCP config lives and in which format", () => {
     const byId = Object.fromEntries(AGENTS.map((g) => [g.id, g]));
-    assert.deepEqual(Object.keys(byId).sort(), ["claude-code", "codex", "cursor"]);
+    assert.deepEqual(
+      Object.keys(byId).sort(),
+      ["claude-code", "cline", "codex", "continue", "cursor", "gemini", "vscode", "windsurf", "zed"],
+    );
 
     // The paths are the documented ones. A wrong path here is the whole bug.
     assert.equal(
@@ -146,5 +152,163 @@ describe("what counts as registered", () => {
     };
     const found = mcpRegistrations("/proj", { HOME: "/home/me" }, (p) => files[p] ?? null);
     assert.deepEqual(found.map((f) => f.agent.id), ["claude-code"]);
+  });
+});
+
+describe("the agents added in 0.7 (F-5)", () => {
+  const byId = Object.fromEntries(AGENTS.map((g) => [g.id, g]));
+  const env = { HOME: "/home/me" };
+
+  test("each reads the file its own documentation names", () => {
+    assert.equal(byId["windsurf"].mcp.path("/proj", env), "/home/me/.config/devin/mcp_config.json");
+    assert.equal(byId["windsurf"].mcp.path("/proj", { ...env, XDG_CONFIG_HOME: "/xdg" }), "/xdg/devin/mcp_config.json");
+    assert.equal(byId["gemini"].mcp.path("/proj", env), "/proj/.gemini/settings.json");
+    assert.equal(byId["vscode"].mcp.path("/proj", env), "/proj/.vscode/mcp.json");
+    assert.equal(byId["vscode"].mcp.format, "vscode");
+    assert.equal(byId["zed"].mcp.path("/proj", env), "/home/me/.config/zed/settings.json");
+    assert.equal(byId["zed"].mcp.format, "zed");
+    assert.equal(byId["cline"].mcp.path("/proj", env), "/home/me/.cline/mcp.json");
+    assert.equal(byId["continue"].mcp.path("/proj", env), "/proj/.continue/mcpServers/hush.json");
+  });
+
+  test("skills and rules go where each one looks, with the frontmatter it wants", () => {
+    const skill = "---\nname: hush\ndescription: Use for keys.\n---\n\n# hush\n\nBody.\n";
+    const d = "Use for keys.";
+    assert.equal(byId["gemini"].skill.project("/p"), "/p/.agents/skills/hush/SKILL.md");
+    assert.equal(byId["zed"].skill.project("/p"), "/p/.agents/skills/hush/SKILL.md");
+    assert.equal(byId["windsurf"].skill.project("/p"), "/p/.windsurf/rules/hush.md");
+    assert.match(byId["windsurf"].skill.transform!(skill, d), /^---\ntrigger: model_decision\ndescription: Use for keys\.\n---\n\n# hush/);
+    assert.equal(byId["vscode"].skill.project("/p"), "/p/.github/instructions/hush.instructions.md");
+    assert.match(byId["vscode"].skill.transform!(skill, d), /^---\ndescription: Use for keys\.\n---\n\n# hush/);
+    assert.equal(byId["cline"].skill.project("/p"), "/p/.clinerules/hush.md");
+    assert.equal(byId["cline"].skill.transform!(skill, d), "# hush\n\nBody.\n");
+    assert.equal(byId["continue"].skill.project("/p"), "/p/.continue/rules/hush.md");
+    assert.match(byId["continue"].skill.transform!(skill, d), /^---\nname: hush\ndescription: Use for keys\.\nalwaysApply: false\n---/);
+    for (const g of AGENTS) {
+      if (!g.skill.transform) continue;
+      const out = g.skill.transform(skill, d);
+      assert.equal((out.match(/^---$/gm) ?? []).length, out.startsWith("---") ? 2 : 0, `${g.id}: frontmatter fences`);
+    }
+  });
+
+  test("every agent's manual line names hush", () => {
+    for (const id of ["windsurf", "gemini", "vscode", "zed", "cline", "continue"]) {
+      assert.match(byId[id].manual({ command: "hush", args: ["mcp"] }, "/proj"), /hush/, id);
+    }
+    assert.match(byId["gemini"].manual({ command: "hush", args: ["mcp"] }, "/p"), /^gemini mcp add hush hush mcp$/);
+  });
+});
+
+describe("VS Code's servers shape", () => {
+  test("creates, merges, and leaves an existing entry alone", () => {
+    const r = mergeMcpVscode(null, "hush", entry);
+    assert.ok(r.ok && r.changed);
+    assert.deepEqual(JSON.parse(r.text), { servers: { hush: { type: "stdio", ...entry } } });
+    const other = JSON.stringify({ servers: { gh: { type: "http", url: "https://x" } }, inputs: [] }, null, 2);
+    const m = mergeMcpVscode(other, "hush", entry);
+    assert.ok(m.ok && m.changed);
+    const doc = JSON.parse(m.text);
+    assert.deepEqual(Object.keys(doc.servers).sort(), ["gh", "hush"]);
+    assert.deepEqual(doc.inputs, []);
+    const again = mergeMcpVscode(m.text, "hush", { command: "x", args: [] });
+    assert.ok(again.ok && !again.changed);
+  });
+
+  test("a file with comments is not rewritten (its comments would be lost)", () => {
+    const r = mergeMcpVscode('{\n  // mine\n  "servers": {}\n}', "hush", entry);
+    assert.equal(r.ok, false);
+  });
+});
+
+describe("Zed's settings file, which has comments", () => {
+  const zedDefault = `// Zed settings
+//
+// For information on how to configure Zed, see the Zed
+// documentation: https://zed.dev/docs/configuring-zed
+{
+  "theme": "One Dark", // keep this
+  "ui_font_size": 16,
+}
+`;
+
+  test("adds context_servers without losing a single comment", () => {
+    const r = mergeMcpZed(zedDefault, "hush", entry);
+    assert.ok(r.ok && r.changed, JSON.stringify(r));
+    for (const c of ["// Zed settings", "// keep this", "// documentation: https://zed.dev/docs/configuring-zed"]) {
+      assert.ok(r.text.includes(c), `lost ${c}`);
+    }
+    const doc = JSON.parse(stripJsonc(r.text));
+    assert.deepEqual(doc.context_servers.hush, { ...entry, env: {} });
+    assert.equal(doc.theme, "One Dark");
+  });
+
+  test("joins an existing context_servers, empty or not, and never adds a second hush", () => {
+    const withOther = '{\n  "context_servers": {\n    "gh": { "command": "gh-mcp", "args": [] } // mine\n  }\n}\n';
+    const r = mergeMcpZed(withOther, "hush", entry);
+    assert.ok(r.ok && r.changed);
+    const doc = JSON.parse(stripJsonc(r.text));
+    assert.deepEqual(Object.keys(doc.context_servers).sort(), ["gh", "hush"]);
+    assert.ok(r.text.includes("// mine"));
+    const empty = mergeMcpZed('{ "context_servers": {} }', "hush", entry);
+    assert.ok(empty.ok && empty.changed);
+    assert.deepEqual(JSON.parse(stripJsonc(empty.text)).context_servers.hush, { ...entry, env: {} });
+    const again = mergeMcpZed(r.text, "hush", entry);
+    assert.ok(again.ok && !again.changed);
+  });
+
+  test("a key named context_servers inside another object is not mistaken for the real one", () => {
+    const tricky = '{ "agent": { "context_servers": { } }, "x": 1 }';
+    const r = mergeMcpZed(tricky, "hush", entry);
+    assert.ok(r.ok && r.changed);
+    const doc = JSON.parse(stripJsonc(r.text));
+    assert.ok(doc.context_servers?.hush, r.text);
+    assert.deepEqual(doc.agent.context_servers, {});
+  });
+
+  test("stripJsonc keeps // inside strings and drops trailing commas", () => {
+    assert.deepEqual(JSON.parse(stripJsonc('{ "u": "https://x//y", /* c */ "a": [1,2,], }')), { u: "https://x//y", a: [1, 2] });
+  });
+
+  test("an unparseable file is left alone", () => {
+    assert.equal(mergeMcpZed("{ oops", "hush", entry).ok, false);
+  });
+});
+
+describe("installing for the new agents, end to end", () => {
+  test("Zed's commented settings keep their comments, and one skill file serves Codex, Gemini and Zed", async () => {
+    const { spawnSync } = await import("node:child_process");
+    const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join, dirname } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+    const home = mkdtempSync(join(tmpdir(), "hush-agents-home-"));
+    const root = mkdtempSync(join(tmpdir(), "hush-agents-proj-"));
+    mkdirSync(join(home, ".config", "zed"), { recursive: true });
+    const settings = join(home, ".config", "zed", "settings.json");
+    writeFileSync(settings, '// my zed\n{\n  "theme": "One Dark", // mine\n}\n');
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, [CLI, ...args], {
+        cwd: root,
+        env: { ...process.env, HOME: home, HUSH_HOME: join(home, ".hush"), XDG_CONFIG_HOME: "", NO_COLOR: "1", HUSH_NO_NUDGE: "1" },
+        encoding: "utf8",
+      });
+    const mcp = run(["install-mcp", "--for", "zed", "--yes"]);
+    assert.equal(mcp.status, 0, mcp.stdout + mcp.stderr);
+    const text = readFileSync(settings, "utf8");
+    assert.ok(text.includes("// my zed") && text.includes("// mine"), text);
+    assert.ok(JSON.parse(stripJsonc(text)).context_servers.hush, text);
+
+    // What doctor and the app read agrees that Zed now has hush.
+    const { mcpRegistrations } = await import("../src/agents.ts");
+    const found = mcpRegistrations(root, { HOME: home }, (p) => (existsSync(p) ? readFileSync(p, "utf8") : null));
+    assert.ok(found.some((f) => f.agent.id === "zed"), JSON.stringify(found.map((f) => f.agent.id)));
+
+    for (const id of ["codex", "gemini", "zed"]) {
+      const r = run(["install-skill", "--for", id, "--yes"]);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+    }
+    assert.ok(existsSync(join(root, ".agents", "skills", "hush", "SKILL.md")));
+    for (const d of [home, root]) rmSync(d, { recursive: true, force: true });
   });
 });

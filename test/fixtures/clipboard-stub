@@ -11,5 +11,8 @@ const fs = require("fs");
 
 const target = process.env.HUSH_TEST_CLIPBOARD;
 if (target) fs.writeFileSync(target, fs.readFileSync(0, "utf8"));
+// What the tool was *called with*, so a test can check the value never went
+// through argv, where every other process can read it.
+if (target) fs.writeFileSync(target + ".argv", JSON.stringify(process.argv.slice(2)));
 
 process.exit(Number(process.env.HUSH_TEST_CLIPBOARD_EXIT || "0"));

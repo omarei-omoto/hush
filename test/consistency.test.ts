@@ -17,11 +17,34 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
-const mcp = read("src/mcp.ts");
-const cli = read("src/cli.ts");
-const ui = read("src/ui.ts");
+// The server is mcp.ts (protocol, tool list, policy defaults) and mcp-tools.ts
+// (what each tool does); a check about "the MCP server" reads both.
+const mcp = read("src/mcp.ts") + "\n" + read("src/mcp-tools.ts");
+/**
+ * The CLI is src/cli.ts (the dispatcher and the COMMANDS table) plus the
+ * shared helpers in src/cli/ and one file per command in src/commands/. A
+ * check about "the CLI" reads all of it, so moving code between those files
+ * can never move it out of a check's sight.
+ */
+const cliFiles = [
+  "src/cli.ts",
+  ...["src/cli", "src/commands"].flatMap((d) =>
+    readdirSync(join(root, d)).filter((f) => f.endsWith(".ts")).map((f) => `${d}/${f}`),
+  ),
+];
+const cli = cliFiles.map(read).join("\n");
+const ui = read("src/ui.ts") + "\n" + read("src/ui-api.ts") + "\n" + read("src/ui-state.ts");
 const skill = read("skills/hush/SKILL.md");
-const readme = read("README.md");
+/**
+ * The user docs: the README (the front page) and the guide pages its sections
+ * moved to (D-2). Checks that used to read the README read all of them.
+ */
+const guidePages = readdirSync(join(root, "docs", "guide"))
+  .filter((f) => f.endsWith(".md"))
+  .sort()
+  .map((f) => `docs/guide/${f}`);
+const userDocs = ["README.md", ...guidePages];
+const readme = userDocs.map(read).join("\n");
 const security = read("SECURITY.md");
 
 /**
@@ -118,17 +141,50 @@ describe("docs describe the code that exists", () => {
     assert.match(readme, /anything after hush/i, "the README never explains pass-through");
   });
 
-  test("internal doc links resolve", () => {
-    for (const [name, doc] of [
-      ["README.md", readme],
-      ["SECURITY.md", security],
-      ["docs/BIOMETRY.md", read("docs/BIOMETRY.md")],
-    ] as const) {
-      for (const m of doc.matchAll(/\]\((\.\/[^)#]+|docs\/[^)#]+)\)/g)) {
-        const target = m[1].replace(/^\.\//, "");
-        assert.ok(existsSync(join(root, target)), `${name} links to missing ${target}`);
+  test("every relative link in the docs resolves, anchor included", () => {
+    // The README's sections moved into docs/guide/ (D-2) with every link
+    // rewritten; this is what says none was missed, and none rots later. Each
+    // link is resolved from its own file's directory, as GitHub and the docs
+    // site both resolve it, and a #fragment must be a heading in the target.
+    const slug = (h: string) => h.toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
+    const anchorsOf = (text: string) => {
+      const seen: Record<string, number> = {};
+      const out = new Set<string>();
+      let fence = false;
+      for (const line of text.split("\n")) {
+        if (line.startsWith("```")) fence = !fence;
+        const m = !fence && /^#{1,6} (.+)$/.exec(line);
+        if (!m) continue;
+        const s = slug(m[1]);
+        seen[s] = (seen[s] ?? 0) + 1;
+        out.add(seen[s] > 1 ? `${s}-${seen[s] - 1}` : s);
+      }
+      return out;
+    };
+    const files = [
+      ...["README.md", "SECURITY.md", "CONTRIBUTING.md", "RELEASING.md", "RESEARCH.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md"],
+      ...(readdirSync(join(root, "docs"), { recursive: true }) as string[])
+        .map((f) => f.split("\\").join("/"))
+        .filter((f) => f.endsWith(".md") && f !== "PLAN-1.0.md")
+        .map((f) => `docs/${f}`),
+    ].filter((f) => existsSync(join(root, f)));
+    let checked = 0;
+    for (const file of files) {
+      const text = read(file);
+      const prose = text.replace(/```[\s\S]*?```/g, "");
+      for (const m of prose.matchAll(/\]\(([^)\s]+)\)/g)) {
+        const target = m[1];
+        if (/^[a-z]+:/i.test(target) || target.startsWith("//")) continue;
+        const [path, frag] = target.split("#");
+        const dest = path ? join(dirname(join(root, file)), path) : join(root, file);
+        assert.ok(existsSync(dest), `${file} links to ${target}, which does not exist`);
+        if (frag && dest.endsWith(".md")) {
+          assert.ok(anchorsOf(readFileSync(dest, "utf8")).has(frag), `${file} links to ${target}, which is not a heading there`);
+        }
+        checked++;
       }
     }
+    assert.ok(checked > 100, `only ${checked} links checked — is the pattern still matching?`);
   });
 });
 
@@ -142,7 +198,10 @@ describe("configuration has no dead knobs", () => {
     // If an export is deliberately part of the public API rather than used
     // internally, a test counts as a use — which is the right bar for anything
     // other people are meant to call.
-    const srcFiles = readdirSync(join(root, "src")).filter((f) => f.endsWith(".ts"));
+    // Recursive: the CLI lives in src/cli/ and src/commands/ as well.
+    const srcFiles = (readdirSync(join(root, "src"), { recursive: true }) as string[])
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => f.split("\\").join("/"));
     const everything =
       srcFiles.map((f) => read("src/" + f)).join("\n") +
       readdirSync(join(root, "test"))
@@ -177,8 +236,7 @@ describe("configuration has no dead knobs", () => {
     // policy.ts holds checkCommand/checkEnv/checkScopes, which is where
     // allowCommands and allowEnvs are actually read now that mcp.ts and cli.ts
     // both call them rather than each keeping their own copy.
-    const consumers = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
-      .map((f) => read("src/" + f))
+    const consumers = [cli, ...["mcp.ts", "mcp-tools.ts", "ui.ts", "ui-api.ts", "ui-state.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"].map((f) => read("src/" + f))]
       .join("\n");
     for (const field of fields) {
       const reads = [...consumers.matchAll(new RegExp(`\\.${field}\\b`, "g"))].length;
@@ -235,7 +293,7 @@ describe("facts are stated once", () => {
     // It used to be typed into src/cli.ts, src/mcp.ts and package.json, with
     // nothing keeping them together — so `hush --version` and the version the
     // MCP server reports to a client could disagree with what was published.
-    const declarations = ["src/cli.ts", "src/mcp.ts", "src/version.ts", "src/ui.ts"]
+    const declarations = [...cliFiles, "src/mcp.ts", "src/version.ts", "src/ui.ts"]
       .filter((f) => /const VERSION\s*=\s*"/.test(read(f)));
     assert.deepEqual(declarations, ["src/version.ts"], "the version is declared in more than one file");
 
@@ -269,7 +327,7 @@ describe("facts are stated once", () => {
   test("the default policy is not retyped anywhere", () => {
     // A hand-written copy in `hush install-mcp` is how `allowReveal` kept being
     // written into every new project after it had stopped meaning anything.
-    const literals = ["src/cli.ts", "src/secure.ts"].filter((f) =>
+    const literals = [...cliFiles, "src/secure.ts"].filter((f) =>
       /requireApproval:\s*\[\s*"run"/.test(read(f)),
     );
     assert.deepEqual(literals, [], `the default policy is retyped in ${literals.join(", ")}`);
@@ -333,7 +391,7 @@ describe("examples in the docs are real", () => {
     assert.ok(pkg.homepage.includes(slug!), "homepage points somewhere else");
 
     const docs = [
-      "README.md",
+      ...userDocs,
       "CONTRIBUTING.md",
       "SECURITY.md",
       "CODE_OF_CONDUCT.md",
@@ -366,7 +424,7 @@ describe("examples in the docs are real", () => {
     // What does have to hold is that the docs tell people to install the package
     // that actually exists, which is what caught the README recommending the
     // unrelated `hush` package somebody else owns.
-    for (const doc of ["README.md", "CONTRIBUTING.md"]) {
+    for (const doc of [...userDocs, "CONTRIBUTING.md"]) {
       for (const m of read(doc).matchAll(/npm install(?: -g)? (@[a-z0-9-]+\/[a-z0-9-]+)/g)) {
         assert.equal(m[1], pkg.name, `${doc} tells people to install ${m[1]}`);
       }
@@ -387,7 +445,7 @@ describe("examples in the docs are real", () => {
     // middle of itself — every heading twice, the second copy authoritative and
     // the first stale. It reads as plausible prose for as long as nobody
     // scrolls, which is exactly the kind of rot these checks exist for.
-    for (const doc of ["README.md", "SECURITY.md", "RESEARCH.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "RESEARCH.md", "docs/BIOMETRY.md"]) {
       const headings = [...read(doc).matchAll(/^(#{1,3}) (.+)$/gm)].map((m) => m[0]);
       const seen = new Set<string>();
       for (const h of headings) {
@@ -419,7 +477,7 @@ describe("examples in the docs are real", () => {
     const slug = (h: string) =>
       h.toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-");
 
-    for (const doc of ["README.md", "SECURITY.md", "CONTRIBUTING.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "CONTRIBUTING.md"]) {
       const text = read(doc);
       // GitHub disambiguates repeated headings with -1, -2, …
       const seen: Record<string, number> = {};
@@ -467,7 +525,7 @@ describe("examples in the docs are real", () => {
     // A hand-edited example with a trailing comma is not a typo in prose: it is
     // a config file someone will copy, and it will not load. This caught one the
     // moment it was written.
-    for (const doc of ["README.md", "SECURITY.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "docs/BIOMETRY.md"]) {
       const text = read(doc);
       const blocks = [...text.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]);
       for (const [i, body] of blocks.entries()) {
@@ -539,7 +597,7 @@ describe("prose does not state facts that drift", () => {
     //
     // docs/AUDIT.md is exempt: it is a record of what was true during a
     // particular pass, not a claim about the present.
-    for (const doc of ["README.md", "SECURITY.md", "CONTRIBUTING.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "CONTRIBUTING.md", "docs/BIOMETRY.md"]) {
       const claim = read(doc).match(/\b\d+\s+tests?\b/i);
       assert.equal(claim, null, `${doc} claims a test count: ${claim?.[0]}`);
     }
@@ -555,10 +613,82 @@ describe("prose does not state facts that drift", () => {
       const claim = src.match(/(?:about|roughly|~)\s*(?:\d+|forty|fifty|sixty|hundred)[\s-]*lines/i);
       assert.equal(claim, null, `src/${f} claims a line count: ${claim?.[0]}`);
     }
-    for (const doc of ["README.md", "SECURITY.md", "docs/BIOMETRY.md"]) {
+    for (const doc of [...userDocs, "SECURITY.md", "docs/BIOMETRY.md"]) {
       const claim = read(doc).match(/(?:about|roughly|~)\s*\d+\s*lines/i);
       assert.equal(claim, null, `${doc} claims a line count: ${claim?.[0]}`);
     }
   });
 
+});
+
+describe("the seed issues a newcomer starts from", () => {
+  // Each one names files to touch. A rename that leaves an issue pointing at a
+  // file that no longer exists is the first thing a new contributor would hit.
+  const dir = join(root, ".github", "seed-issues");
+  const labels = new Set((JSON.parse(read(".github/labels.json")) as { name: string }[]).map((l) => l.name));
+  const issues = readdirSync(dir).filter((f) => f.endsWith(".md"));
+
+  test("there are at least fifteen, each titled and labelled with labels that exist", () => {
+    assert.ok(issues.length >= 15, `only ${issues.length} seed issues`);
+    for (const f of issues) {
+      const text = read(`.github/seed-issues/${f}`);
+      const title = /^title: (.*)$/m.exec(text);
+      const labelLine = /^labels: (.*)$/m.exec(text);
+      assert.ok(title && labelLine, `${f} has no title or labels`);
+      for (const l of JSON.parse(labelLine[1]) as string[]) assert.ok(labels.has(l), `${f}: label "${l}" is not in labels.json`);
+    }
+  });
+
+  test("every file an issue tells someone to open exists", () => {
+    for (const f of issues) {
+      const text = read(`.github/seed-issues/${f}`);
+      // A file the issue asks someone to create is marked "(new)".
+      for (const [, path] of text.matchAll(/`((?:src|test|scripts|native|docs)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|md|swift|sh))`(?! \(new\))/g)) {
+        assert.ok(existsSync(join(root, path)), `${f} points at ${path}, which does not exist`);
+      }
+    }
+  });
+});
+
+describe("the command reference", () => {
+  test("docs/guide/commands.md is exactly what hush help --all says", async () => {
+    const { commandsPage } = await import("../scripts/gen-commands.mjs");
+    assert.equal(read("docs/guide/commands.md"), await commandsPage(), "out of date — run npm run docs:commands");
+  });
+});
+
+describe("deprecations say when they end", () => {
+  // 1.0's promise (PLAN §1, "Semver means something"): an alias is either gone
+  // or kept with a stated removal version. A notice that just says
+  // "deprecated" leaves a script's author guessing how long they have.
+  test("every deprecation notice and deprecated MCP field names hush 2.0", () => {
+    const sources = [...cliFiles, "src/mcp.ts", "src/mcp-tools.ts"];
+    let seen = 0;
+    for (const f of sources) {
+      for (const line of read(f).split("\n")) {
+        const notice = /warn\(.*deprecated|description: "Deprecated|"Deprecated|is deprecated/i.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line);
+        if (!notice) continue;
+        seen++;
+        assert.match(line, /hush 2\.0/, `${f}: a deprecation without a removal version:\n${line.trim()}`);
+      }
+    }
+    assert.ok(seen >= 15, `only ${seen} deprecation notices found — is the pattern still matching?`);
+  });
+});
+
+describe("the security claims name their tests", () => {
+  // SECURITY.md's "What it protects" table says which tests hold each claim.
+  // A renamed or deleted test would leave a claim pointing at nothing.
+  test("every test file and test name SECURITY.md and ARCHITECTURE.md cite exists", () => {
+    let cited = 0;
+    for (const doc of ["SECURITY.md", "docs/ARCHITECTURE.md"]) {
+      for (const m of read(doc).matchAll(/`(test\/[\w./-]+\.test\.ts)`(?: \("([^"]+?)(?:…)?"\))?/g)) {
+        const [, file, name] = m;
+        assert.ok(existsSync(join(root, file)), `${doc} cites ${file}, which does not exist`);
+        if (name) assert.ok(read(file).includes(name), `${doc} cites "${name}" in ${file}, which has no such test`);
+        cited++;
+      }
+    }
+    assert.ok(cited >= 25, `only ${cited} citations found — is the pattern still matching?`);
+  });
 });

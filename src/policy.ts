@@ -12,7 +12,8 @@
  * checks that read an already-loaded Policy, the merge that builds one, and
  * the approval-scope helpers both surfaces share.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { ttlLabel } from "./dialogs.ts";
 import { ValidationError } from "./vault.ts";
 import type { Policy } from "./mcp.ts";
@@ -255,6 +256,9 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
     approvalTimeoutSeconds: repo.approvalTimeoutSeconds ?? floor.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
     biometry,
     approvalScope,
+    // A reminder, so the stricter of the two wins per set: a floor can ask to
+    // be told sooner than a repository would, never later.
+    ...mergeRotation(floor.rotateAfterDays, repo.rotateAfterDays),
     // The unmask list is the user's own decision, so only the floor can set
     // it: a repository must not be able to talk hush out of masking a value
     // it can write a file about. See unsensitiveForOutput() in schema.ts.
@@ -328,4 +332,55 @@ export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>):
   }
 
   return lines;
+}
+
+/**
+ * Make sure `~/.hush/policy.json`, the floor, exists — even empty.
+ *
+ * Its *existence* is what matters most. With no floor, a copy of a committed
+ * vault opened through HUSH_VAULT from a folder with no policy.json of its own
+ * ran with no policy at all: `hush get` printed a value with no prompt even when
+ * the real project required fingerprint approval (docs/RED-TEAM.md, finding 4).
+ * With any floor present, the default approvals apply to every invocation.
+ *
+ * Called at the moments an agent is being brought near the vault — agreeing
+ * that one will be, `hush install-mcp`, `hush install-skill` — and by `hush
+ * secure floor`. Never overwrites: a floor someone wrote is theirs.
+ */
+export function ensureFloor(home: string): { created: boolean; path: string } {
+  const path = join(home, "policy.json");
+  if (existsSync(path)) return { created: false, path };
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  try {
+    // wx: if something appeared since the check, it is left alone.
+    writeFileSync(path, "{}\n", { mode: 0o600, flag: "wx" });
+    return { created: true, path };
+  } catch {
+    return { created: false, path };
+  }
+}
+
+/** The floor and the repo's `rotateAfterDays`, merged: per set, the smaller number of days. */
+function mergeRotation(
+  floor: Policy["rotateAfterDays"],
+  repo: Policy["rotateAfterDays"],
+): { rotateAfterDays?: Policy["rotateAfterDays"] } {
+  const asMap = (x: Policy["rotateAfterDays"]): Record<string, number> =>
+    typeof x === "number" ? { "*": x } : x && typeof x === "object" ? x : {};
+  const f = asMap(floor);
+  const r = asMap(repo);
+  const out: Record<string, number> = {};
+  for (const set of new Set([...Object.keys(f), ...Object.keys(r)])) {
+    const vals = [f[set] ?? f["*"], r[set] ?? r["*"]].filter((v): v is number => typeof v === "number" && v > 0);
+    if (vals.length) out[set] = Math.min(...vals);
+  }
+  return Object.keys(out).length ? { rotateAfterDays: out } : {};
+}
+
+/** Days a set's values may go unreplaced, or null for no reminder. */
+export function rotationDaysFor(policy: Pick<Policy, "rotateAfterDays">, set: string): number | null {
+  const r = policy.rotateAfterDays;
+  if (typeof r === "number") return r > 0 ? r : null;
+  if (r && typeof r === "object") return r[set] ?? r["*"] ?? null;
+  return null;
 }

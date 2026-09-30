@@ -16,15 +16,24 @@
 import { join } from "node:path";
 import { onPath } from "./which.ts";
 
-export type AgentId = "codex" | "claude-code" | "cursor";
+export type AgentId =
+  | "codex" | "claude-code" | "cursor" | "windsurf" | "gemini" | "vscode" | "zed" | "cline" | "continue";
 
 export interface McpEntry {
   command: string;
   args: string[];
 }
 
-/** How a config file represents "here is a server called hush". */
-export type McpFormat = "json" | "toml";
+/**
+ * How a config file represents "here is a server called hush".
+ *
+ * - `json`: `{ "mcpServers": { "hush": { command, args } } }` — most agents.
+ * - `toml`: Codex's `[mcp_servers.hush]`.
+ * - `vscode`: VS Code's `{ "servers": { "hush": { "type": "stdio", … } } }`.
+ * - `zed`: Zed's settings file, `{ "context_servers": { "hush": … } }`, which
+ *   is JSON with comments — so it is edited in place, never re-serialised.
+ */
+export type McpFormat = "json" | "toml" | "vscode" | "zed";
 
 export interface AgentSpec {
   id: AgentId;
@@ -70,6 +79,13 @@ const jsonLine = (e: McpEntry | string): string => {
 
 const home = (env: NodeJS.ProcessEnv): string => env.HOME ?? env.USERPROFILE ?? "~";
 
+/** A rule file that needs its own frontmatter in place of SKILL.md's. */
+const withFrontmatter = (lines: string[]) => (markdown: string, description: string): string =>
+  `---\n${lines.map((l) => l.replace("$DESCRIPTION", description)).join("\n")}\n---\n\n${stripFrontmatter(markdown)}`;
+
+/** $XDG_CONFIG_HOME, or ~/.config — where Windsurf (Devin) and Zed keep settings. */
+const xdgConfig = (env: NodeJS.ProcessEnv): string => env.XDG_CONFIG_HOME || join(home(env), ".config");
+
 /** macOS keeps app support outside the home dotfiles; both are worth checking. */
 const appSupport = (env: NodeJS.ProcessEnv, name: string): string =>
   join(home(env), "Library", "Application Support", name);
@@ -82,7 +98,8 @@ const appSupport = (env: NodeJS.ProcessEnv, name: string): string =>
  * bug this module exists to fix. Codex reads MCP servers from
  * `~/.codex/config.toml` and skills from `~/.agents/skills`; Claude Code reads
  * `.mcp.json` and `.claude/skills`; Cursor reads `.cursor/mcp.json` and
- * `.cursor/rules`.
+ * `.cursor/rules`. The rest name their source beside their entry, checked
+ * against each tool's documentation on 2026-09-30.
  */
 export const AGENTS: AgentSpec[] = [
   {
@@ -139,6 +156,131 @@ export const AGENTS: AgentSpec[] = [
         `---\ndescription: ${description}\nalwaysApply: false\n---\n\n${stripFrontmatter(markdown)}`,
     },
     manual: (entry, root) => `write ${join(root, ".cursor", "mcp.json")}:\n    ${jsonLine(entry)}`,
+  },
+  {
+    // Windsurf's Cascade agent: docs.windsurf.com/windsurf/cascade/mcp gives
+    // ~/.config/devin/mcp_config.json (or $XDG_CONFIG_HOME/devin/…); workspace
+    // rules live in .windsurf/rules/, with a `trigger` in their frontmatter.
+    id: "windsurf",
+    name: "Windsurf",
+    present: (root, env, exists) =>
+      exists(join(root, ".windsurf")) ||
+      exists(join(home(env), ".codeium", "windsurf")) ||
+      exists(join(xdgConfig(env), "devin")) ||
+      exists(appSupport(env, "Windsurf")) ||
+      onPath("windsurf", env.PATH) !== null,
+    mcp: {
+      path: (_root, env) => join(xdgConfig(env), "devin", "mcp_config.json"),
+      format: "json",
+    },
+    skill: {
+      project: (root) => join(root, ".windsurf", "rules", "hush.md"),
+      global: null,
+      // model_decision: only the description sits in the prompt until it is needed.
+      transform: withFrontmatter(["trigger: model_decision", "description: $DESCRIPTION"]),
+    },
+    manual: (entry, _root) => `add to ~/.config/devin/mcp_config.json:\n    ${jsonLine(entry)}`,
+  },
+  {
+    // Gemini CLI: `gemini mcp add` writes .gemini/settings.json (project scope
+    // is its default); skills are read from .agents/skills/ like Codex's.
+    id: "gemini",
+    name: "Gemini CLI",
+    present: (root, env, exists) =>
+      exists(join(root, ".gemini")) || exists(join(home(env), ".gemini")) || onPath("gemini", env.PATH) !== null,
+    mcp: {
+      path: (root) => join(root, ".gemini", "settings.json"),
+      format: "json",
+    },
+    skill: {
+      project: (root) => join(root, ".agents", "skills", "hush", "SKILL.md"),
+      global: (env) => join(home(env), ".agents", "skills", "hush", "SKILL.md"),
+    },
+    manual: (entry) => `gemini mcp add hush ${shellLine(entry)}`,
+  },
+  {
+    // VS Code (Copilot agent mode): .vscode/mcp.json with a top-level
+    // `servers` object; instructions in .github/instructions/*.instructions.md.
+    id: "vscode",
+    name: "VS Code",
+    present: (root, env, exists) =>
+      exists(join(root, ".vscode")) ||
+      exists(appSupport(env, "Code")) ||
+      exists(join(xdgConfig(env), "Code")) ||
+      onPath("code", env.PATH) !== null,
+    mcp: {
+      path: (root) => join(root, ".vscode", "mcp.json"),
+      format: "vscode",
+    },
+    skill: {
+      project: (root) => join(root, ".github", "instructions", "hush.instructions.md"),
+      global: null,
+      transform: withFrontmatter(["description: $DESCRIPTION"]),
+    },
+    manual: (entry, root) => {
+      const { command, args } = asEntry(entry);
+      return `write ${join(root, ".vscode", "mcp.json")}:\n    { "servers": { "hush": { "type": "stdio", "command": ${JSON.stringify(command)}, "args": [${args.map((a) => JSON.stringify(a)).join(", ")}] } } }`;
+    },
+  },
+  {
+    // Zed: `context_servers` in the settings file (zed: open settings file),
+    // ~/.config/zed/settings.json; skills from .agents/skills/ (zed.dev/docs/ai/skills).
+    id: "zed",
+    name: "Zed",
+    present: (root, env, exists) =>
+      exists(join(root, ".zed")) ||
+      exists(join(xdgConfig(env), "zed")) ||
+      exists(appSupport(env, "Zed")) ||
+      onPath("zed", env.PATH) !== null,
+    mcp: {
+      path: (_root, env) => join(xdgConfig(env), "zed", "settings.json"),
+      format: "zed",
+    },
+    skill: {
+      project: (root) => join(root, ".agents", "skills", "hush", "SKILL.md"),
+      global: (env) => join(home(env), ".agents", "skills", "hush", "SKILL.md"),
+    },
+    manual: (entry) => {
+      const { command, args } = asEntry(entry);
+      return `add to your Zed settings (zed: open settings file):\n    "context_servers": { "hush": { "command": ${JSON.stringify(command)}, "args": [${args.map((a) => JSON.stringify(a)).join(", ")}], "env": {} } }`;
+    },
+  },
+  {
+    // Cline: the CLI reads ~/.cline/mcp.json; the editor extension keeps its
+    // own file behind "Configure MCP Servers", so that one is a paste.
+    // Workspace rules: .clinerules/ (docs.cline.bot/customization/cline-rules).
+    id: "cline",
+    name: "Cline",
+    present: (root, env, exists) =>
+      exists(join(root, ".clinerules")) || exists(join(home(env), ".cline")) || onPath("cline", env.PATH) !== null,
+    mcp: {
+      path: (_root, env) => join(home(env), ".cline", "mcp.json"),
+      format: "json",
+    },
+    skill: {
+      project: (root) => join(root, ".clinerules", "hush.md"),
+      global: null,
+      transform: (markdown) => stripFrontmatter(markdown),
+    },
+    manual: (entry) =>
+      `Cline panel → MCP Servers → Configure → Configure MCP Servers, then add:\n    ${jsonLine(entry)}`,
+  },
+  {
+    // Continue: JSON files in .continue/mcpServers/ are read as-is, and rules
+    // are .md files with frontmatter in .continue/rules/ (docs.continue.dev).
+    id: "continue",
+    name: "Continue",
+    present: (root, env, exists) => exists(join(root, ".continue")) || exists(join(home(env), ".continue")),
+    mcp: {
+      path: (root) => join(root, ".continue", "mcpServers", "hush.json"),
+      format: "json",
+    },
+    skill: {
+      project: (root) => join(root, ".continue", "rules", "hush.md"),
+      global: null,
+      transform: withFrontmatter(["name: hush", "description: $DESCRIPTION", "alwaysApply: false"]),
+    },
+    manual: (entry, root) => `write ${join(root, ".continue", "mcpServers", "hush.json")}:\n    ${jsonLine(entry)}`,
   },
 ];
 
@@ -206,6 +348,156 @@ export function mergeMcpToml(
   return { ok: true, text: text + sep + block, changed: true };
 }
 
+/**
+ * Add hush to VS Code's `.vscode/mcp.json`, whose servers live under
+ * `servers` and name their transport.
+ */
+export function mergeMcpVscode(
+  existing: string | null,
+  name: string,
+  entry: McpEntry,
+): { ok: true; text: string; changed: boolean } | { ok: false; reason: string } {
+  let doc: Record<string, unknown> = {};
+  if (existing && existing.trim()) {
+    try {
+      doc = JSON.parse(stripJsonc(existing)) as Record<string, unknown>;
+    } catch {
+      return { ok: false, reason: "it is not valid JSON" };
+    }
+    // VS Code allows comments here; re-serialising would drop them.
+    if (stripJsonc(existing) !== existing) {
+      const servers = (doc.servers ?? {}) as Record<string, unknown>;
+      if (servers[name]) return { ok: true, text: existing, changed: false };
+      return { ok: false, reason: "it has comments, which rewriting it would lose" };
+    }
+  }
+  const servers = (doc.servers ??= {}) as Record<string, unknown>;
+  if (servers[name]) return { ok: true, text: existing ?? "", changed: false };
+  servers[name] = { type: "stdio", command: entry.command, args: entry.args };
+  return { ok: true, text: JSON.stringify(doc, null, 2) + "\n", changed: true };
+}
+
+/**
+ * JSON with comments and trailing commas, reduced to JSON. Strings are kept
+ * byte for byte, including any "//" inside them.
+ */
+export function stripJsonc(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 2;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out.replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
+ * Where, in a JSONC document, a top-level key's object value opens — the index
+ * just past its `{` — or null. Scanned rather than parsed, so comments and
+ * formatting around it are untouched when something is inserted there.
+ */
+function topLevelObjectStart(text: string, key: string): { rootOpen: number; keyOpen: number | null } | null {
+  let depth = 0;
+  let rootOpen = -1;
+  let pendingKey: string | null = null;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      const str = text.slice(i + 1, j);
+      if (depth === 1) pendingKey = str;
+      i = j + 1;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      if (ch === "{" && depth === 0 && rootOpen === -1) rootOpen = i + 1;
+      else if (ch === "{" && depth === 1 && pendingKey === key) return { rootOpen, keyOpen: i + 1 };
+      depth++;
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+    } else if (ch === "," && depth === 1) {
+      pendingKey = null;
+    }
+    i++;
+  }
+  return rootOpen === -1 ? null : { rootOpen, keyOpen: null };
+}
+
+/** Whether the next thing after `at` (skipping space and comments) closes the object. */
+function emptyAfter(text: string, at: number): boolean {
+  return /^\s*}/.test(stripJsonc(text.slice(at)));
+}
+
+/**
+ * Add hush to Zed's settings file under `context_servers`.
+ *
+ * That file is JSON with comments — Zed's own default one opens with a
+ * comment — so re-serialising it would throw the user's comments away. The
+ * entry is inserted as text at the right place instead, and the result is
+ * parsed back to make sure it says what was meant before anything is written.
+ */
+export function mergeMcpZed(
+  existing: string | null,
+  name: string,
+  entry: McpEntry,
+): { ok: true; text: string; changed: boolean } | { ok: false; reason: string } {
+  const value = { command: entry.command, args: entry.args, env: {} };
+  if (!existing || !existing.trim()) {
+    return { ok: true, text: JSON.stringify({ context_servers: { [name]: value } }, null, 2) + "\n", changed: true };
+  }
+  let doc: Record<string, unknown>;
+  try {
+    doc = JSON.parse(stripJsonc(existing)) as Record<string, unknown>;
+  } catch {
+    return { ok: false, reason: "it is not valid JSON" };
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return { ok: false, reason: "it is not a settings object" };
+  const servers = doc.context_servers as Record<string, unknown> | undefined;
+  if (servers && typeof servers === "object" && servers[name]) return { ok: true, text: existing, changed: false };
+
+  const at = topLevelObjectStart(existing, "context_servers");
+  if (!at) return { ok: false, reason: "hush could not find where its settings begin" };
+  const body = `${JSON.stringify(name)}: ${JSON.stringify(value)}`;
+  let text: string;
+  if (at.keyOpen !== null) {
+    text = existing.slice(0, at.keyOpen) + `\n    ${body}${emptyAfter(existing, at.keyOpen) ? "" : ","}` + existing.slice(at.keyOpen);
+  } else {
+    const block = `\n  "context_servers": {\n    ${body}\n  }${emptyAfter(existing, at.rootOpen) ? "" : ","}`;
+    text = existing.slice(0, at.rootOpen) + block + existing.slice(at.rootOpen);
+  }
+  try {
+    const check = JSON.parse(stripJsonc(text)) as { context_servers?: Record<string, unknown> };
+    if (JSON.stringify(check.context_servers?.[name]) !== JSON.stringify(value)) throw new Error("mismatch");
+  } catch {
+    return { ok: false, reason: "hush could not add to it without risking its contents" };
+  }
+  return { ok: true, text, changed: true };
+}
+
 /** The merge for whichever shape the target file takes. */
 export function renderMcp(
   format: McpFormat,
@@ -213,7 +505,16 @@ export function renderMcp(
   name: string,
   entry: McpEntry,
 ): { ok: true; text: string; changed: boolean } | { ok: false; reason: string } {
-  return format === "toml" ? mergeMcpToml(existing, name, entry) : mergeMcpJson(existing, name, entry);
+  switch (format) {
+    case "toml":
+      return mergeMcpToml(existing, name, entry);
+    case "vscode":
+      return mergeMcpVscode(existing, name, entry);
+    case "zed":
+      return mergeMcpZed(existing, name, entry);
+    default:
+      return mergeMcpJson(existing, name, entry);
+  }
 }
 
 /**

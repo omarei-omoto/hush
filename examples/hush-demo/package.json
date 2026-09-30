@@ -1,0 +1,7 @@
+{
+  "name": "hush-demo",
+  "private": true,
+  "scripts": {
+    "dev": "node app.js"
+  }
+}

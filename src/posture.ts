@@ -14,11 +14,14 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Vault } from "./vault.ts";
-import { loadIdentity, hushHome } from "./identity.ts";
+import { loadIdentity, hushHome, isSecureStore } from "./identity.ts";
 import { biometryStatus } from "./biometry.ts";
 import { identityPlugin, ageIdentityPath, ageAvailable } from "./age.ts";
 import { loadPolicy } from "./mcp.ts";
 import { globalVaultExists } from "./library.ts";
+import { mcpRegistrations } from "./agents.ts";
+import { keyAges } from "./freshness.ts";
+import { loadEnclaveIdentity } from "./enclave.ts";
 
 export type Rung = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -53,6 +56,12 @@ export interface Posture {
   checks: Check[];
   next: Check | null;
   risk: Risk;
+  /** Values past the policy's rotateAfterDays (F-6), by set/KEY. Not a rung: a reminder. */
+  overdue: string[];
+  /** Values readable by someone since removed, until they are set again. */
+  exposed: string[];
+  /** hush/v3: the vault's header is signed by an admin. Null with no vault. */
+  signed: boolean | null;
 }
 
 const RUNG_NAMES: Record<Rung, string> = {
@@ -110,6 +119,23 @@ export function assessRisk(vault: Vault): Risk {
   return { weight: Math.min(weight, 3), reasons };
 }
 
+/** Whether any coding agent has hush registered for this project (or user-wide). */
+function agentNear(projectRoot: string | null): boolean {
+  if (!projectRoot) return false;
+  const read = (p: string): string | null => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  try {
+    return mcpRegistrations(projectRoot, process.env, read).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function assess(vault: Vault | null, hushDir: string | null, projectRoot: string | null): Posture {
   const id = loadIdentity();
   const policy = hushDir ? loadPolicy(hushDir) : null;
@@ -117,7 +143,9 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
 
   // Rung 5: the private key is non-extractable, held by hardware via an age plugin.
   const agePath = ageAvailable() ? ageIdentityPath() : null;
-  const hardware = Boolean(agePath && identityPlugin(agePath));
+  // Or this Mac's Secure Enclave (enclave.ts): non-extractable, and every use
+  // needs a fingerprint — the same rung, with nothing to buy or install.
+  const hardware = Boolean(agePath && identityPlugin(agePath)) || Boolean(loadEnclaveIdentity());
 
   const strayEnv = projectRoot
     ? [".env", ".env.local", ".env.production"].filter((f) => existsSync(join(projectRoot, f)))
@@ -153,7 +181,7 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       id: "keychain",
       gap: "your key is a loose file on disk",
       label: "your key is in the OS keychain, not a loose file",
-      pass: Boolean(id && (id.source === "macOS Keychain" || hardware)),
+      pass: Boolean(id && (isSecureStore(id.source) || hardware)),
       command: "hush id --create --force",
       why: "a file at ~/.hush/identity is copied by any backup or sync client",
     },
@@ -165,6 +193,18 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       pass: Boolean(policy?.requireApproval.includes("run")),
       command: 'set "requireApproval": ["run","add","reveal","request"] in .hush/policy.json',
       why: "otherwise an agent can use your keys without you seeing it happen",
+    },
+    {
+      rung: 3,
+      id: "floor",
+      gap: "an agent could reach the vault with no policy at all",
+      label: "your own policy floor keeps approvals on in every folder",
+      // Only a gap once an agent is actually set up near this project: without
+      // a floor, a copy of the vault opened through HUSH_VAULT from a folder
+      // with no policy.json runs ungated (docs/RED-TEAM.md, finding 4).
+      pass: existsSync(join(hushHome(), "policy.json")) || !agentNear(projectRoot),
+      command: "hush secure floor",
+      why: "without it, an agent that opens a copy of the vault from another folder meets no approval at all",
     },
     {
       rung: 4,
@@ -195,12 +235,16 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
   }
 
   const next = checks.find((c) => !c.pass) ?? null;
+  const ages = vault ? keyAges(vault, policy) : [];
   return {
     rung,
     name: RUNG_NAMES[rung],
     checks,
     next,
     risk: vault ? assessRisk(vault) : { weight: 0, reasons: [] },
+    overdue: ages.filter((k) => k.overdue).map((k) => `${k.set}/${k.key}`),
+    exposed: ages.filter((k) => k.exposed.length).map((k) => `${k.set}/${k.key}`),
+    signed: vault ? vault.signed : null,
   };
 }
 

@@ -36,10 +36,20 @@ export function isExecutableFile(path: string): boolean {
  * the age bridge would report "not installed" on exactly the machines where
  * that is hardest to debug. Reading PATH costs no subprocess either.
  */
-export function onPath(name: string, pathValue: string = process.env.PATH ?? ""): string | null {
-  const dirs = pathValue.split(process.platform === "win32" ? ";" : ":");
+export function onPath(
+  name: string,
+  pathValue: string = process.env.PATH ?? "",
+  platform: string = process.platform,
+): string | null {
+  const dirs = pathValue.split(platform === "win32" ? ";" : ":");
+  // On Windows the extensions come first: beside npm.cmd sits a file called
+  // plain `npm`, a shell script for Git Bash that Windows cannot run. A name
+  // that already carries an extension ("node.exe") is taken as it is.
+  const pathext = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
   const extensions =
-    process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+    platform === "win32"
+      ? pathext.some((e) => name.toLowerCase().endsWith(e.toLowerCase())) ? [""] : pathext
+      : [""];
 
   for (const dir of dirs) {
     if (!dir) continue;

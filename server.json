@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.omarei-omoto/hush",
+  "title": "hush",
+  "description": "Team secrets your AI agent can use but never read: encrypted in the repo, value-blind tools.",
+  "repository": {
+    "url": "https://github.com/omarei-omoto/hush",
+    "source": "github"
+  },
+  "version": "0.9.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@omarei/hush",
+      "version": "0.9.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

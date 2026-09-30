@@ -1,0 +1,117 @@
+name: hush
+description: Run CI steps with secrets from a hush vault, as a CI identity that can read only the sets it was given.
+author: omarei
+branding:
+  icon: lock
+  color: gray-dark
+
+inputs:
+  identity:
+    description: >
+      A CI identity's private key, from `hush ci create <name> --sets <set>,…`.
+      Store it as a repository or environment secret and pass it here.
+    required: true
+  version:
+    description: >
+      The hush version to install. Pin it: an exact version (1.0.0) for the
+      binary, or a version or range for npm. "latest" takes the newest release.
+    required: false
+    default: latest
+  install:
+    description: >
+      "binary" (the default) downloads the single-file build for this runner,
+      checks its sha256 against the release's SHA256SUMS and its GitHub
+      build-provenance attestation, and needs no Node. "npm" installs the
+      package instead, and needs Node 22.6 or later on the runner.
+    required: false
+    default: binary
+
+runs:
+  using: composite
+  steps:
+    # The key is masked before anything else can print it, and handed to later
+    # steps through the runner's own environment file — never written into the
+    # workspace or a file of hush's.
+    - name: hush identity
+      shell: bash
+      env:
+        HUSH_ACTION_IDENTITY: ${{ inputs.identity }}
+      run: |
+        set -euo pipefail
+        if [ -z "$HUSH_ACTION_IDENTITY" ]; then
+          echo "::error title=hush::no identity given — create one with 'hush ci create <name> --sets <set>' and pass it as a secret"
+          exit 1
+        fi
+        case "$HUSH_ACTION_IDENTITY" in
+          hush_sk_*) ;;
+          *) echo "::error title=hush::that does not look like a hush identity (it starts with hush_sk_)"; exit 1 ;;
+        esac
+        echo "::add-mask::$HUSH_ACTION_IDENTITY"
+        {
+          echo "HUSH_IDENTITY=$HUSH_ACTION_IDENTITY"
+          echo "HUSH_NO_KEYCHAIN=1"
+          echo "HUSH_NO_NUDGE=1"
+        } >> "$GITHUB_ENV"
+
+    # The binary: the same installer people run (scripts/install.sh), from this
+    # very checkout of the action, into the runner's temp directory. It refuses
+    # a download whose sha256 or attestation does not check out.
+    - name: install hush (binary)
+      if: inputs.install == 'binary' && runner.os != 'Windows'
+      shell: bash
+      env:
+        HUSH_ACTION_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/hush-bin"
+        v="$HUSH_ACTION_VERSION"; [ "$v" = latest ] && v=""
+        HUSH_VERSION="$v" HUSH_INSTALL_DIR="$dir" sh "$GITHUB_ACTION_PATH/scripts/install.sh"
+        echo "$dir" >> "$GITHUB_PATH"
+
+    - name: install hush (binary, Windows)
+      if: inputs.install == 'binary' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        HUSH_ACTION_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dir = Join-Path $env:RUNNER_TEMP 'hush-bin'
+        $env:HUSH_VERSION = if ($env:HUSH_ACTION_VERSION -eq 'latest') { '' } else { $env:HUSH_ACTION_VERSION }
+        $env:HUSH_INSTALL_DIR = $dir
+        & (Join-Path $env:GITHUB_ACTION_PATH 'scripts\install.ps1')
+        Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+    - name: install hush (npm)
+      if: inputs.install == 'npm'
+      shell: bash
+      env:
+        HUSH_ACTION_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if ! command -v node >/dev/null; then
+          echo "::error title=hush::Node 22.6 or later is needed first — add actions/setup-node before this step"
+          exit 1
+        fi
+        # npm verifies the tarball against its registry integrity hash, and the
+        # package carries provenance tying it to the hush repository's release.
+        npm install --global --no-fund --no-audit "@omarei/hush@${HUSH_ACTION_VERSION}"
+        hush --version
+
+    - name: check the install option
+      if: inputs.install != 'binary' && inputs.install != 'npm'
+      shell: bash
+      run: |
+        echo "::error title=hush::install is \"binary\" or \"npm\""
+        exit 1
+
+    - name: check the identity can read the vault
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Fails the job here, naming the problem, rather than in a later step
+        # with a missing variable: not a member, a vault change nobody on this
+        # identity accepted, or a signature that does not hold.
+        hush doctor || true
+        hush verify

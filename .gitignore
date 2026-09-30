@@ -11,3 +11,8 @@ node_modules/
 .hush/identity
 .hush/*.local.json
 dist/
+
+# Built binaries (scripts/build-binaries.mjs) and their scratch entry point.
+release/
+.build/
+site/

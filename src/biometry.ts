@@ -23,26 +23,12 @@
  * copies on disk are ones this process just made.
  */
 import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { platform, tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { platform } from "node:os";
+import { asset } from "./assets.ts";
+import { buildSwiftHelper } from "./swift.ts";
 
 export type BiometryMode = "off" | "preferred" | "required";
 export type BiometryResult = "ok" | "denied" | "unavailable";
-
-function sourcePath(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "..", "native", "hush-touchid.swift");
-}
-
-function haveSwift(): boolean {
-  try {
-    execFileSync("which", ["swiftc"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** Per-process cache: one compile per platform, however many times we ask. */
 let compiled: { plat: string; result: { ok: boolean; reason?: string; path?: string } } | null = null;
@@ -71,42 +57,12 @@ export function ensureHelper(plat: string = platform()): { ok: boolean; reason?:
   if (plat !== "darwin") return { ok: false, reason: "biometry gating is macOS-only for now" };
   if (compiled?.plat === plat) return compiled.result;
 
-  const src = sourcePath();
-  if (!existsSync(src)) return { ok: false, reason: `helper source missing at ${src}` };
-  if (!haveSwift()) {
-    return (compiled = {
-      plat,
-      result: {
-        ok: false,
-        reason: "swiftc not found — install Xcode Command Line Tools (xcode-select --install)",
-      },
-    }).result;
-  }
-
-  try {
-    // Created fresh, and the whole directory goes away when this process does:
-    // the only binary in play is one this process just built. mkdtemp already
-    // makes it 0700; asking again is the cross-check.
-    const dir = mkdtempSync(join(tmpdir(), "hush-touchid-"));
-    chmodSync(dir, 0o700);
-    const bin = join(dir, "hush-touchid");
-    // -Onone: this helper makes one LocalAuthentication call, so optimisation
-    // buys nothing and costs compile time on someone's approval.
-    execFileSync("swiftc", ["-Onone", src, "-o", bin], { stdio: "pipe" });
-    // swiftc leaves it executable; say so explicitly so a umask cannot surprise
-    // the spawn later, and prove it landed before claiming success.
-    chmodSync(bin, 0o500);
-    if (!statSync(bin).isFile()) throw new Error("swiftc did not produce a binary");
-    process.once("exit", () => {
-      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-    });
-    return (compiled = { plat, result: { ok: true, path: bin } }).result;
-  } catch (e) {
-    return (compiled = {
-      plat,
-      result: { ok: false, reason: `could not compile helper: ${(e as Error).message.split("\n")[0]}` },
-    }).result;
-  }
+  const source = asset("touchid");
+  if (!source) return { ok: false, reason: "the Touch ID helper's source is missing from this copy of hush" };
+  // Built by a compiler the caller cannot choose, from hush's own source, into
+  // a folder only this process can write (swift.ts).
+  const built = buildSwiftHelper("touchid", source);
+  return (compiled = { plat, result: built }).result;
 }
 
 export interface BiometryStatus {

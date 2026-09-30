@@ -19,7 +19,7 @@ import {
   newDek,
   fingerprint,
 } from "../src/crypto.ts";
-import { Vault, resolveVaultPath } from "../src/vault.ts";
+import { Vault, resolveVaultPath, memberKeyString } from "../src/vault.ts";
 import { loadPolicy } from "../src/mcp.ts";
 import { assess, assessRisk, shouldNudge } from "../src/posture.ts";
 import { Redactor as _R } from "../src/redact.ts";
@@ -1478,14 +1478,17 @@ describe("retiring your own key", () => {
     const hard = generateIdentity();
     const vault = Vault.create(join(dir, "v.json"), "t", { name: "me", pub: soft.pub });
     vault.set(soft, "default", "S", "secret");
-    vault.addRecipient(soft, "me-hw", encodePub(hard.pub));
+    // Added as an admin carrying its own signing key, the way the upgrade adds
+    // your second key: once the first is retired, it is the one that signs.
+    const hardKey = memberKeyString(hard);
+    vault.addRecipient(soft, "me-hw", hardKey, "admin");
 
     // The caller holds both identities, as they would mid-upgrade.
     const both = { pub: soft.pub, priv: soft.priv, age: undefined };
     assert.doesNotThrow(() => vault.removeRecipient({ ...both }, "me-hw"));
 
     // Put it back and retire the software key instead.
-    vault.addRecipient(soft, "me-hw", encodePub(hard.pub));
+    vault.addRecipient(soft, "me-hw", hardKey, "admin");
     assert.doesNotThrow(() => vault.removeRecipient(hard, "me"));
 
     assert.equal(vault.canRead(soft), false, "the retired key still opens the vault");

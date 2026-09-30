@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the Developer ID-signed macOS binary (release.yml, sign-macos).
+
+  Notarization needs the hardened runtime, and the hardened runtime refuses the
+  JIT that Bun's JavaScript engine uses unless this is granted. It is the only
+  one: the whole suite passes against a binary signed with just this
+  (npm run test:binary). Deliberately absent, though Bun's docs list them:
+  allow-dyld-environment-variables and disable-library-validation, which would
+  let DYLD_INSERT_LIBRARIES load someone else's code into hush.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>

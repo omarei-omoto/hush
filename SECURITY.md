@@ -19,7 +19,8 @@ to the latest release only.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | yes |
+| 0.9.x | yes |
+| < 0.9 | no — upgrade; see the CHANGELOG for what changed |
 
 ## What is in scope
 
@@ -30,7 +31,14 @@ Anything that lets someone read a secret they should not be able to:
   them — including through `hush_run`'s output.
 - Reaching the local UI from another machine, or without the session token.
 - A revoked member still being able to decrypt.
-- Getting a value out through `hush_request` / `hush_request`: in a header the
+- A vault that someone who is not a member rebuilt, re-keyed or re-signed being
+  decrypted without a refusal — a new member, a new data key, or planted values
+  accepted with no signature from an admin this machine trusts (hush/v3), or with
+  no `hush team accept` (an older, unsigned vault).
+- A scoped member, or a CI identity, reading a set it was not given.
+- A member who is not an admin changing a signed vault's membership or keys in
+  a way other members' hush accepts.
+- Getting a value out through `hush request` / `hush_request`: in a header the
   caller named, in a query string or body it opted into, or reflected back in a
   response the redactor failed to mask.
 - `hush_request` reaching a host the policy does not allow, being redirected to
@@ -76,11 +84,20 @@ covers them in full — see *What it does not protect* — but in short:
 - Revocation protects future values only. Anyone who could read a secret has.
 - Git history is permanent.
 - An approval has to come from something the gated process cannot supply: a
-  dialog drawn on your screen by an OS-owned program, or your fingerprint. There
-  is deliberately no file to answer. A host with no desktop *and* no biometric
-  helper cannot ask you anything, so it refuses the gated action instead of
-  pretending. Nothing in the environment can make an approval easier — the one
-  switch that exists (`HUSH_NO_DIALOG`) can only make hush refuse.
+  dialog drawn on your screen by an OS-owned program, your fingerprint, or an
+  answer signed by a device you paired with (the relay, below). There is
+  deliberately no file to answer. A host with none of those cannot ask you
+  anything, so it refuses the gated action instead of pretending. Nothing in the
+  environment can make an approval easier — the one switch that exists
+  (`HUSH_NO_DIALOG`) can only make hush refuse.
+- The approval relay ([docs/RELAY.md](./docs/RELAY.md)) carries only sealed,
+  signed messages: a relay cannot read a request, change one, answer one, or
+  replay an old answer — only delay or drop them, which is a refusal. Its
+  weak point is the requester's own `~/.hush`: something running as you there
+  can rewrite the pairing to trust an "approver" of its own, just as it can read
+  a software key in the same directory. The relay puts a person in front of
+  everything that goes through hush on a remote machine; against code already
+  running as you on it, the answer is a hardware identity.
 
 ---
 
@@ -91,20 +108,24 @@ read before you trust it with anything real.
 
 ### What it protects
 
-| | How |
-|---|---|
-| Secrets at rest in your repo | AES-256-GCM per value, under a per-vault data key |
-| A value moved between slots | AAD binds each ciphertext to `env\|KEY` — a staging URL cannot be pasted into the prod slot |
-| Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism |
-| Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new |
-| Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output |
-| A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed |
-| A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` |
-| A credential reaching the clipboard instead of the terminal | `hush get --copy` pipes it to `pbcopy`/`wl-copy`/`xclip`, resolved from `PATH`, never through argv |
-| A value of the wrong shape | `.env.schema` rules, checked before anything runs or is sent; messages carry the rule and the length, never the value |
-| A key entering a transcript | `hush_add_secret` opens a native input box; the value goes keyboard → vault |
-| Silent use of a credential | Approval dialog naming the command, accounts and variables, optionally gated on Touch ID |
-| Key theft from disk | Only with a hardware identity — see below |
+Each row names the tests that fail if the control is removed.
+
+| | How | Held by |
+|---|---|---|
+| Secrets at rest in your repo | AES-256-GCM per value, under a per-vault data key | `test/crypto-properties.test.ts`, `test/scheme-conformance.test.ts` |
+| A value moved between slots | AAD binds each ciphertext to `env\|KEY` — a staging URL cannot be pasted into the prod slot | `test/hush.test.ts` ("AAD binds a ciphertext to its env and key"), `test/crypto-properties.test.ts` |
+| Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism | `test/scheme-conformance.test.ts`, `test/hush.test.ts` |
+| Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new | `test/hush.test.ts` ("removing a member revokes them and re-seals every value") |
+| A vault replaced by someone who is not a member | hush/v3: an admin signs the header (members, roles, key commitments); every member checks the signature against admins it already trusts, and that the key it unwrapped matches. Every machine also pins what it has accepted, so an unsigned or downgraded copy is refused | `test/trust.test.ts`, `test/signed.test.ts` |
+| Some people seeing only some sets | A set can have a key of its own, wrapped only for full members and the scoped members given it; `hush ci create` makes CI identities that are scoped by construction | `test/signed.test.ts` ("a scoped member reads dev, not prod…") |
+| Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output | `test/mcp.test.ts` ("never returns a secret value, only its effects"), `test/fuzz-surfaces.test.ts` |
+| A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed | `test/request.test.ts` ("a redirect to another host is refused…") |
+| A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` | `test/materialize.test.ts` |
+| A credential reaching the clipboard instead of the terminal | `hush get --copy` pipes it to `pbcopy`/`wl-copy`/`xclip`, resolved from `PATH`, never through argv | `test/commands/get.test.ts` ("the value goes to the clipboard and never to stdout") |
+| A value of the wrong shape | `.env.schema` rules, checked before anything runs or is sent; messages carry the rule and the length, never the value | `test/schema.test.ts` ("a failure message never contains the value") |
+| A key entering a transcript | `hush_add_secret` opens a native input box; the value goes keyboard → vault | `test/mcp.test.ts` (`hush_add_secret`) |
+| Silent use of a credential | Approval dialog naming the command, accounts and variables, optionally gated on Touch ID | `test/approval.test.ts`, `test/commands/policy.test.ts`, `test/relay.test.ts` |
+| Key theft from disk | Only with a hardware identity — see below | `test/hardware-path.test.ts`, `test/enclave.test.ts` |
 
 ### The ladder
 
@@ -169,16 +190,19 @@ pointing at the copy, from being opened from a directory that has no
 `policy.json` of its own. With no `~/.hush/policy.json` floor configured,
 that reverts to "no policy anywhere for this invocation," which is opt-in by
 design for a project that was never set up for an agent, not for a copy of
-one that was. **Set a floor if an agent can set environment variables when it
-spawns `hush`** — true of any agent with a shell — even an empty
-`~/.hush/policy.json` is enough to keep `requireApproval` from disappearing.
+one that was. **Since 0.6.0 hush writes an empty floor whenever an agent is set
+up** (`hush install-mcp`, `hush install-skill`, and saying yes to "will an AI
+agent use secrets here?"), and `hush level` / `hush doctor` flag a machine with
+an agent registered and no floor. Even an empty `~/.hush/policy.json` is enough
+to keep `requireApproval` from disappearing; `hush secure floor` writes one.
 The floor and the approval now hold on their own terms: the floor keeps the
 *policy* in force, and the approval is answered by a dialog or a fingerprint,
 neither of which the caller can supply.
 
 If that matters for your threat model, use a hardware identity
-([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with `age-plugin-yubikey` or
-`age-plugin-se` the key is non-extractable and every unwrap needs a touch.
+([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with a Secure Enclave key
+(`hush secure --hardware` on a Mac) or `age-plugin-yubikey`, the key is
+non-extractable and every unwrap needs a touch.
 
 **Redaction is defence in depth, not a boundary.** It masks known values in a
 child's output. It cannot see a value that has been base64'd, encrypted,
@@ -201,6 +225,30 @@ The CLI says so every time.
 **Git history is permanent.** A deleted secret remains in history as ciphertext.
 If the vault key ever leaks, so does everything the history contains.
 
+**The audit log shows an edit; it does not prevent one.** `.hush/audit.log` is
+a hash chain — each line carries the SHA-256 of the line above, the first a
+random salt — and `hush audit verify` names the first line that does not follow.
+Anything running as you can still rewrite the whole file and recompute the
+chain, or cut lines off the end. A log nobody on the machine can rewrite has to
+live somewhere else.
+
+**Trust on first use.** The first time a machine sees a vault, it trusts it as
+it stands — its members, its admins' signing keys. Everything after that is
+checked against that first look. A vault forged *before* your first clone is
+not caught by the signature; `hush team verify <admin>` (a safety number you
+compare over a call) is what closes that gap.
+
+**A hardware admin signs with a software key.** A YubiKey or Secure Enclave key
+reached through age can decrypt but not sign, so an admin whose identity is
+hardware-only signs with a separate Ed25519 key kept in the keychain (or a 0600
+file). Stealing it lets someone change who can read the vault — and so read
+what is added afterwards — but not decrypt anything already there.
+
+**Members can write values.** The signature covers who holds which key, not
+what is in the values: any member holding a key can set a value, as before. A
+member acting in bad faith is out of scope for the vault; keeping non-members
+out is not.
+
 **No zeroisation.** Decrypted values live in JS strings and are collected
 whenever the runtime feels like it. A core dump or swap file may contain them.
 
@@ -209,3 +257,13 @@ whenever the runtime feels like it. A core dump or swap file may contain them.
 ---
 
 Every defect found so far, and what changed, is in [docs/AUDIT.md](./docs/AUDIT.md).
+
+## Thanks
+
+People who reported a security problem in hush, with their permission to be
+named. There is no bounty; there is this list, a credit in the advisory and the
+changelog, and a fix you can watch land.
+
+*No external reports yet. The findings in [docs/RED-TEAM.md](./docs/RED-TEAM.md)
+and [docs/AUDIT.md](./docs/AUDIT.md) came from the project's own reviews. The
+first name here could be yours.*

@@ -65,6 +65,10 @@ jobs:
         with:
           node-version: "22.x"
       - run: npm ci
+      # The same source must build to the same bytes, twice, from two different
+      # directories — otherwise nobody can check a tarball against its commit.
+      - name: the build is reproducible
+        run: npm run build:check
       # Node refuses to strip types under node_modules, so an installed copy has
       # to run the built output. This is the check that would have caught the
       # package being completely unusable while every other test passed.
@@ -83,6 +87,116 @@ jobs:
           ./node_modules/.bin/hush set CI_KEY=ci_value_1234567890
           ./node_modules/.bin/hush run --quiet -- sh -c 'echo "$CI_KEY"' | grep -q 'redacted:CI_KEY'
           ./node_modules/.bin/hush verify
+
+  binary:
+    name: the single-file binary · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      # One pin for every build of the binary: .bun-version.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: npm ci
+      - name: build, twice — the same source must give the same bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:binaries
+          node scripts/build-binaries.mjs --out /tmp/again
+          diff release/SHA256SUMS /tmp/again/SHA256SUMS
+      - name: install age
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y age
+          else
+            brew install age
+          fi
+      # The whole suite, with every CLI invocation going to the binary
+      # (test/helpers/binary-shim.ts), plus the binary's own checks.
+      - name: the suite against the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$(ls "$PWD"/release/hush-* | head -1)"
+          echo "testing $bin"
+          HUSH_TEST_BINARY="$bin" npm run test:binary 2>&1 | tee /tmp/test.out
+      - name: summary
+        if: always()
+        shell: bash
+        run: grep -E '^# (tests|pass|fail|skipped)' /tmp/test.out || true
+      # The Windows binary is cross-built here, on Linux, exactly as the release
+      # builds it; the Windows job below runs that file rather than a local build.
+      - name: build the Windows binary for the Windows job
+        if: runner.os == 'Linux'
+        run: node scripts/build-binaries.mjs --target windows-x64 --out /tmp/win
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: hush-windows-x64
+          path: /tmp/win/hush-windows-x64.exe
+          if-no-files-found: error
+
+  windows:
+    name: windows (beta) · the real Windows paths
+    runs-on: windows-latest
+    # Beta: this job reports and does not block until Windows has had real use.
+    # The main suite is POSIX-shaped (file modes, sh); this exercises what is
+    # Windows-specific end to end: DPAPI for the identity, npm.cmd through
+    # cmd.exe, redaction, and the PowerShell hook.
+    continue-on-error: true
+    # For the Windows binary it tests, built by the binary job on Linux.
+    needs: binary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: npm ci
+      - name: platform tests
+        run: node --test test/platform.test.ts
+      - name: smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:HUSH_HOME = Join-Path $env:RUNNER_TEMP 'hushhome'
+          $env:HUSH_NO_NUDGE = '1'; $env:NO_COLOR = '1'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'src\cli.ts'
+          node $cli --version
+          node $cli id --create
+          $id = node $cli id | Out-String
+          if ($id -notmatch 'Windows DPAPI') { throw "identity is not in DPAPI: $id" }
+          $proj = Join-Path $env:RUNNER_TEMP 'proj'; New-Item -ItemType Directory $proj | Out-Null; Set-Location $proj
+          node $cli init win --no-agent
+          node $cli add SMOKE_KEY=smoke_value_123456 --to default
+          $o = node $cli run --quiet -- node -e "console.log(process.env.SMOKE_KEY)" | Out-String
+          if ($o -notmatch 'redacted:SMOKE_KEY') { throw "the value was not injected and redacted: $o" }
+          node $cli run --quiet -- npm --version
+          if ($LASTEXITCODE -ne 0) { throw "npm.cmd did not run through hush" }
+          node $cli verify
+          $hook = node $cli hook powershell | Out-String
+          if ($hook -notmatch 'ConvertFrom-Json') { throw "no PowerShell hook" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: hush-windows-x64
+          path: release-win
+      - name: the Windows binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A native command's failure does not stop PowerShell; check each one.
+          $env:HUSH_TEST_BINARY = Join-Path $env:GITHUB_WORKSPACE 'release-win\hush-windows-x64.exe'
+          & $env:HUSH_TEST_BINARY --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test test/binary.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   fuzz:
     name: deeper fuzzing

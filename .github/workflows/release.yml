@@ -12,6 +12,12 @@ name: Release
 # live directly. For a human approval step instead, switch the last step to
 # `npm stage publish` and approve each release with 2FA on npmjs.com (the
 # package's Staged Packages tab) or with `npm stage approve <stage-id>`.
+#
+# The same tag also builds the single-file binaries (F-8): built once on Linux
+# for every platform, tested, the macOS ones signed and notarized when an Apple
+# Developer ID is configured, checksummed, given a GitHub build-provenance
+# attestation, and attached to a GitHub release with the package-manager
+# manifests. RELEASING.md lists the secrets, all optional.
 on:
   push:
     tags: ["v*"]
@@ -37,11 +43,14 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
           src="$(node -p "require('fs').readFileSync('src/version.ts','utf8').match(/VERSION = \"([^\"]+)\"/)[1]")"
-          echo "tag=$tag package.json=$pkg src/version.ts=$src"
-          test "$tag" = "$pkg" && test "$pkg" = "$src"
+          mcp="$(node -p "require('./server.json').version")"
+          echo "tag=$tag package.json=$pkg src/version.ts=$src server.json=$mcp"
+          test "$tag" = "$pkg" && test "$pkg" = "$src" && test "$pkg" = "$mcp"
 
       - run: npm ci
       - run: npm run typecheck
+      - name: the build is reproducible
+        run: npm run build:check
 
       - name: install age
         run: sudo apt-get update && sudo apt-get install -y age
@@ -74,5 +83,180 @@ jobs:
       # devDependencies are needed: `prepack` builds dist/ with tsc.
       - run: npm ci
 
-      # Provenance is attached automatically for a public package published this way.
-      - run: npm publish
+      # Provenance links the tarball to this workflow run and this commit, so
+      # anyone can check what they installed came from here (npm shows it on
+      # the package page). Trusted publishing attaches it anyway; the flag
+      # makes a publish that cannot attach it fail rather than go out without.
+      - run: npm publish --provenance --access public
+
+  binaries:
+    name: build and test the binaries
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: npm ci
+      - name: build every target, twice, and compare
+        run: |
+          set -euo pipefail
+          node scripts/build-binaries.mjs --all
+          node scripts/build-binaries.mjs --all --out /tmp/again
+          diff release/SHA256SUMS /tmp/again/SHA256SUMS
+      - name: install age
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: the suite against the Linux binary
+        run: HUSH_TEST_BINARY="$PWD/release/hush-linux-x64" npm run test:binary
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: release/hush-*
+          if-no-files-found: error
+
+  sign-macos:
+    name: sign and notarize the macOS binaries
+    needs: binaries
+    runs-on: macos-latest
+    env:
+      # All four, or the binaries ship ad-hoc signed (they run; curl and
+      # Homebrew do not quarantine, so Gatekeeper is not involved).
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: release
+      - name: sign with the Developer ID (hardened runtime, one entitlement)
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass="$(openssl rand -hex 16)"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain"
+          for f in release/hush-darwin-arm64 release/hush-darwin-x64; do
+            chmod +x "$f"
+            codesign --force --timestamp --options runtime \
+              --entitlements scripts/macos-entitlements.plist \
+              --identifier dev.omarei.hush --sign "$APPLE_SIGNING_IDENTITY" "$f"
+            codesign --verify --strict --verbose=2 "$f"
+          done
+      - name: notarize
+        if: env.APPLE_CERTIFICATE_P12 != '' && env.APPLE_NOTARY_KEY != ''
+        run: |
+          set -euo pipefail
+          echo "$APPLE_NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k release/hush-darwin-arm64 "$RUNNER_TEMP/arm64.zip"
+          ditto -c -k release/hush-darwin-x64 "$RUNNER_TEMP/x64.zip"
+          for z in arm64 x64; do
+            xcrun notarytool submit "$RUNNER_TEMP/$z.zip" --wait \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER"
+          done
+          rm -f "$RUNNER_TEMP/notary.p8"
+      # Signed or not, the macOS binary has to start and do real work here.
+      - name: the macOS binary runs
+        run: |
+          set -euo pipefail
+          chmod +x release/hush-darwin-arm64
+          release/hush-darwin-arm64 --version
+          export HUSH_HOME="$RUNNER_TEMP/h" HUSH_NO_KEYCHAIN=1 HUSH_NO_NUDGE=1 NO_COLOR=1
+          mkdir -p "$RUNNER_TEMP/p" && cd "$RUNNER_TEMP/p"
+          "$GITHUB_WORKSPACE/release/hush-darwin-arm64" id --create
+          "$GITHUB_WORKSPACE/release/hush-darwin-arm64" init smoke --no-agent
+          "$GITHUB_WORKSPACE/release/hush-darwin-arm64" set K=smoke_value_123456
+          "$GITHUB_WORKSPACE/release/hush-darwin-arm64" run --quiet -- sh -c 'echo "$K"' | grep -q 'redacted:K'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-final
+          path: release/hush-*
+          if-no-files-found: error
+
+  github-release:
+    name: attest and attach the binaries
+    needs: [verify, sign-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release and upload its files
+      id-token: write        # the OIDC token the attestation is signed with
+      attestations: write    # store the attestation on the repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries-final
+          path: release
+      # After signing: these are the bytes people download.
+      - name: SHA256SUMS and manifests
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum hush-* | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          cd ..
+          node scripts/package-manifests.mjs --version "${GITHUB_REF_NAME#v}" --sums release/SHA256SUMS --out release/manifests
+          cp release/manifests/Formula/hush.rb release/hush.rb
+          cp release/manifests/scoop/hush.json release/hush.json
+          (cd release/manifests/winget && tar czf ../../winget-manifests.tar.gz .)
+      # Sigstore-signed build provenance: `gh attestation verify <file> --repo
+      # omarei-omoto/hush` proves which workflow and commit produced a binary.
+      # scripts/install.sh checks it when gh is available.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/hush-*
+            release/SHA256SUMS
+      - name: release notes from the changelog
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## " v "( |$)" {on=1; next} on && /^## / {exit} on' CHANGELOG.md > /tmp/notes.md
+          test -s /tmp/notes.md || echo "hush $v" > /tmp/notes.md
+          printf '\n---\nInstall: `curl -fsSL https://raw.githubusercontent.com/omarei-omoto/hush/main/scripts/install.sh | sh`, `brew install omarei-omoto/tap/hush`, or `npm i -g @omarei/hush`. Every binary is listed in SHA256SUMS and has a build-provenance attestation.\n' >> /tmp/notes.md
+      - name: create the release (or add to one made by hand)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=(release/hush-* release/SHA256SUMS release/hush.rb release/hush.json release/winget-manifests.tar.gz)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --title "hush ${GITHUB_REF_NAME#v}" --notes-file /tmp/notes.md
+          fi
+      # The tap is a separate repository, so it needs a token of its own: a
+      # fine-grained token with Contents: write on omarei-omoto/homebrew-tap only.
+      - name: update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        if: env.TAP_TOKEN != ''
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/omarei-omoto/homebrew-tap.git" /tmp/tap
+          mkdir -p /tmp/tap/Formula
+          cp release/manifests/Formula/hush.rb /tmp/tap/Formula/hush.rb
+          cd /tmp/tap
+          git config user.name "hush release"
+          git config user.email "hush-release@users.noreply.github.com"
+          git add Formula/hush.rb
+          git diff --cached --quiet || git commit -m "hush ${GITHUB_REF_NAME#v}"
+          git push

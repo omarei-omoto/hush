@@ -95,7 +95,10 @@ describe("hardware path (real age plugin)", { skip }, () => {
     assert.match(hush("age"), /age-plugin-mock \(hardware\)/);
 
     // 2. Adding the recipient runs the real plugin through the real age binary.
-    assert.match(hush("team", "add", "hardware", RECIPIENT), /can now decrypt/);
+    // As an admin: once the software key is retired, the hardware key is the
+    // one that has to be able to sign changes to the vault (hush/v3). Being
+    // this machine's own recipient, it is given this machine's signing key.
+    assert.match(hush("team", "add", "hardware", RECIPIENT, "--role", "admin"), /can now decrypt/);
     const roster = hush("team", "ls");
     assert.match(roster, /hardware/);
     assert.match(roster, /age/);

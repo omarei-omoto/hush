@@ -7,12 +7,16 @@
  */
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { platform } from "node:os";
 import { createInterface } from "node:readline";
 import { Vault, ValidationError } from "./vault.ts";
 import { assess, shouldNudge, recordNudge, snooze, type Posture } from "./posture.ts";
-import { loadIdentity, migrateIdentityToKeychain, publicKeyOf } from "./identity.ts";
+import { loadIdentity, migrateIdentityToKeychain, publicKeyOf, hushHome, storeLabel } from "./identity.ts";
+import { ensureFloor } from "./policy.ts";
 import { ensureHelper, biometryStatus, type BiometryDeps } from "./biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin, recipientsForIdentity } from "./age.ts";
+import { createEnclaveIdentity, enclaveAvailable, loadEnclaveIdentity } from "./enclave.ts";
+import { encodeSePub } from "./crypto.ts";
 import { parseEnvFile } from "./scan.ts";
 import { DEFAULT_POLICY } from "./mcp.ts";
 
@@ -56,6 +60,15 @@ export function renderLevel(p: Posture): void {
     out();
     out(`  ${p.risk.weight >= 2 ? yellow("This vault holds:") : bold("This vault holds:")}`);
     for (const r of p.risk.reasons) out(`    ${dim("·")} ${r}`);
+  }
+
+  // Not rungs — the ladder is about how keys are held — but things to do.
+  if (p.signed === false) out(`\n  ${yellow("!")} this vault is not signed: an admin can run ${cyan("hush team sign")}`);
+  if (p.exposed.length) {
+    out(`\n  ${yellow("!")} ${p.exposed.length} value(s) were readable by someone since removed  ${cyan("hush exposed")}`);
+  }
+  if (p.overdue.length) {
+    out(`\n  ${yellow("!")} ${p.overdue.length} value(s) are past your rotateAfterDays: ${dim(p.overdue.slice(0, 4).join(", "))}${p.overdue.length > 4 ? dim("…") : ""}  ${cyan("hush ls --age")}`);
   }
 
   if (p.next) {
@@ -213,7 +226,7 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
     case "keychain": {
       const id = loadIdentity();
       if (!id) return out(red("  no identity to migrate"));
-      out(`  This moves your existing key into the macOS Keychain and deletes the file.`);
+      out(`  This moves your existing key into the ${storeLabel()} and deletes the file.`);
       out(`  ${dim("Your public key does not change, so you stay a member of every vault.")}`);
       out(`  ${dim(publicKeyOf(id))}`);
       if (!(await ask("  Migrate now?"))) return out(dim("  left alone"));
@@ -237,6 +250,14 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
       break;
     }
 
+    case "floor": {
+      const floor = ensureFloor(hushHome());
+      out(`  ${green("✓")} ${floor.created ? "wrote" : "already there:"} ${floor.path}`);
+      out(`  ${dim("An empty floor is enough: the default approvals now apply wherever hush runs,")}`);
+      out(`  ${dim("and no repository's policy.json can go below what this file says.")}`);
+      break;
+    }
+
     case "biometry": {
       if (!ctx.hushDir) return out(red("  no .hush directory here"));
       const ready = biometryReadiness();
@@ -251,6 +272,19 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
       out(`  ${bold("This is the rung that changes the threat model.")}`);
       out(`  ${dim("Below it, anything running as you can read the vault without asking.")}`);
       out();
+
+      // On a Mac: the Secure Enclave, with nothing to buy or install. An age
+      // plugin identity someone already set up wins — they chose it.
+      const agePath = ageAvailable() ? ageIdentityPath() : null;
+      const agePlugin = agePath ? identityPlugin(agePath) : null;
+      if (!agePlugin && platform() === "darwin" && (loadEnclaveIdentity() || enclaveAvailable().ok)) {
+        if (agePath) {
+          out(`  ${yellow("!")} ${agePath} is a software age key, not hardware — it does not count.`);
+          out();
+        }
+        await enclaveRung(ctx);
+        break;
+      }
 
       if (!ageAvailable()) {
         out(`  1. ${cyan("brew install age")}`);
@@ -307,6 +341,50 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
 
   out();
   renderLevel(assess(ctx.vault, ctx.hushDir, ctx.root));
+}
+
+/**
+ * The hardware rung through this Mac's Secure Enclave (enclave.ts): make the
+ * key if there is none, add it to the vault as an admin, and say what is left
+ * — retiring the software key, which only the person can decide to do.
+ */
+async function enclaveRung(ctx: SecureCtx): Promise<void> {
+  let se = loadEnclaveIdentity();
+  if (se) {
+    out(`  This Mac already has a ${bold("Secure Enclave")} key: ${dim(encodeSePub(se.pub).slice(0, 24) + "…")}`);
+  } else {
+    out(`  This Mac has a ${bold("Secure Enclave")}: hush can make a key inside it.`);
+    out(`  ${dim("It cannot be copied off this Mac, and every use asks for your fingerprint.")}`);
+    if (!(await ask("  Make one?"))) return;
+    try {
+      se = createEnclaveIdentity("touch");
+    } catch (e) {
+      out(`  ${red("✗")} ${(e as Error).message.split("\n")[0]}`);
+      return;
+    }
+    out(`  ${green("✓")} made a key in the Secure Enclave`);
+  }
+
+  if (!ctx.vault) return out(dim("  no vault here to add it to"));
+  const id = loadIdentity();
+  if (!id) return out(red("  no identity on this machine"));
+  const pk = encodeSePub(se.pub);
+  if (Object.values(ctx.vault.data.recipients).some((r) => r.pk === pk)) {
+    out(`  ${green("✓")} it is already a member of vault "${ctx.vault.data.name}"`);
+  } else {
+    const me = ctx.vault.memberName(id);
+    if (!(await ask(`  Add it to vault "${ctx.vault.data.name}" as an admin?`))) return;
+    ctx.vault.addRecipient(id, `${me}-enclave`, pk, "admin");
+    ctx.vault.save();
+    out(`  ${green("✓")} added as ${bold(`${me}-enclave`)} — your enclave key can now decrypt, and sign changes`);
+  }
+  if (!id.pub) return;
+  const me = ctx.vault.memberName(id);
+  out();
+  out(`  ${yellow("The upgrade is not finished.")} Your software key is still a member,`);
+  out(`  so the vault is only as strong as that key until you retire it:`);
+  out(`    ${cyan(`hush team rm ${me}`)}`);
+  out(`  ${dim("Then commit the vault. From then on every read asks for your fingerprint.")}`);
 }
 
 export { assess, snooze };

@@ -16,15 +16,18 @@
  *     checked against each other.
  *
  * macOS, GNOME and KDE desktops get native dialogs (see dialogs.ts for how a
- * backend is picked). A machine that cannot put an approval in front of a human
- * — no desktop, no fingerprint helper — is refused rather than handed a file
- * to answer: the answer has to be *something the gated caller cannot supply*,
- * and a file in the project is something an agent with a shell can write.
+ * backend is picked). A machine with no one at it — over SSH, in a container —
+ * sends the request to a paired approver through a relay (relay.ts), which
+ * answers with a signature this machine checks. With neither, it is refused
+ * rather than handed a file to answer: the answer has to be *something the
+ * gated caller cannot supply*, and a file in the project is something an agent
+ * with a shell can write.
  */
 import { randomInt } from "node:crypto";
 import { platform } from "node:os";
 import { authenticate, biometryStatus, type BiometryMode, type BiometryResult } from "./biometry.ts";
 import { detectBackend, ttlLabel } from "./dialogs.ts";
+import { pairedApprovers, relayApprove } from "./relay.ts";
 
 export type Decision = "once" | "session" | "deny" | "timeout";
 
@@ -56,6 +59,17 @@ export interface ApprovalRequest {
    * keep.
    */
   sessionGrant?: boolean;
+  /**
+   * The code to show, when it was chosen elsewhere: a request relayed from
+   * another machine carries that machine's code, which is the one in the
+   * agent's transcript there.
+   */
+  code?: string;
+  /**
+   * Answer here or nowhere: set for a request that arrived *through* the relay,
+   * so a device that is both an approver and a requester never forwards one on.
+   */
+  noRelay?: boolean;
 }
 
 export interface ApprovalResult {
@@ -63,7 +77,7 @@ export interface ApprovalResult {
   code: string;
   cached: boolean;
   /** How the human actually approved, for the audit log. */
-  via: "biometry" | "dialog" | "cache" | "none";
+  via: "biometry" | "dialog" | "cache" | "relay" | "none";
   note?: string;
 }
 
@@ -89,7 +103,7 @@ const currentBackend = (deps: Pick<ApprovalDeps, "platform" | "resolveDialogProg
  * action is refused, so a caller about to turn approvals on should say so.
  */
 export function approvalPromptAvailable(): boolean {
-  return Boolean(currentBackend()) || biometryStatus().available;
+  return Boolean(currentBackend()) || biometryStatus().available || pairedApprovers().length > 0;
 }
 
 /**
@@ -165,7 +179,7 @@ export interface ApprovalDeps {
    * OS-owned paths, root-owned, not group/world-writable). A test supplies a
    * resolver to point at a fixture.
    */
-  resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog") => string | null;
+  resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog" | "powershell") => string | null;
 }
 
 export async function requestApproval(
@@ -173,7 +187,7 @@ export async function requestApproval(
   req: ApprovalRequest,
   deps: ApprovalDeps = { authenticate },
 ): Promise<ApprovalResult> {
-  const code = newCode();
+  const code = req.code ?? newCode();
 
   // One place a grant can live: this process's map. Nothing is read from the
   // project, so there is nothing there for an agent to write — see the comment
@@ -203,6 +217,8 @@ export async function requestApproval(
       return { decision: "deny", code, cached: false, via: "biometry" };
     }
     if (mode === "required") {
+      // No fingerprint here; a paired approver's fingerprint will do.
+      if (!req.noRelay && pairedApprovers().length) return viaRelay(hushDir, req, code, timeoutMs, true);
       return {
         decision: "deny",
         code,
@@ -215,6 +231,7 @@ export async function requestApproval(
   }
 
   const backend = currentBackend(deps);
+  if (!backend && !req.noRelay && pairedApprovers().length) return viaRelay(hushDir, req, code, timeoutMs, false);
   if (!backend) {
     // Nothing can put this request in front of a human: no dialog program, and
     // no fingerprint helper was available a moment ago. The old fallback wrote
@@ -250,6 +267,41 @@ export async function requestApproval(
     granted.set(key, expiresAt);
   }
   return { decision, code, cached: false, via: "dialog" };
+}
+
+/**
+ * The approval, answered on a paired device through the relay. A "session"
+ * answer is cached here exactly as a local one would be: the grant lives in
+ * this process, which is the one the person answered.
+ */
+async function viaRelay(
+  hushDir: string,
+  req: ApprovalRequest,
+  code: string,
+  timeoutMs: number,
+  biometry: boolean,
+): Promise<ApprovalResult> {
+  const sessionGrant = req.sessionGrant !== false;
+  const outcome = await relayApprove(
+    {
+      action: req.action,
+      summary: req.summary,
+      detail: req.detail ?? [],
+      code,
+      ttlSeconds: sessionGrant ? req.ttlSeconds : null,
+      biometry,
+    },
+    timeoutMs,
+  );
+  if (!outcome) return { decision: "deny", code, cached: false, via: "none", note: "no paired approver" };
+  if (outcome.decision === "session") granted.set(grantKey(hushDir, req.scope), Date.now() + req.ttlSeconds * 1000);
+  return {
+    decision: outcome.decision,
+    code,
+    cached: false,
+    via: "relay",
+    ...(outcome.note ? { note: outcome.note } : outcome.approver ? { note: `answered on ${outcome.approver} (${outcome.via})` } : {}),
+  };
 }
 
 // ------------------------------------------------------------- secret entry

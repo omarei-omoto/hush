@@ -38,6 +38,53 @@ Some tests need extra things and skip cleanly without them:
 
 A skipped test is reported as skipped, never as a pass.
 
+### Running one test
+
+```bash
+node --test test/trust.test.ts                                   # one file
+node --test --test-name-pattern "replayed" test/relay.test.ts    # one test, by name
+node --test --test-only test/merge.test.ts                       # tests marked test.only(…)
+```
+
+### Trying things without touching your real setup
+
+Everything hush keeps about you lives in `~/.hush` — or wherever `HUSH_HOME`
+says. Point it at a scratch directory and nothing you do reaches your real
+identity, library, pins or approvals:
+
+```bash
+export HUSH_HOME="$(mktemp -d)" HUSH_NO_KEYCHAIN=1
+node src/cli.ts id --create
+mkdir /tmp/demo && cd /tmp/demo && node ~/hush/src/cli.ts init demo --no-agent
+```
+
+`HUSH_NO_KEYCHAIN=1` keeps the identity out of the OS keychain too. The test
+helpers do exactly this (`test/helpers/cli.ts`), so a test never sees your
+machine's state.
+
+### What needs which machine
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| The whole suite | ✓ | ✓ | the Windows job in CI runs the platform tests (beta) |
+| Touch ID, Keychain, native dialogs, Secure Enclave | skipped | ✓ | — |
+| zenity / kdialog dialogs | ✓ with a desktop (tests use a stand-in) | stand-in | — |
+| DPAPI, the WinForms dialog, `.cmd` quoting | — | — | ✓ |
+| The single-file binary | ✓ (`npm run build:binaries`, needs [Bun](https://bun.sh)) | ✓ | ✓ |
+
+If you change something Mac-only and have no Mac, say so in the PR. CI runs
+macOS on every push. Anything that shows a real dialog or asks for a real
+fingerprint is driven through an in-process stand-in in the tests, never
+through an environment variable. [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+says why.
+
+### The binary
+
+```bash
+npm run build:binaries                                            # this machine's build, into release/
+HUSH_TEST_BINARY=$PWD/release/hush-darwin-arm64 npm run test:binary  # the whole suite against it
+```
+
 ## The bar for a change
 
 **Every behavioural claim needs a test that fails without it.** Not "there is a
@@ -127,16 +174,17 @@ an issue.
 
 ## Where the code is
 
-| | |
-|---|---|
-| `src/crypto.ts` | The scheme: sealing values, wrapping data keys |
-| `src/vault.ts` | The vault file, locking, merging, named env sets |
-| `src/library.ts` | Your global library, and what a project takes from it |
-| `src/run.ts` | Running a command with secrets injected, and redacting its output |
-| `src/mcp.ts` | The agent-facing server and its policy |
-| `src/ui.ts` | The local app, server and page |
-| `src/cli.ts` | Every command |
-| `docs/AUDIT.md` | Every defect found so far and what changed |
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) has the map: how one `hush run`
+flows through the code, which file does what, and which tests guard each
+property. In short, `src/commands/<command>.ts` has one file per command,
+`src/crypto.ts` has the scheme, and `docs/AUDIT.md` lists every defect found so
+far and what changed.
 
 The tests are worth reading before the source: `test/invariants.test.ts` is a
 list of properties that turned out not to hold.
+
+## Good first issues
+
+Issues labelled `good first issue` name the files to touch and the test to
+write. Adding an agent, an import format, a language to `hush scan` or a
+provider's rotation link is usually one function, one fixture and one test.

@@ -169,6 +169,12 @@ export interface Composed {
   layers: string[];
   /** Linked sets this project names but the library does not have. */
   missing: string[];
+  /**
+   * Sets this project uses that this identity is not allowed to read — a
+   * scoped member or a CI identity running in a project that also uses sets
+   * they were never given. Skipped, and said, rather than failing the run.
+   */
+  unreadable: string[];
 }
 
 /**
@@ -194,8 +200,23 @@ export function composeSets(
   const secrets: Record<string, string> = {};
   const layers: string[] = [];
   const missing: string[] = [];
+  const unreadable: string[] = [];
 
   const library = openGlobal();
+  /**
+   * A project set this identity may not read: an error when the person typed
+   * it (`--use prod`), otherwise skipped and reported.
+   */
+  const allowed = (name: string): boolean => {
+    if (!project || project.canReadSet(id, name)) return true;
+    if (typed.has(name)) {
+      throw new ValidationError(
+        `You cannot read set "${name}" in this vault. An admin can give it to you: hush team add <you> <your key> --sets ${name}`,
+      );
+    }
+    unreadable.push(name);
+    return false;
+  };
   const typed = new Set(extra);
   // Position is precedence: a name the project already uses, named again in
   // `extra`, moves to the end so it wins for this run.
@@ -204,7 +225,7 @@ export function composeSets(
   for (const name of names) {
     if (name === "default") {
       // Only this project's own default. The library's is opt-in, below.
-      if (project?.hasSet("default")) {
+      if (project?.hasSet("default") && allowed("default")) {
         Object.assign(secrets, project.materialize(id, "default"));
         layers.push("default");
       }
@@ -224,6 +245,7 @@ export function composeSets(
       continue;
     }
     if (project?.hasSet(name)) {
+      if (!allowed(name)) continue;
       Object.assign(secrets, project.materialize(id, name));
       layers.push(name);
     } else if (library?.hasSet(name)) {
@@ -243,7 +265,7 @@ export function composeSets(
     }
   }
 
-  return { secrets, layers, missing };
+  return { secrets, layers, missing, unreadable };
 }
 
 // ---------------------------------------------------------- project files
@@ -260,7 +282,7 @@ export function writeProjectDotfiles(hushDir: string): void {
   mkdirSync(hushDir, { recursive: true });
   const gitignore = join(hushDir, ".gitignore");
   if (!existsSync(gitignore)) {
-    writeFileSync(gitignore, ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n"));
+    writeFileSync(gitignore, ["audit.log", "audit.log.*", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", "merge-conflicts.json", ""].join("\n"));
   }
   const attrs = join(hushDir, ".gitattributes");
   if (!existsSync(attrs)) {

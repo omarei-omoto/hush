@@ -12,13 +12,33 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, copyFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
+
+/**
+ * What git would commit, copied to a fresh repository: the tree CI packs from.
+ * Packing the working copy itself would pick up whatever else is lying around
+ * in it, and scripts/check-pack.mjs rightly refuses that.
+ */
+function cleanCopy(): string {
+  const dir = mkdtempSync(join(tmpdir(), "hush-clean-"));
+  const files = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" })
+    .stdout.split("\0")
+    .filter((f) => f && existsSync(join(root, f)));
+  for (const f of files) {
+    mkdirSync(dirname(join(dir, f)), { recursive: true });
+    copyFileSync(join(root, f), join(dir, f));
+  }
+  symlinkSync(join(root, "node_modules"), join(dir, "node_modules"));
+  spawnSync("git", ["init", "-q"], { cwd: dir });
+  spawnSync("git", ["add", "-A"], { cwd: dir });
+  return dir;
+}
 
 describe("the published package actually runs", () => {
   // Every other test runs hush from this checkout, where Node strips the types
@@ -42,9 +62,10 @@ describe("the published package actually runs", () => {
       const installDir = mkdtempSync(join(tmpdir(), "hush-install-"));
       const home = mkdtempSync(join(tmpdir(), "hush-pack-home-"));
       const proj = mkdtempSync(join(tmpdir(), "hush-pack-proj-"));
+      const clean = cleanCopy();
       try {
         const packed = spawnSync("npm", ["pack", "--pack-destination", packDir], {
-          cwd: root, encoding: "utf8",
+          cwd: clean, encoding: "utf8",
         });
         assert.equal(packed.status, 0, `npm pack failed:\n${packed.stdout}${packed.stderr}`);
         const tarball = readdirSync(packDir).find((n) => n.endsWith(".tgz"));
@@ -106,7 +127,7 @@ describe("the published package actually runs", () => {
           "the installed package has no dist/",
         );
       } finally {
-        for (const d of [packDir, installDir, home, proj]) rmSync(d, { recursive: true, force: true });
+        for (const d of [packDir, installDir, home, proj, clean]) rmSync(d, { recursive: true, force: true });
       }
     },
   );
@@ -162,6 +183,40 @@ test("package.json is in the form npm will publish", () => {
 // install there instead of letting it half-work; the README has to agree.
 test("the package declares the platforms it supports, and the README says the same", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { os?: string[] };
-  assert.deepEqual(pkg.os, ["darwin", "linux"]);
-  assert.match(readFileSync(join(root, "README.md"), "utf8"), /\*\*Windows is not supported yet\*\*/);
+  assert.deepEqual(pkg.os, ["darwin", "linux", "win32"]);
+  // Windows is installable, and the README says plainly that it is a beta.
+  assert.match(readFileSync(join(root, "README.md"), "utf8"), /\*\*Windows is in beta\*\*/);
+});
+
+describe("npm pack refuses files git does not track", () => {
+  // package.json's "files" names whole folders, and npm packs whatever is in
+  // them on the machine that runs it. scripts/check-pack.mjs runs first
+  // (prepack) and refuses anything untracked — a private note in docs/, a
+  // scratch file in src/.
+  test("an untracked or ignored file under a packaged folder is named; dist/ and tracked files are not", async () => {
+    const { untrackedInPackage } = await import("../scripts/check-pack.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "hush-checkpack-"));
+    try {
+      const git = (...args: string[]) => spawnSync("git", args, { cwd: dir });
+      git("init", "-q");
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ files: ["src", "docs", "dist", "README.md"] }));
+      for (const d of ["src", "docs", "dist"]) mkdirSync(join(dir, d));
+      writeFileSync(join(dir, "src", "a.ts"), "");
+      writeFileSync(join(dir, "docs", "guide.md"), "");
+      writeFileSync(join(dir, "README.md"), "");
+      git("add", "-A");
+      writeFileSync(join(dir, "docs", "PRIVATE-NOTES.md"), "not for publishing");
+      writeFileSync(join(dir, ".gitignore"), "src/scratch.ts\n");
+      writeFileSync(join(dir, "src", "scratch.ts"), "");
+      writeFileSync(join(dir, "dist", "cli.js"), "");
+      assert.deepEqual(untrackedInPackage(dir), ["docs/PRIVATE-NOTES.md", "src/scratch.ts"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("prepack runs the check before building", () => {
+    const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string> };
+    assert.match(pkg.scripts.prepack, /^node scripts\/check-pack\.mjs && /);
+  });
 });

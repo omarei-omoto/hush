@@ -1,7 +1,7 @@
 # Red team: can an agent get a secret value out?
 
 **Date:** 2026-09-12
-**Scope:** everything hush itself exposes to an agent — the seven MCP tools,
+**Scope:** everything hush itself exposes to an agent — the eight MCP tools,
 the CLI as an agent would invoke it, the policy files, the approval and grant
 mechanism, output redaction, `.hush/` (audit log, journal, `pending/`,
 `grants.local.json`), and the local app's HTTP API. Out of scope, per
@@ -28,10 +28,10 @@ script), then green after the fix — the CONTRIBUTING.md bar.
 | 1 | `grants.local.json` forgery bypasses approval, including `biometry: "required"` | Value out / policy bypass | **Fixed**: grants are memory-only (2026-09-16) |
 | 2 | A symlinked `grants.local.json` turns a later legitimate approval into an overwrite of an arbitrary file (e.g. the policy floor) | Policy bypass (persistent) | **Fixed**: nothing is written there any more |
 | 3 | Self-approval by forging `.hush/pending/<id>.answer` | Value out / policy bypass | Fixed: the file queue is gone (2026-09-16) |
-| 4 | `HUSH_VAULT` pointed at a copy of `vault.json` bypasses the project's policy when no floor is configured | Policy bypass | Documented, not fixed |
+| 4 | `HUSH_VAULT` pointed at a copy of `vault.json` bypasses the project's policy when no floor is configured | Policy bypass | **Fixed**: the floor is created whenever an agent is set up (0.6.0) |
 | 5 | `npx node -e ...` reaches a denied interpreter; a one-liner hex-encode defeats redaction | Hardening gap (documented) | Pinned |
 | 6 | Values under 5 characters are never redacted (`MIN_REDACTABLE`) | Hardening gap (documented, already tested) | No change — already covered |
-| — | `hush_check_repo`'s `path` argument is not confined to the project root | Minor info disclosure (env-var *names*, never values) | Reported, not fixed |
+| — | `hush_check_repo`'s `path` argument is not confined to the project root | Minor info disclosure (env-var *names*, never values) | **Fixed**: confined to the project, symlinks resolved (0.6.0) |
 
 ---
 
@@ -67,7 +67,7 @@ identity from the keychain" (out of scope): it never touches the identity or
 the vault's crypto. It defeats the approval *gate*, using nothing but the
 ordinary filesystem write access every coding agent already has.
 
-**Existing precedent, and where the line is:** `test/cli.test.ts` already had
+**Existing precedent, and where the line is:** `test/commands/policy.test.ts` already had
 four tests establishing that a *forged* `run:`-scoped grant *is* honoured
 across process boundaries — deliberately, so "Allow 15 min" survives the next
 `hush` invocation being a new process (a CLI run is a fresh process every
@@ -84,7 +84,7 @@ written to disk (`persistToDisk = req.action !== "reveal" && req.action !==
 (e.g. `hush ui`'s server) via the in-memory map, which a separate process
 cannot forge into. `run` keeps disk persistence, unchanged.
 
-**Tests:** `test/cli.test.ts` — *"a forged reveal grant on disk is never
+**Tests:** `test/commands/policy.test.ts` — *"a forged reveal grant on disk is never
 honoured, even with biometry required"*, *"a forged add grant on disk is
 never honoured — an agent cannot pre-approve planting its own secret"*.
 Confirmed red (value printed / key planted) with the fix reverted, green with
@@ -144,7 +144,7 @@ disclose more than an attacker-controlled `grants.local.json` written
 directly already would (same JSON shape, same effect on the reading
 process's own decision), so there is no additional read-side risk to close.
 
-**Test:** `test/cli.test.ts` — *"a symlinked grants.local.json cannot be used
+**Test:** `test/commands/policy.test.ts` — *"a symlinked grants.local.json cannot be used
 to clobber the user's policy floor"*. Confirmed red (floor file replaced)
 with the `lstatSync` guard removed, green with it restored.
 
@@ -218,7 +218,7 @@ and a hand-written `.answer` file changes nothing.
 
 ---
 
-### 4. `HUSH_VAULT` redirect bypasses policy when no floor is configured — documented, not fixed
+### 4. `HUSH_VAULT` redirect bypasses policy when no floor is configured — fixed in 0.6.0
 
 **Tried:** `.hush/vault.json` is meant to be committed and read by anyone with
 repo access — envelope encryption protects the *values*, not the file. An
@@ -266,6 +266,17 @@ anyone whose agent can set environment variables — true of any agent with a
 shell — to configure one. **Reproduction:**
 `test/fixtures/redteam/hush-vault-redirect-bypass.mts` (not run by `npm
 test`).
+
+**Update, 0.6.0 — fixed by making the mitigation the default.** Since a floor's
+existence is what closes this, hush now writes an empty `~/.hush/policy.json`
+at every moment an agent is brought near a vault: answering yes to "will an AI
+agent use secrets here?" (`hush init --agent`, `hush start`), `hush
+install-mcp` (listed in its "this will write" plan), and `hush install-skill`.
+`hush level` fails a new rung-3 check, and `hush doctor` names the fix
+(`hush secure floor`), when an agent is registered and there is no floor. It
+never overwrites a floor someone wrote. The reproduction is now a real test:
+`test/floor.test.ts` — *"after hush install-mcp, the HUSH_VAULT redirect meets
+an approval and refuses"* — confirmed red with the floor write disabled.
 
 ---
 
@@ -329,7 +340,7 @@ at. No new test added; no change made.
 
 ---
 
-### Minor, reported but not fixed: `hush_check_repo`'s `path` is not confined
+### Minor, fixed in 0.6.0: `hush_check_repo`'s `path` is not confined
 
 `hush_check_repo({ path: "/etc" })` scanned outside the project without
 complaint. `scanRepo()` only reports which environment-variable *names* look
@@ -341,6 +352,13 @@ one-line confinement to the project root as a future cleanup. Not attempted
 here: it is cosmetic relative to everything else in this pass, and a
 five-minute fix risks being wrong about some legitimate monorepo layout this
 red-team pass did not check for.
+
+**Update, 0.6.0.** `confinedScanRoot()` in `src/mcp.ts` resolves the requested
+path against the project root with `realpath` on both sides and refuses
+anything that is not the root or beneath it — an absolute path elsewhere, `../`,
+or a symlink inside the project that leads out of it. A monorepo is fine: the
+root is the repository's, so `packages/app` is inside it. Tests in
+`test/mcp.test.ts`, *"hush_check_repo stays in the project (S-2)"*.
 
 ---
 
@@ -443,9 +461,9 @@ red-team pass did not check for.
 
 | Test | Fails without the fix | Passes with it |
 |---|---|---|
-| `test/cli.test.ts` — "a forged reveal grant on disk is never honoured, even with biometry required" | Yes — prints `sk_live_cli` | Yes |
-| `test/cli.test.ts` — "a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret" | Yes — plants `PLANTED_KEY` | Yes |
-| `test/cli.test.ts` — "a symlinked grants.local.json cannot be used to clobber the user's policy floor" | Yes — floor file replaced with grant JSON | Yes |
+| `test/commands/policy.test.ts` — "a forged reveal grant on disk is never honoured, even with biometry required" | Yes — prints `sk_live_cli` | Yes |
+| `test/commands/policy.test.ts` — "a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret" | Yes — plants `PLANTED_KEY` | Yes |
+| `test/commands/policy.test.ts` — "a symlinked grants.local.json cannot be used to clobber the user's policy floor" | Yes — floor file replaced with grant JSON | Yes |
 | `test/mcp.test.ts` — "npx reaches a denied interpreter…" (pinning, not a fix) | N/A — pins existing, documented behaviour | Yes |
 | `test/mcp.test.ts` — "allowCommands — not denyCommands — is what actually stops the npx indirection" (pinning) | N/A | Yes |
 

@@ -4,6 +4,266 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.9.0 — 2026-09-30
+
+Everything planned for 0.9: hush without Node, a key in the Secure Enclave,
+approvals for a machine nobody is sitting at, Windows in beta, and the docs as a
+site. No vault format change: a 0.8 vault opens unchanged, and 0.8 can open a
+vault written by this version, unless it has an enclave member (below).
+
+### A key in the Secure Enclave, with nothing to install
+
+`hush id --enclave` makes a P-256 key inside the Mac's Secure Enclave. It cannot
+be copied off the machine, and every use asks for your fingerprint (or the
+Mac's password), enforced by the enclave. `hush secure --hardware` now offers
+this first on a Mac: it makes the key, adds it to the vault as you, and tells
+you to retire the software key. No Apple Developer ID is involved; see
+docs/BIOMETRY.md for how. An enclave member appears as `hush_se_…`, and as
+`enclave` in `hush team ls`. **A vault with an enclave member needs this
+version to open.**
+
+### hush without Node: one file, an installer, Homebrew
+
+- Single-file binaries for macOS (arm64, x64), Linux (x64, arm64, glibc and
+  musl) and Windows (x64). The build is byte-for-byte reproducible, and the
+  whole test suite runs against the binary.
+- `curl -fsSL …/scripts/install.sh | sh` (and `install.ps1` on Windows)
+  installs one. It refuses a binary whose sha256 is not in the release's
+  `SHA256SUMS`, checks the build-provenance attestation when the GitHub CLI is
+  signed in, and needs no sudo.
+- Homebrew (`brew install omarei-omoto/tap/hush`), Scoop and winget manifests
+  are generated for each release. The GitHub Action installs the checked binary
+  by default and no longer needs Node.
+- The binary does not load `.env` or `bunfig.toml` from the working directory;
+  Bun-built programs do by default.
+
+### Approvals where there is no desktop
+
+Over SSH, in a devcontainer, on a server, there was no one to ask, so every
+gated action was refused. Now `hush approvals pair` on the server and
+`hush approvals accept` on your laptop pair the two. From then on, an approval
+the server cannot show itself goes to your laptop (`hush approvals listen`):
+the usual dialog, or Touch ID, and a signed answer back. The relay in between
+can neither read nor forge a request or an answer, and cannot replay one.
+`hush relay serve` runs one yourself; with `ssh -R` nobody else is involved.
+The protocol is in docs/RELAY.md.
+
+### Windows, in beta
+
+`npm install` now works on Windows. Your key is kept with DPAPI, approvals are
+a native Windows dialog, `hush run npm …` works through `npm.cmd`, secret
+files get owner-only ACLs, and there is a PowerShell hook. A Windows CI job
+checks these paths; tell us what breaks.
+
+### Security
+
+- The macOS helpers (Touch ID, Secure Enclave) are now compiled only with
+  `/usr/bin/swiftc`, and only if it is root-owned and not writable by others,
+  in an environment with nothing the caller can use to redirect it. Upgrading
+  is recommended if you use `"biometry": "required"`.
+- Text from a vault file — a member's name, the vault's id — can no longer put
+  terminal control characters into hush's warnings and errors, including the
+  one that says a vault looks forged. A vault id or member fingerprint hush
+  would never write is refused when the vault is loaded.
+
+### Docs
+
+- The README is now a front page. Everything else is in a guide
+  (docs/guide/, and a site at omarei-omoto.github.io/hush), unedited apart
+  from links.
+- The command reference is generated from `hush help --all`. The old one had
+  fallen behind.
+- A demo repository with a public, test-only key (`examples/hush-demo`), a
+  contributor's map of the code (docs/ARCHITECTURE.md), and the brief for an
+  external security review (docs/REVIEW-SCOPE.md).
+
+### Fixed
+
+- `hush verify` counted a member who reads only some sets as "without a key
+  wrap".
+- `hush install-mcp` and the git merge driver register the binary itself when
+  hush is the single-file build.
+
+## 0.8.0 — 2026-09-30
+
+**Breaking: vault format hush/v3.** A signed vault can be opened only by hush
+0.8 or newer. Vaults are signed when made with `hush init`, or the first time an
+admin changes an existing vault's membership, or with `hush team sign`.
+Everyone on the team should upgrade before that happens.
+
+### Signed vaults: only an admin can change who can read one
+
+An admin now signs the vault's header — every member's keys and role, the sets
+a scoped member may read, and a commitment to every data key — and every
+member's hush checks the signature against admins their machine already trusts,
+and checks that the key it unwrapped is the one the header commits to.
+
+- A change signed by an admin you trust arrives with a one-line notice ("alice
+  changed who can read this vault: added dana (signed)"). A header that is
+  unsigned, forged, signed by a non-admin, or stripped of a signature it had is
+  refused and cannot be accepted — `hush team reject` shows how to restore it.
+  One signed by an admin this machine has never seen waits for `hush team
+  accept`.
+- This closes what 0.6's pinning could not tell apart from a teammate's
+  rotation: someone who is not a member re-keying the vault without adding
+  themselves, to plant a value.
+- Only admins can add or remove members, rotate, or change set access in a
+  signed vault. Members still add and change values.
+- `hush id` prints your encryption and signing key as one string. An older
+  32-byte `hush_pk_` still joins a vault; it just cannot sign as an admin.
+- `hush team verify <name>` prints a sixty-digit safety number to compare over a
+  call.
+- A hardware-only (age) admin signs with a separate software key kept in the
+  keychain; adding your own hardware key as an admin attaches it for you.
+
+### Giving someone only some sets
+
+- `hush team add junior <key> --sets dev,staging` makes a scoped member who
+  reads only those sets; each gets a key of its own, wrapped for every full
+  member too. `hush team rm junior --from staging` takes one away and rotates
+  only that set.
+- A run skips sets you were not given and says so; `--use prod` says who can
+  grant it. The app's Team section shows who reads what, and can add a scoped
+  member.
+
+### CI identities and a GitHub Action
+
+- `hush ci create github --sets ci,staging | gh secret set HUSH_IDENTITY` makes a
+  scoped machine identity — never an admin, never a signer — and hands its key
+  straight to the secret store. `hush ci ls`, `hush ci rm`.
+- `uses: omarei-omoto/hush@v1` installs hush, masks the identity, and checks it
+  can read the vault. In GitHub Actions, `hush run` has GitHub mask every
+  injected value line by line — for CI identities only.
+
+### After someone leaves
+
+- `hush team rm` marks every value the removed member could read as exposed
+  until it is set again. `hush exposed` lists them with where to replace each
+  (Stripe, OpenAI, AWS, GitHub and twenty-odd more).
+- `hush ls --age` shows how long since each value was replaced.
+  `"rotateAfterDays"` in a policy (a number, or per set) makes `hush level` and
+  `hush doctor` list overdue values; a floor can ask sooner, never later.
+
+### Also
+
+- The vault merge understands signed vaults and set keys, re-signs a merged
+  header as the admin merging (or refuses), and rotates a set's key when
+  someone who held it is no longer entitled.
+- `hush ui` links can name a section after the token (`#t=…&team`).
+- `vault.ts` is split into `vault-files.ts` and `vault.ts`; the signed header
+  lives in `header.ts`. An independent WebCrypto implementation verifies the
+  signature format.
+
+## 0.7.0 — 2026-09-30
+
+### Vault merges go key by key
+
+Two branches that both touched `.hush/vault.json` used to conflict as a wall of
+base64, and taking one side dropped the other's secrets.
+
+- `hush merge-driver --install` (once per clone) hands vault merges to hush.
+  Keys added on either side are kept. A rotation or a removal on one branch
+  wins, and everything from the other branch is re-sealed under the new key; a
+  member added on the other branch is given it. Both branches rotating is
+  refused, not guessed at.
+- A key changed on both branches keeps this branch's value, and `hush merge
+  status` lists it (set, key, who, when — never a value). `hush merge pick KEY
+  --ours|--theirs` settles each; every hush command mentions an open choice
+  until it is made.
+- Without the driver, git still stops on the vault as before, and `hush merge`
+  finishes the merge from the three versions git kept.
+- The committed `.hush/.gitattributes` still says `-merge`: git falls back to a
+  line-by-line text merge when a named driver is not configured, so the driver
+  is switched on per clone in `.git/info/attributes` and git config instead.
+- `hush doctor` says whether this clone has it.
+
+### Nine coding agents
+
+`hush install-mcp` and `hush install-skill` now know **Gemini CLI**, **VS
+Code** (Copilot agent mode), **Windsurf**, **Zed**, **Cline** and **Continue**
+as well as Claude Code, Codex and Cursor — each in the file its own
+documentation names. Zed's settings file keeps every comment (the entry is
+inserted, not re-serialised). Codex, Gemini CLI and Zed share
+`.agents/skills/`, so the skill is written once for all three.
+
+### The audit log is a hash chain
+
+Each line of `.hush/audit.log` carries the SHA-256 of the line above it.
+`hush audit` shows the log; `hush audit verify` names the first line that does
+not follow — an edit, a removal, an insertion or a reorder. It makes an edit
+visible, not impossible (SECURITY.md says so).
+
+### The app's link keeps its token out of history
+
+`hush ui` now prints `http://127.0.0.1:…/#t=<token>`. The fragment never
+reaches a server or a log; the page reads it, wipes it from the address bar and
+keeps it for the tab. The page itself no longer contains the token. It also
+refuses to be framed by another page.
+
+### Under the hood
+
+- `src/cli.ts` is split into `src/cli/` (shared helpers) and one file per
+  command in `src/commands/`. No behaviour change.
+- `npm run build:check` builds `dist/` twice and fails on any difference; CI and
+  the release run it, and releases publish with npm provenance. `RELEASING.md`
+  describes the process.
+- `.hush/.gitignore` for new projects also ignores `audit.log.*` (the rotated
+  log and its lock) and `merge-conflicts.json`.
+
+## 0.6.0 — 2026-09-30
+
+**Upgrade recommended for every team vault.**
+
+### hush notices when a vault's membership or key changes unexpectedly
+
+Each machine now remembers, per vault, the members it has accepted, a
+commitment to the data key behind each generation it has seen, and which vault
+lives at which path. When something changes that nobody on this machine did —
+a member someone else added, a different key where one was already seen, a
+different vault in the same place — hush refuses to decrypt or add anything
+there until a person looks:
+
+- `hush team accept` shows what changed (who was added, their fingerprint, and
+  the git commit and author that last touched the vault) and records it once
+  you confirm. With approvals on, it asks on screen like any other gated action.
+  Your agent is told never to run it for you.
+- `hush team reject` changes nothing and explains how to restore the vault from
+  before the change.
+- `hush team ls` marks members this machine has not accepted.
+- `hush verify` and `hush doctor` gain a trust check, and `hush verify` exits
+  non-zero over an unaccepted change instead of printing all green.
+- The MCP tools refuse with the same message, and `hush ui` loads with the
+  previews hidden and a banner saying what to run.
+
+Members removed and key rotations made by teammates go through on their own; a
+rotation made elsewhere is mentioned once. The first time a machine sees a vault
+it is accepted as it stands (trust on first use).
+
+**Behaviour change:** after a teammate adds someone, everyone else runs
+`hush team accept` once before their next `hush run`. That is the point.
+
+### The policy floor is created when an agent is set up
+
+`~/.hush/policy.json` — your floor, which no repository's policy can go below —
+now gets written (empty) whenever an agent is brought near a vault: `hush
+install-mcp` (it is on the "this will write" list), `hush install-skill`, and
+answering yes to "will an AI agent use secrets here?". Its existence is what
+keeps approvals on when a copy of the vault is opened from a folder with no
+policy of its own. `hush level` has a new rung-3 check for a machine with an
+agent registered and no floor, and `hush secure floor` writes one.
+
+### Fixed
+
+- `hush_check_repo` scanned any directory it was given, including outside the
+  project. It is now confined to the project root, with symlinks resolved.
+- Two MCP replies pointed at `hush_request_secret`, a tool that no longer
+  exists; they name `hush_add_secret`. A test now fails if any reply or the
+  agent skill names a tool the server does not have.
+- The UI test suite read the real `~/.codex/config.toml` of whoever ran it.
+- Docs: the supported-versions table, the README's description of how the
+  `hush` command chooses between `src/` and `dist/`, and the value AAD in "How
+  the crypto works" (it has bound the key generation since 0.4).
+
 ## 0.5.0 — 2026-09-24
 
 ### The app, redesigned around what you came to do

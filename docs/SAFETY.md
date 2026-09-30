@@ -100,7 +100,9 @@ tool that returns one.
 - **Set a floor, even an empty one.** An agent that can set environment
   variables when it runs `hush` can point `HUSH_VAULT` at a copy of the vault
   in a folder with no policy. With `~/.hush/policy.json` present — even
-  `{}` — the defaults' approvals still apply to that copy.
+  `{}` — the defaults' approvals still apply to that copy. hush writes an empty
+  one for you when you set an agent up (`hush install-mcp`, `hush
+  install-skill`); `hush secure floor` writes one any time.
 - **The line again:** with a software identity, an agent with an unrestricted
   shell can read your key directly and skip all of the above. The prompt is a
   strong deterrent and an audit trail, not a wall. If your agent has that
@@ -139,6 +141,11 @@ tool that returns one.
   `.hush/`, and treat a force-push to it as an incident.
 - `hush verify` checks the vault decrypts, is fully re-sealed after a removal,
   and has not been rolled back to an older generation.
+- A member someone else added is refused on your machine until you run `hush
+  team accept`. That is the moment to check with whoever added them: anyone who
+  can get a change merged can put a vault wrapped to every member's public key
+  — and their own — where yours was, and the prompt is what stops it working
+  silently.
 
 ---
 
@@ -148,7 +155,7 @@ tool that returns one.
 |---|---|---|
 | 1 | secrets are encrypted at rest; no plaintext `.env` in the project | `hush init`, `hush add .env --as …`, delete the file |
 | 2 | your key is in the OS keychain, not a loose file | `hush secure` |
-| 3 | using a credential needs your approval | answer *yes* to the agent question, or `hush secure` |
+| 3 | using a credential needs your approval, and your own floor keeps it on | answer *yes* to the agent question, or `hush secure` |
 | 4 | approval needs your fingerprint, not a click | `hush biometry setup`, `"biometry": "required"` |
 | 5 | your key cannot be copied off this machine | `hush age` with a hardware plugin |
 

@@ -351,9 +351,11 @@ A local app in your browser, built around what you came to do:
   what your coding agent is connected to and what it must ask you first.
   **Activity** is the audit log in plain sentences.
 
-It binds to `127.0.0.1` only, needs a one-time token in the URL, refuses
-non-loopback `Host` headers, and sends the browser **masked previews**, never
-the real values. The exception is when you click **Reveal**, which asks for the
+It binds to `127.0.0.1` only, needs a one-time token that travels in the link's
+`#fragment` (so it never reaches a server log, and the page wipes it from the
+address bar and history), refuses non-loopback `Host` headers, cannot be framed
+by another page, and sends the browser **masked previews**, never the real
+values. The exception is when you click **Reveal**, which asks for the
 same approval as `hush get`, shows the value for fifteen seconds and writes the
 reveal to the audit log.
 

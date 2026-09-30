@@ -1155,17 +1155,23 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
       if (url.pathname === "/") {
-        if (!tokenOk(url.searchParams.get("t"))) {
-          res.writeHead(403, { "content-type": "text/plain" });
-          return res.end("Bad or missing token. Start the UI with `hush ui`.");
-        }
-        const html = PAGE.replace("__TOKEN__", TOKEN);
+        // The page is code, not data, and carries no token: the token travels
+        // in the link's #fragment, which the browser never sends here, and
+        // every /api/ call still has to present it. Embedding it in the HTML
+        // (and taking it from ?t=) put it in history, sync and access logs.
+        const html = PAGE;
         res.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
+          // frame-ancestors: no other page may frame this one and trick a
+          // click on Reveal or Remove. base-uri/form-action: nothing injected
+          // could redirect a relative URL or a form post off this origin.
           "content-security-policy":
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; " +
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
           "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
         });
         return res.end(html);
       }
@@ -1199,7 +1205,7 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
   server.listen(port, "127.0.0.1", () => {
     const addr = server.address();
     const actual = typeof addr === "object" && addr ? addr.port : port;
-    const link = `http://127.0.0.1:${actual}/?t=${TOKEN}`;
+    const link = `http://127.0.0.1:${actual}/#t=${TOKEN}`;
     const vaultLine = existing ? `vault: ${existing.data.name}` : "no vault here yet — set this folder up in the browser";
     process.stdout.write(`\n  hush ui  →  ${link}\n\n  ${vaultLine}\n  Ctrl-C to stop.\n\n`);
     if (opts.open !== false) {

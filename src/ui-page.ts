@@ -315,7 +315,24 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <script>
 "use strict";
-const T="__TOKEN__";
+/*
+ * The session token arrives in the link's fragment (#t=…), which a browser
+ * never sends to a server and nothing logs as a URL. It is read once, the
+ * address bar is cleaned so history, sync and a screenshot hold no token, and
+ * it is kept for this tab only so a reload still works.
+ */
+const T=(function(){
+  let t="";
+  const m=/(?:^|[#&?])t=([A-Za-z0-9_-]{16,})/.exec(location.hash+"&"+location.search.slice(1));
+  if(m){
+    t=m[1];
+    try{sessionStorage.setItem("hush-t",t)}catch(e){}
+    history.replaceState(null,"",location.pathname);
+  }else{
+    try{t=sessionStorage.getItem("hush-t")||""}catch(e){}
+  }
+  return t;
+})();
 let S=null;
 
 /* ------------------------------------------------------------ foundations */
@@ -1532,6 +1549,10 @@ window.addEventListener("hashchange",function(){if(route()==="activity")AUDIT=nu
 
 refresh().catch(function(e){
   const page=document.getElementById("page");clear(page);
-  page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,"Couldn't load"),h("p",{text:e.message}))));
+  // No token, or one from a previous run: the only fix is the link this run printed.
+  const noToken=!T||/bad token/.test(e.message);
+  page.append(h("div",{class:"card"},h("div",{class:"empty"},
+    h("h3",null,noToken?"Open the link hush printed":"Couldn't load"),
+    h("p",{text:noToken?"This page needs the one-time link from the terminal where you ran hush ui. Each run prints a new one.":e.message}))));
 });
 </script></body></html>`;

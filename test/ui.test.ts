@@ -57,13 +57,13 @@ before(async () => {
     const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
     child.stdout!.on("data", (d) => {
       out += d;
-      const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+      const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
       if (m) { clearTimeout(timer); resolve(m[1]); }
     });
   });
   const parsed = new URL(url);
   base = parsed.origin;
-  token = parsed.searchParams.get("t")!;
+  token = parsed.hash.replace(/^#t=/, "");
 });
 
 after(() => {
@@ -95,10 +95,20 @@ const api = (path: string, body?: unknown, tok = token) =>
   });
 
 describe("ui server — access control", () => {
-  test("the page needs the session token", async () => {
-    assert.equal((await fetch(base + "/")).status, 403);
-    assert.equal((await fetch(base + "/?t=wrong")).status, 403);
-    assert.equal((await fetch(`${base}/?t=${token}`)).status, 200);
+  test("the token travels in the link's fragment and never in what the server sees or sends", async () => {
+    // A fragment is never sent to a server, so the page is served without one
+    // — it is code, not data — and every /api/ call still needs the token.
+    const r = await fetch(base + "/");
+    assert.equal(r.status, 200);
+    const html = await r.text();
+    assert.ok(!html.includes(token), "the served page contains the session token");
+    assert.ok(!html.includes("__TOKEN__"), "a placeholder is left in the page");
+    // The page reads #t=, cleans the address bar, and keeps it for the tab.
+    assert.match(html, /location\.hash/);
+    assert.match(html, /history\.replaceState/);
+    // A stale ?t= from an old link is ignored by the server, not honoured.
+    assert.equal((await fetch(base + "/?t=" + token)).status, 200);
+    assert.equal((await fetch(base + "/api/state?t=" + token)).status, 403);
   });
 
   test("the API needs the session token", async () => {
@@ -154,12 +164,15 @@ describe("ui server — access control", () => {
   });
 
   test("the page is served with a restrictive CSP and no referrer", async () => {
-    const r = await fetch(`${base}/?t=${token}`);
+    const r = await fetch(`${base}/`);
     const csp = r.headers.get("content-security-policy") ?? "";
     assert.match(csp, /default-src 'none'/);
     assert.ok(!/https?:\/\//.test(csp), "CSP allows an external origin");
     assert.equal(r.headers.get("referrer-policy"), "no-referrer");
     assert.equal(r.headers.get("cache-control"), "no-store");
+    assert.match(csp, /frame-ancestors 'none'/, "another page could frame this one");
+    assert.equal(r.headers.get("x-frame-options"), "DENY");
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
   });
 
   test("unknown routes are not found", async () => {
@@ -170,7 +183,7 @@ describe("ui server — access control", () => {
 
 describe("ui server — never leaks values", () => {
   test("the served HTML contains no secret value", async () => {
-    const html = await (await fetch(`${base}/?t=${token}`)).text();
+    const html = await (await fetch(`${base}/`)).text();
     assert.ok(!html.includes(SECRET_VALUE));
     assert.ok(!html.includes("fal_ui_value"));
   });
@@ -539,7 +552,7 @@ describe("the page script itself", () => {
    * page. Parsing it is the only thing that catches that.
    */
   const pageSource = async () => {
-    const html = await (await fetch(`${base}/?t=${token}`)).text();
+    const html = await (await fetch(`${base}/`)).text();
     const m = html.match(/<script>([\s\S]*?)<\/script>/);
     assert.ok(m, "the page has no script block");
     return { html, js: m![1] };
@@ -885,13 +898,13 @@ describe("ui server — staged plaintext expires", () => {
       const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
       ttlChild.stdout!.on("data", (d) => {
         out += d;
-        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
         if (m) { clearTimeout(timer); resolve(m[1]); }
       });
     });
     const parsed = new URL(url);
     ttlBase = parsed.origin;
-    ttlToken = parsed.searchParams.get("t")!;
+    ttlToken = parsed.hash.replace(/^#t=/, "");
   });
 
   after(() => {
@@ -1025,13 +1038,13 @@ describe("ui server — named env sets", () => {
       const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
       libChild.stdout!.on("data", (d) => {
         out += d;
-        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
         if (m) { clearTimeout(timer); resolve(m[1]); }
       });
     });
     const parsed = new URL(url);
     libBase = parsed.origin;
-    libToken = parsed.searchParams.get("t")!;
+    libToken = parsed.hash.replace(/^#t=/, "");
   });
 
   after(() => {
@@ -1281,13 +1294,13 @@ describe("ui server — any folder", () => {
       const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
       bareChild.stdout!.on("data", (d) => {
         out += d;
-        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
         if (m) { clearTimeout(timer); resolve(m[1]); }
       });
     });
     const parsed = new URL(url);
     bareBase = parsed.origin;
-    bareToken = parsed.searchParams.get("t")!;
+    bareToken = parsed.hash.replace(/^#t=/, "");
   });
 
   after(() => {
@@ -1312,7 +1325,7 @@ describe("ui server — any folder", () => {
   });
 
   test("the setup panel is on the page for an unset folder, and the inline script still parses", async () => {
-    const html = await (await fetch(`${bareBase}/?t=${bareToken}`)).text();
+    const html = await (await fetch(`${bareBase}/`)).text();
     assert.ok(html.includes("This folder"), "the setup panel heading is missing");
     assert.ok(html.includes("set up for hush yet"), "the setup panel heading is missing");
     assert.ok(html.includes("Use these here"), "the setup button is missing");
@@ -1544,14 +1557,14 @@ describe("ui server — the Agent section's endpoints", () => {
         const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
         emptyChild.stdout!.on("data", (d) => {
           out += d;
-          const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+)/);
+          const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
           if (m) { clearTimeout(timer); resolve(m[1]); }
         });
       });
       const parsed = new URL(url);
       const r = await fetch(`${parsed.origin}/api/audit`, {
         method: "POST",
-        headers: { "x-hush-token": parsed.searchParams.get("t")!, "content-type": "application/json" },
+        headers: { "x-hush-token": parsed.hash.replace(/^#t=/, ""), "content-type": "application/json" },
         body: "{}",
       });
       assert.equal(r.status, 200);

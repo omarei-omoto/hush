@@ -128,8 +128,12 @@ describe("the built binary", { skip: !binary && "set HUSH_TEST_BINARY to a built
       assert.ok(!/\\u[0-9a-f]{4}/i.test(served), "the served page contains a literal \\u escape");
       assert.equal(served, PAGE, "the binary serves a different page from the source");
     } finally {
+      // Wait for it to be gone: Windows will not remove a directory a process
+      // still has as its working directory.
+      const exited = new Promise((resolve) => child.once("exit", resolve));
       child.kill();
-      rmSync(home, { recursive: true, force: true });
+      await exited;
+      rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
 });

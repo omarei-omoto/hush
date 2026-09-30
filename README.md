@@ -42,7 +42,8 @@ hush team rm sam                # re-keys the vault, re-seals every value
 > `node:crypto`) rather than anything invented here, and there is a
 > [differential test suite](./test/scheme-conformance.test.ts) against an
 > independent reimplementation — but that is not the same as someone qualified
-> having looked at it.
+> having looked at it. [docs/REVIEW-SCOPE.md](docs/REVIEW-SCOPE.md) is the brief
+> for the review it needs.
 >
 > Development happens on macOS; Linux is covered by CI. **Windows is in beta**:
 > your key is kept with DPAPI, approvals are a native Windows dialog, `hush run
@@ -172,7 +173,7 @@ as a site at **[omarei-omoto.github.io/hush](https://omarei-omoto.github.io/hush
 - **Your team** — [Adding someone](docs/guide/adding-a-teammate.md) · [Only some sets](docs/guide/giving-someone-only-some-sets.md) · [Removing someone](docs/guide/removing-someone.md) · [Membership changes](docs/guide/when-someone-else-changes-who-can-read-it.md) · [Merging](docs/guide/when-two-branches-both-change-the-vault.md) · [CI](docs/guide/ci.md) · [After someone leaves](docs/guide/what-someone-removed-could-still-use.md)
 - **Hardening** — [The security ladder](docs/guide/the-security-ladder.md) · [Touch ID](docs/guide/touch-id.md) · [Hardware keys](docs/guide/hardware-keys.md)
 - **Reference** — [Commands](docs/guide/commands.md) · [How the crypto works](docs/guide/how-the-crypto-works.md) · [What hush does not do](docs/guide/what-hush-does-not-do.md) · [The approval relay](docs/RELAY.md) · [Architecture](docs/ARCHITECTURE.md) · [Hardware unlock](docs/BIOMETRY.md)
-- **Trust** — [SECURITY.md](SECURITY.md) (threat model, reporting) · [Red team](docs/RED-TEAM.md) · [Every defect found](docs/AUDIT.md) · [RESEARCH.md](RESEARCH.md)
+- **Trust** — [SECURITY.md](SECURITY.md) (threat model, reporting) · [Review scope](docs/REVIEW-SCOPE.md) · [Red team](docs/RED-TEAM.md) · [Every defect found](docs/AUDIT.md) · [RESEARCH.md](RESEARCH.md)
 
 ## Contributing
 

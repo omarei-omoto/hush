@@ -158,3 +158,32 @@ describe("the GitHub Action", () => {
     assert.ok(!/HUSH_VERIFY_ATTESTATION/.test(action), "the action switches the attestation check off");
   });
 });
+
+describe("the MCP registry listing", () => {
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+    name: string; version: string; mcpName: string; scripts: Record<string, string>; files: string[];
+  };
+  const server = JSON.parse(readFileSync(join(root, "server.json"), "utf8")) as {
+    name: string; version: string; description: string;
+    packages: { registryType: string; identifier: string; version: string; transport: { type: string }; packageArguments: { value: string }[] }[];
+  };
+
+  test("server.json names this package, at this version, started as `hush mcp`", () => {
+    // The registry checks the published package's mcpName against server.json's name.
+    assert.equal(server.name, pkg.mcpName);
+    assert.equal(server.version, pkg.version);
+    const npm = server.packages.find((p) => p.registryType === "npm")!;
+    assert.equal(npm.identifier, pkg.name);
+    assert.equal(npm.version, pkg.version);
+    assert.equal(npm.transport.type, "stdio");
+    assert.deepEqual(npm.packageArguments.map((a) => a.value), ["mcp"]);
+    assert.ok(server.description.length <= 100, "the registry shows a one-line description");
+  });
+
+  test("npm version keeps package.json, src/version.ts and server.json in step", () => {
+    assert.match(pkg.scripts.version, /sync-version\.mjs/);
+    assert.match(pkg.scripts.version, /server\.json/);
+    const release = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+    assert.match(release, /require\('\.\/server\.json'\)\.version/, "the release does not check server.json's version");
+  });
+});

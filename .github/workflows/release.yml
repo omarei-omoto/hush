@@ -43,8 +43,9 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
           src="$(node -p "require('fs').readFileSync('src/version.ts','utf8').match(/VERSION = \"([^\"]+)\"/)[1]")"
-          echo "tag=$tag package.json=$pkg src/version.ts=$src"
-          test "$tag" = "$pkg" && test "$pkg" = "$src"
+          mcp="$(node -p "require('./server.json').version")"
+          echo "tag=$tag package.json=$pkg src/version.ts=$src server.json=$mcp"
+          test "$tag" = "$pkg" && test "$pkg" = "$src" && test "$pkg" = "$mcp"
 
       - run: npm ci
       - run: npm run typecheck

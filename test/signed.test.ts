@@ -18,8 +18,9 @@ import { fileURLToPath } from "node:url";
 import { Vault, memberKeyString, type VaultFile } from "../src/vault.ts";
 import {
   generateIdentity, encodeSecret, encodePub, decodePub, newDek, wrapDek, sealValue, dekCommit,
-  signerForIdentity, canonicalJson, encodeSpk,
+  signerForIdentity, canonicalJson, encodeSpk, fingerprint,
 } from "../src/crypto.ts";
+import { createCipheriv, randomBytes } from "node:crypto";
 import { verifyHeader, headerBytes } from "../src/header.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
@@ -250,6 +251,50 @@ describe("V-1b: the header is signed", () => {
     assert.equal(t.bob.run(["add", "BOBS=bob-wrote-this-value", "--to", "default"]).code, 0);
     assert.ok(verifyHeader(t.data()).ok);
     t.cleanup();
+  });
+
+  test("a v1 vault — the first format, values sealed without a generation — opens, and upgrades on its admin's first change", () => {
+    // Built by hand the way hush 0.1 wrote it: scheme hush/v1, and each value's
+    // AAD only "hush/v1|<set>|<KEY>", with no "v" on the entry.
+    const root = mkdtempSync(join(tmpdir(), "hush-v3-v1-"));
+    mkdirSync(join(root, ".hush"));
+    const alice = who("alice", () => root);
+    const dek = newDek();
+    const iv = randomBytes(12);
+    const c = createCipheriv("aes-256-gcm", dek, iv);
+    c.setAAD(Buffer.from("hush/v1|default|OLD"));
+    const ct = Buffer.concat([c.update("v1-value-here", "utf8"), c.final()]);
+    const fp = fingerprint(alice.id.pub);
+    const v1 = {
+      scheme: "hush/v1",
+      id: "vlt_0123456789abcdef",
+      name: "ancient",
+      createdAt: "2026-09-10T00:00:00.000Z",
+      dek: { generation: 1, wraps: { [fp]: wrapDek(dek, alice.id.pub) } },
+      recipients: { [fp]: { name: "alice", pk: encodePub(alice.id.pub), role: "admin", addedAt: "2026-09-10T00:00:00.000Z" } },
+      envs: {
+        default: {
+          OLD: { iv: iv.toString("base64"), ct: ct.toString("base64"), tag: c.getAuthTag().toString("base64"), gen: 1, updatedAt: "2026-09-10T00:00:00.000Z", updatedBy: "alice" },
+        },
+      },
+    };
+    const path = join(root, ".hush", "vault.json");
+    writeFileSync(path, JSON.stringify(v1, null, 2) + "\n");
+    const before = readFileSync(path, "utf8");
+
+    const read = alice.run(["run", "--", "sh", "-c", "test \"$OLD\" = v1-value-here && echo same"]);
+    assert.equal(read.code, 0, read.out);
+    assert.match(read.out, /same/, "the v1 value did not come out as written");
+    assert.equal(readFileSync(path, "utf8"), before, "reading a v1 vault rewrote it");
+
+    const bob = generateIdentity();
+    const added = alice.run(["team", "add", "bob", encodePub(bob.pub)]);
+    assert.equal(added.code, 0, added.out);
+    const d = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(d.scheme, "hush/v3", "the first admin change did not upgrade it");
+    assert.ok(verifyHeader(d).ok, JSON.stringify(verifyHeader(d)));
+    assert.equal(Vault.fromData(path, d).get(alice.id, "default", "OLD"), "v1-value-here", "the upgrade lost the old value");
+    for (const dir of [root, alice.home]) rmSync(dir, { recursive: true, force: true });
   });
 
   test("a v2 vault still opens, and is signed on its admin's first change to it", () => {

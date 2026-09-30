@@ -620,7 +620,10 @@ describe("the page script itself", () => {
   test("the page pulls nothing from the network", async () => {
     const { html } = await pageSource();
     assert.ok(!/<script[^>]+src=/.test(html), "the page loads an external script");
-    assert.ok(!/<link[^>]+href=/.test(html), "the page loads an external stylesheet");
+    // The tab icon is embedded (a data: URL); anything with a real URL would be fetched.
+    for (const [, href] of html.matchAll(/<link[^>]+href="([^"]*)"/g)) {
+      assert.match(href, /^data:/, `the page loads ${href.slice(0, 60)} from the network`);
+    }
     assert.ok(!/@import/.test(html), "the CSS imports something");
   });
 

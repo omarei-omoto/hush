@@ -56,7 +56,9 @@ function offerRow(where,set,link){
   return h("div",{class:"offer"},
     h("div",{class:"what"},h("b",{text:set.label}),h("div",{text:(set.description?set.description+" · ":"")+(set.keys.length?sample:"no keys yet")})),
     h("span",{class:"badge"},plural(set.keys.length,"key")),
-    h("button",{type:"button",class:"btn sm",onclick:function(){useHere(link,set.label,true)}},icon("plus"),"Use here"));
+    set.usableHere===false
+      ?h("button",{type:"button",class:"btn sm",disabled:true,title:"Only for "+set.onlyIn.join(", ")},"Other folders only")
+      :h("button",{type:"button",class:"btn sm",onclick:function(){useHere(link,set.label,true)}},icon("plus"),"Use here"));
 }
 
 function renderProject(page){

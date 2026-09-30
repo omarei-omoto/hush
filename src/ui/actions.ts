@@ -296,7 +296,10 @@ function setCard(where,set,ctx){
     tools.append(h("button",{type:"button",class:"iconbtn","aria-label":"Apply "+set.label+" later",disabled:ctx.order.index===S.used.length-1,
       onclick:function(){moveOrder(ctx.order.index,1)}},icon("down")));
   }
-  if(ctx.useToggle){
+  if(ctx.useToggle&&set.usableHere===false&&S.used.indexOf(link)<0){
+    // Kept for other folders: say so where the button would be, not after a click.
+    tools.append(h("button",{type:"button",class:"btn sm",disabled:true,title:"Only for "+set.onlyIn.join(", ")},"Other folders only"));
+  }else if(ctx.useToggle){
     const used=S.used.indexOf(link)>-1;
     tools.append(h("button",{type:"button",class:"btn sm"+(used?" on":""),onclick:function(){useHere(link,set.label,!used)},
       title:used?"Stop using it in "+folderName():null},used?[icon("check"),"Used here"]:"Use here"));

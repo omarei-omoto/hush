@@ -1,11 +1,9 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/omarei-omoto/hush/main/assets/logo-dark.png">
-    <img src="https://raw.githubusercontent.com/omarei-omoto/hush/main/assets/logo-light.png" alt="hush" width="260">
+    <img src="https://raw.githubusercontent.com/omarei-omoto/hush/main/assets/logo-light.png" alt="hush" width="300">
   </picture>
 </p>
-
-<h1 align="center">hush</h1>
 
 <p align="center"><strong>Envelope-encrypted team secrets your AI agent can use but never read.</strong></p>
 

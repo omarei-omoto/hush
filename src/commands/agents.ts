@@ -3,12 +3,12 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname, sep, resolve as resolvePath } from "node:path";
-import { fileURLToPath } from "node:url";
 import { assertProjectHushDir } from "../vault.ts";
 import { hushHome } from "../identity.ts";
 import { DEFAULT_POLICY } from "../mcp.ts";
 import { AGENTS, renderMcp, skillDescription } from "../agents.ts";
 import { selfCommand } from "../cli/programs.ts";
+import { asset } from "../assets.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, indent, info, warn } from "../cli/output.ts";
 import { askLine } from "../cli/prompts.ts";
@@ -159,12 +159,10 @@ export async function cmdInstallMcp(a: Args): Promise<void> {
 /** `hush install-skill` — teach the coding agent how to use all of this. */
 export async function cmdInstallSkill(a: Args): Promise<void> {
   const global = bool(a, "global");
-  // src/commands/ (or dist/commands/) → the package root → skills/.
-  const src = fileURLToPath(new URL("../../skills/hush/SKILL.md", import.meta.url));
-  if (!existsSync(src)) die(`Skill template missing at ${src}`);
+  const markdown = asset("skill");
+  if (!markdown) die("The skill template is missing from this copy of hush.");
 
   const root = ctxLoose(a).root;
-  const markdown = readFileSync(src, "utf8");
   const forced = str(a, "for");
   const targets = forced
     ? AGENTS.filter((g) => g.id === forced)

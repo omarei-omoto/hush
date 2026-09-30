@@ -1,14 +1,14 @@
 /**
  * `hush install-mcp` and `hush install-skill` — tell coding agents about hush.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
-import { join, dirname, extname, resolve as resolvePath } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertProjectHushDir } from "../vault.ts";
 import { hushHome } from "../identity.ts";
 import { DEFAULT_POLICY } from "../mcp.ts";
 import { AGENTS, renderMcp, skillDescription } from "../agents.ts";
-import { onPath } from "../cli/programs.ts";
+import { selfCommand } from "../cli/programs.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, indent, info, warn } from "../cli/output.ts";
 import { askLine } from "../cli/prompts.ts";
@@ -25,17 +25,7 @@ import { ctxLoose, describePolicyEffect, ensureFloorSaying } from "../cli/contex
  * the right program.
  */
 function mcpEntry(): { command: string; args: string[] } {
-  // src/cli.ts from a checkout, dist/cli.js from an install: the entry point
-  // beside this file's own directory, in this file's own extension.
-  const here = fileURLToPath(import.meta.url);
-  const cliPath = join(dirname(here), "..", `cli${extname(here)}`);
-  const onPathHush = onPath("hush");
-  try {
-    if (onPathHush && realpathSync(onPathHush) === realpathSync(join(dirname(cliPath), "..", "bin", "hush.js"))) {
-      return { command: "hush", args: ["mcp"] };
-    }
-  } catch { /* fall through to the absolute path */ }
-  return { command: "node", args: [cliPath, "mcp"] };
+  return selfCommand(["mcp"]);
 }
 
 /**

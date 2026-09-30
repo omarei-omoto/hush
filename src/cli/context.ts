@@ -3,7 +3,7 @@
  * one-time setup dialogue for a folder hush has not been told about yet.
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { Vault, locateProject, slugifyEnv, assertScopeName, assertProjectHushDir } from "../vault.ts";
 import { loadIdentity, createIdentity, hushHome } from "../identity.ts";
 import { scanRepo } from "../scan.ts";
@@ -12,7 +12,7 @@ import { ensureFloor } from "../policy.ts";
 import { usedSets, librarySets, loadLinks, saveLinks, openGlobal, ensureProjectVault, writeProjectDotfiles, suggestSets, linkNameFor } from "../library.ts";
 import { checkAndRecord, describeRollback } from "../integrity.ts";
 import { approvalPromptAvailable } from "../approval.ts";
-import { bold, cyan, die, dim, green, info, red, shown, warn } from "../cli/output.ts";
+import { bold, cyan, die, dim, green, info, red, shown, warn, yellow } from "../cli/output.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { askLine } from "../cli/prompts.ts";
 
@@ -56,6 +56,11 @@ function checkRollback(vault: Vault): void {
       process.stderr.write(line ? `  ${dim(line)}\n` : "\n");
     }
     process.stderr.write("\n");
+  }
+  // A merge that left keys to choose keeps this branch's side in the file
+  // until each is picked; say so on every command until it is done.
+  if (existsSync(join(dirname(vault.path), "merge-conflicts.json"))) {
+    process.stderr.write(yellow("! a vault merge still has keys to choose — hush merge status") + "\n");
   }
 }
 

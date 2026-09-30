@@ -57,7 +57,7 @@ hush team rm sam                # re-keys the vault, re-seals every value
 - **Using it** — [Sets](#sets) · [Coming from another tool](#coming-from-another-tool) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [Credentials that are a file](#credentials-that-are-a-file) · [The app](#the-app)
 - **Checking config** — [What a value should look like](#what-a-value-should-look-like) · [Finding what a codebase needs](#finding-what-a-codebase-needs)
 - **Agents** — [What your agent gets](#what-your-agent-gets) · [Adding a key off-transcript](#adding-a-key-without-pasting-it-into-the-chat) · [Approvals](#approving-what-runs) · [Policy](#what-the-agent-may-run)
-- **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [Membership changes](#when-someone-else-changes-who-can-read-it) · [CI](#ci)
+- **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [Membership changes](#when-someone-else-changes-who-can-read-it) · [Merging](#when-two-branches-both-change-the-vault) · [CI](#ci)
 - **Hardening** — [The security ladder](#the-security-ladder) · [Touch ID](#touch-id) · [Hardware keys](#hardware-keys)
 - **Reference** — [Commands](#commands) · [How the crypto works](#how-the-crypto-works) · [What hush does not do](#what-hush-does-not-do)
 - **Contributing** — [Development](#development) · [Contributing](#contributing-1) · [License](#license)
@@ -736,6 +736,36 @@ mentioned once. Your coding agent is told never to accept on your behalf, and
 with approvals on, `hush team accept` asks on your screen like any other gated
 action.
 
+## When two branches both change the vault
+
+Two people adding keys on two branches is ordinary; a vault file that conflicts
+as a wall of base64 is not something anyone can resolve by eye. hush merges it
+key by key:
+
+```bash
+hush merge-driver --install   # once per clone: git hands vault merges to hush
+```
+
+After that, a `git merge` or `git pull` that touches `.hush/vault.json` just
+works — keys added on each side are kept, a rotation or a removal on one branch
+wins and everything from the other branch is re-sealed under the new key, and a
+member added on one branch while the other rotated is given the new key. When
+both branches changed the same key differently, git stops, the file keeps your
+branch's value, and you choose:
+
+```bash
+hush merge status                    # set, key, who changed it on each side, when — never a value
+hush merge pick STRIPE_KEY --theirs  # or --ours
+```
+
+Both branches rotating the key (two revocations) is never merged automatically.
+
+The driver is switched on per clone, in `.git/info/attributes` and your git
+config, never in a committed file: git falls back to a line-by-line text merge
+when a named driver is not configured, which could quietly break a vault. A
+teammate who has not installed it still gets a safe conflict, and `hush merge`
+finishes it.
+
 ## CI
 
 ```bash
@@ -886,6 +916,8 @@ sharing
   hush team accept|reject       someone else changed who can read the vault — check, then decide
   hush id [--create]            show or create this machine's key
   hush link <vault> [--env e]   point this repo at a vault you already have
+  hush merge-driver --install   merge vault.json key by key in this clone's git merges
+  hush merge [status|pick]      finish a git merge that stopped on the vault; choose per key
 
 hardening
   hush level                    where you are on the security ladder

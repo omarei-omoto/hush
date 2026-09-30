@@ -260,7 +260,7 @@ export function writeProjectDotfiles(hushDir: string): void {
   mkdirSync(hushDir, { recursive: true });
   const gitignore = join(hushDir, ".gitignore");
   if (!existsSync(gitignore)) {
-    writeFileSync(gitignore, ["audit.log", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", ""].join("\n"));
+    writeFileSync(gitignore, ["audit.log", "audit.log.*", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", "merge-conflicts.json", ""].join("\n"));
   }
   const attrs = join(hushDir, ".gitattributes");
   if (!existsSync(attrs)) {

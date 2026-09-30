@@ -62,6 +62,8 @@ ${bold("sharing")}
   hush team accept|reject       someone else changed who can read the vault — check, then decide
   hush id [--create]            show or create this machine's key
   hush link <vault> [--env e]   point this repo at a vault you already have
+  hush merge-driver --install   merge vault.json key by key in this clone's git merges
+  hush merge [status|pick]      finish a git merge that stopped on the vault; choose per key
 
 ${bold("hardening")}
   hush level                    where you are on the security ladder

@@ -593,7 +593,7 @@ function assertVaultShape(data: VaultFile, path: string): void {
   const bad = (why: string): never => {
     throw new Error(
       `The vault at ${path} is malformed: ${why}.\n` +
-        `  A vault is not merged line by line — restore one whole side: git checkout --theirs ${path}`,
+        `  A vault is not merged line by line. After a git merge: hush merge (it merges key by key).`,
     );
   };
   const isObject = (x: unknown): x is Record<string, unknown> =>
@@ -742,6 +742,18 @@ export class Vault {
     return v;
   }
 
+  /**
+   * A vault from a document already in memory — one side of a merge, say —
+   * checked exactly as a file would be. Never saved unless the caller does.
+   */
+  static fromData(path: string, data: VaultFile): Vault {
+    if (data?.scheme !== SCHEME && data?.scheme !== SCHEME_V2) {
+      throw new Error(`Unsupported vault scheme ${data?.scheme ?? "(none)"} in ${path}.`);
+    }
+    assertVaultShape(data, path);
+    return new Vault(path, data);
+  }
+
   static open(path: string): Vault {
     if (!existsSync(path)) throw new Error(`No vault at ${path}. Run \`hush init\`.`);
     const raw = readFileSync(path, "utf8");
@@ -756,8 +768,8 @@ export class Vault {
       throw new Error(
         conflicted
           ? `The vault at ${path} still contains git conflict markers.\n` +
-            `  Resolve it by taking ONE side whole — a vault cannot be merged line by line.\n` +
-            `  Whoever's changes you drop can re-add them with \`hush set\`.`
+            `  A vault cannot be merged line by line. Run \`hush merge\` — it merges it key by key —\n` +
+            `  and \`hush merge-driver --install\` so git does that itself next time.`
           : `The vault at ${path} is not valid JSON (${jsonErrorSummary(e)}).\n` +
             `  Restore it from git history: git checkout HEAD -- ${path}`,
       );

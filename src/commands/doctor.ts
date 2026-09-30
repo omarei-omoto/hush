@@ -16,6 +16,7 @@ import { inspect, pendingChanges, hasProblems } from "../integrity.ts";
 import { biometryStatus } from "../biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin } from "../age.ts";
 import { type Args } from "../cli/args.ts";
+import { driverInstalled } from "./merge.ts";
 import { bold, cyan, dim, green, info, red } from "../cli/output.ts";
 import { readIfExists } from "../cli/programs.ts";
 
@@ -154,6 +155,14 @@ export async function cmdDoctor(_a: Args): Promise<void> {
     const agePath = ageIdentityPath();
     const plugin = agePath ? identityPlugin(agePath) : null;
     check(Boolean(plugin), "hardware key", plugin ? `age-plugin-${plugin}` : "age installed, but the identity is a software key");
+  }
+
+  // A vault in git merges key by key only where this clone has asked for it.
+  if (vault) {
+    const merging = driverInstalled(root);
+    if (merging !== null) {
+      check(merging, "merge driver", merging ? "vault merges go key by key" : "hush merge-driver --install (or hush merge after a conflict)");
+    }
   }
 
   // Loose .env files are the thing hush exists to remove.

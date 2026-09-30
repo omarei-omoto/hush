@@ -34,9 +34,9 @@
  * A conflicted key keeps *our* side in the merged file and is listed, so the
  * file stays a working vault while the choice is made (`hush merge pick`).
  */
-import { wrapDek, decodePub, sealValue, openValue, newDek, SCHEME_V3, type Opener } from "./crypto.ts";
-import { isAgeRecipient, wrapDekWithAge } from "./age.ts";
+import { sealValue, openValue, newDek, SCHEME_V3, type Opener } from "./crypto.ts";
 import { verifyHeader, setKeyCommit } from "./header.ts";
+import { wrapFor } from "./vault-core.ts";
 import { Vault, type VaultFile, type SecretEntry, type EnvMeta, type DekWrap, type Recipient, type SetKey } from "./vault.ts";
 
 export interface SideInfo {
@@ -130,9 +130,6 @@ class Side {
 function emptyLike(v: VaultFile): VaultFile {
   return { ...v, envs: {}, meta: {}, recipients: {}, setKeys: {}, dek: { generation: v.dek.generation, wraps: {} } };
 }
-
-const wrapFor = (key: Buffer, r: Recipient): DekWrap =>
-  r.type === "age" || isAgeRecipient(r.pk) ? { age: wrapDekWithAge(key, r.pk) } : wrapDek(key, decodePub(r.pk));
 
 export function mergeVaults(
   baseData: VaultFile | null,

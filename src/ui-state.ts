@@ -351,7 +351,7 @@ export function state(ctx: UiCtx) {
           role: m.role,
           pk: m.pk,
           fingerprint: m.fingerprint,
-          kind: m.kind === "age" ? "hardware" : "key",
+          kind: m.kind === "age" || m.kind === "se" ? "hardware" : "key",
           canDecrypt: m.canDecrypt,
           // hush/v3: a scoped member reads only these; a CI identity is a machine.
           sets: m.sets ?? null,

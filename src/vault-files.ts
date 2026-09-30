@@ -19,8 +19,13 @@ import {
   ValidationError,
   isValidationError,
   type Opener,
+  decodeSePub,
+  encodeSePub,
+  isSeRecipient,
+  seFingerprint,
   type Sealed,
   type Wrap,
+  type SeWrap,
 } from "./crypto.ts";
 import { isAgeRecipient, ageFingerprint } from "./age.ts";
 import { hushHome } from "./identity.ts";
@@ -30,8 +35,8 @@ export interface Recipient {
   pk: string;
   role: "admin" | "member";
   addedAt: string;
-  /** Absent means "x25519", so older vaults load unchanged. */
-  type?: "x25519" | "age";
+  /** Absent means "x25519", so older vaults load unchanged. "se": a Secure Enclave key. */
+  type?: "x25519" | "age" | "se";
   /**
    * hush/v3: this member's signing key (`hush_spk_…`). An admin needs one to
    * change who can read the vault; the header they sign is checked against it.
@@ -59,9 +64,10 @@ export interface SetKey {
 }
 
 /** A data key wrapped either natively or by age (possibly via a hardware plugin). */
-export type DekWrap = Wrap | { age: string };
+export type DekWrap = Wrap | { age: string } | SeWrap;
 
 export const isAgeWrap = (w: DekWrap): w is { age: string } => "age" in w;
+export const isSeWrap = (w: DekWrap): w is SeWrap => "se" in w && (w as SeWrap).se === true;
 
 export interface SecretEntry extends Sealed {
   /**
@@ -478,9 +484,10 @@ export function resolveVaultPath(start = process.cwd()): { vaultPath: string; hu
 export function candidatesOf(
   id: Opener,
   includeAge = true,
-): { fp: string; kind: "x25519" | "age"; recipient?: string }[] {
-  const out: { fp: string; kind: "x25519" | "age"; recipient?: string }[] = [];
+): { fp: string; kind: "x25519" | "age" | "se"; recipient?: string }[] {
+  const out: { fp: string; kind: "x25519" | "age" | "se"; recipient?: string }[] = [];
   if (id.pub) out.push({ fp: fingerprint(id.pub), kind: "x25519" });
+  if (id.se) out.push({ fp: seFingerprint(id.se.pub), kind: "se" });
   if (includeAge) {
     for (const r of id.age?.recipients ?? []) {
       out.push({ fp: ageFingerprint(r), kind: "age", recipient: r });
@@ -492,6 +499,7 @@ export function candidatesOf(
 /** How to name this opener in an error message. */
 export function describeOpener(id: Opener): string {
   if (id.pub) return encodePub(id.pub);
+  if (id.se) return encodeSePub(id.se.pub);
   const first = id.age?.recipients[0];
   return first ?? "(no identity)";
 }
@@ -623,7 +631,13 @@ export function assertVaultShape(data: VaultFile, path: string): void {
     // falls over later inside `hush team rm` — in the middle of a revocation,
     // which is the worst moment to discover the file was malformed all along.
     const pk = r.pk as string;
-    if (!isAgeRecipient(pk)) {
+    if (isSeRecipient(pk)) {
+      try {
+        decodeSePub(pk);
+      } catch {
+        bad(`member "${(r.name as string).slice(0, 24)}" has an enclave key that is not one`);
+      }
+    } else if (!isAgeRecipient(pk)) {
       try {
         decodePub(pk);
       } catch {

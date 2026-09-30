@@ -10,11 +10,15 @@
 import { existsSync, mkdirSync, readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { SCHEME, SCHEME_V2, SCHEME_V3, wrapDek, unwrapDek, decodePub, encodePub, encodeSpk, fingerprint, ValidationError, type Opener } from "./crypto.ts";
+import {
+  SCHEME, SCHEME_V2, SCHEME_V3, wrapDek, unwrapDek, decodePub, encodePub, encodeSpk, fingerprint, ValidationError,
+  isSeRecipient, decodeSePub, encodeSePub, seFingerprint, wrapDekP256, unwrapDekP256, type Opener,
+} from "./crypto.ts";
+import { enclaveAgree } from "./enclave.ts";
 import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from "./age.ts";
 import { signerFor } from "./identity.ts";
 import { signHeader, verifyHeader, vaultKeyCommit } from "./header.ts";
-import { withVaultLock, assertVaultShape, hashOf, describeOpener, candidatesOf, safeText, isAgeWrap, type VaultFile, type Recipient, type EnvMeta, type DekWrap } from "./vault-files.ts";
+import { withVaultLock, assertVaultShape, hashOf, describeOpener, candidatesOf, safeText, isAgeWrap, isSeWrap, type VaultFile, type Recipient, type EnvMeta, type DekWrap } from "./vault-files.ts";
 
 export const SCHEMES = [SCHEME, SCHEME_V2, SCHEME_V3];
 
@@ -62,9 +66,13 @@ export function setTrustHook(hook: TrustHook | null): void {
  * encryption key and the signing key together — what `hush id` prints since
  * 1.0), or an age recipient.
  */
-export function parseMemberKey(input: string): { type: "x25519" | "age"; pk: string; fp: string; pub?: Buffer; spk?: string } {
+export function parseMemberKey(input: string): { type: "x25519" | "age" | "se"; pk: string; fp: string; pub?: Buffer; spk?: string } {
   const t = input.trim();
   if (isAgeRecipient(t)) return { type: "age", pk: t, fp: ageFingerprint(t) };
+  if (isSeRecipient(t)) {
+    const pub = decodeSePub(t);
+    return { type: "se", pk: encodeSePub(pub), fp: seFingerprint(pub), pub };
+  }
   if (!t.startsWith("hush_pk_")) throw new ValidationError(`not a hush public key or an age recipient: ${t.slice(0, 16)}…`);
   const raw = Buffer.from(t.slice(8), "base64url");
   if (raw.length === 64) {
@@ -89,12 +97,19 @@ export function memberKeyString(id: Opener): string {
  * through moving to hardware, so the recipient decides which.
  */
 function signerOf(id: Opener, r: Recipient, create = false) {
+  // Neither a hardware age key nor an enclave key can sign; both sign with
+  // this machine's stored signing key (identity.ts).
   if (r.type === "age" || isAgeRecipient(r.pk)) return signerFor({ age: id.age }, create);
+  if (r.type === "se" || isSeRecipient(r.pk)) return signerFor({ se: id.se }, create);
   return id.pub && id.priv ? signerFor({ pub: id.pub, priv: id.priv }) : null;
 }
 
 export const wrapFor = (key: Buffer, r: Recipient): DekWrap =>
-  r.type === "age" || isAgeRecipient(r.pk) ? { age: wrapDekWithAge(key, r.pk) } : wrapDek(key, decodePub(r.pk));
+  r.type === "age" || isAgeRecipient(r.pk)
+    ? { age: wrapDekWithAge(key, r.pk) }
+    : r.type === "se" || isSeRecipient(r.pk)
+      ? wrapDekP256(key, decodeSePub(r.pk))
+      : wrapDek(key, decodePub(r.pk));
 
 export abstract class VaultCore {
   readonly path: string;
@@ -235,9 +250,15 @@ export abstract class VaultCore {
   }
 
   protected unwrap(wrap: DekWrap, id: Opener): Buffer {
-    // An age wrap may be backed by a YubiKey or the Secure Enclave, so this
-    // line is where the human gets prompted to touch something.
-    return isAgeWrap(wrap) ? unwrapDekWithAge(wrap.age, id.age!.identityPath) : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
+    // An age wrap may be backed by a YubiKey or the Secure Enclave, and an
+    // enclave wrap always is, so this line is where the human gets prompted to
+    // touch something.
+    if (isAgeWrap(wrap)) return unwrapDekWithAge(wrap.age, id.age!.identityPath);
+    if (isSeWrap(wrap)) {
+      const shared = enclaveAgree(id.se!.blobPath, Buffer.from(wrap.epk, "base64"), `open vault "${safeText(this.data.name, 40)}"`);
+      return unwrapDekP256(wrap, shared, id.se!.pub);
+    }
+    return unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
   }
 
   /**

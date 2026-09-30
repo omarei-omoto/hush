@@ -160,9 +160,11 @@ export class Vault extends VaultValues {
     // Your own hardware key, added by you (the `hush secure --hardware` step):
     // it cannot sign, so it carries this machine's signing key, which is what
     // will sign for it once the software key is retired.
+    // The same for your own enclave key (`hush secure --hardware` on a Mac).
     const ownAge = parsed.type === "age" && Boolean(id.age?.recipients.includes(parsed.pk));
-    const spk =
-      opts.spk ?? parsed.spk ?? (ownAge && role === "admin" ? encodeSpk(signerFor({ age: id.age }, true)!.spk) : undefined);
+    const ownEnclave = parsed.type === "se" && Boolean(id.se && parsed.pub?.equals(id.se.pub));
+    const ownSigner = ownAge ? signerFor({ age: id.age }, true) : ownEnclave ? signerFor({ se: id.se }, true) : null;
+    const spk = opts.spk ?? parsed.spk ?? (ownSigner && role === "admin" ? encodeSpk(ownSigner.spk) : undefined);
     if (spk) decodeSpk(spk);
     const scoped = Boolean(opts.sets?.length);
     if (role === "admin" && (scoped || opts.ci)) {
@@ -507,7 +509,7 @@ export class Vault extends VaultValues {
         canDecrypt: r.sets
           ? r.sets.some((env) => Boolean(this.data.setKeys?.[env]?.wraps[fp]))
           : Boolean(this.data.dek.wraps[fp]),
-        kind: r.type === "age" || isAgeRecipient(r.pk) ? "age" : "x25519",
+        kind: r.type === "se" ? "se" : r.type === "age" || isAgeRecipient(r.pk) ? "age" : "x25519",
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }

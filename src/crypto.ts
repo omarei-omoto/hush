@@ -103,6 +103,8 @@ export interface Opener {
   pub?: Buffer;
   priv?: Buffer;
   age?: { recipients: string[]; identityPath: string };
+  /** A Secure Enclave identity: its public key, and the sealed blob only this Mac's enclave can use. */
+  se?: { pub: Buffer; blobPath: string };
 }
 
 // ---------------------------------------------------------------- identities
@@ -325,3 +327,62 @@ export function safetyNumber(a: Buffer, b: Buffer): string {
   }
   return groups.join(" ");
 }
+
+// ------------------------------------------------------- Secure Enclave keys
+//
+// An enclave identity is a P-256 key agreement key (see native/hush-enclave.swift).
+// Wrapping the data key for one is the same construction as for X25519 —
+// ephemeral key agreement, HKDF-SHA256, AES-256-GCM with the recipient's key as
+// AAD — on the curve the enclave supports. The unwrap half needs the enclave's
+// shared secret, which only the helper can produce, so it takes that as input.
+
+export const SE_PREFIX = "hush_se_";
+
+/** An enclave recipient: `hush_se_` + the 65-byte X9.63 P-256 public key. */
+export const encodeSePub = (pub: Buffer): string => SE_PREFIX + b64u(pub);
+
+export function decodeSePub(s: string): Buffer {
+  const t = s.trim();
+  if (!t.startsWith(SE_PREFIX)) throw new ValidationError(`not a hush enclave key: ${t.slice(0, 16)}…`);
+  const raw = ub64u(t.slice(SE_PREFIX.length));
+  if (raw.length !== 65 || raw[0] !== 0x04) throw new ValidationError("an enclave key is a 65-byte uncompressed P-256 point");
+  return raw;
+}
+
+export const isSeRecipient = (s: string): boolean => s.trim().startsWith(SE_PREFIX);
+
+const p256Public = (x963: Buffer): KeyObject =>
+  createPublicKey({ key: { kty: "EC", crv: "P-256", x: b64u(x963.subarray(1, 33)), y: b64u(x963.subarray(33, 65)) }, format: "jwk" });
+
+function deriveSeKek(shared: Buffer, ephPub: Buffer, recipientPub: Buffer): Buffer {
+  return Buffer.from(hkdfSync("sha256", shared, Buffer.concat([ephPub, recipientPub]), Buffer.from("hush/v3/se-kek"), 32));
+}
+
+/** A data key wrapped for an enclave recipient. `epk` is the ephemeral P-256 key, X9.63. */
+export interface SeWrap extends Wrap {
+  se: true;
+}
+
+export function wrapDekP256(dek: Buffer, recipientPub: Buffer): SeWrap {
+  const eph = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = eph.publicKey.export({ format: "jwk" }) as { x: string; y: string };
+  const ephPub = Buffer.concat([Buffer.from([0x04]), ub64u(jwk.x), ub64u(jwk.y)]);
+  const shared = diffieHellman({ privateKey: eph.privateKey, publicKey: p256Public(recipientPub) });
+  const kek = deriveSeKek(shared, ephPub, recipientPub);
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", kek, iv);
+  c.setAAD(recipientPub);
+  const ct = Buffer.concat([c.update(dek), c.final()]);
+  return { se: true, epk: b64(ephPub), iv: b64(iv), ct: b64(ct), tag: b64(c.getAuthTag()) };
+}
+
+/** Open an enclave wrap, given the shared secret the enclave agreed with `wrap.epk`. */
+export function unwrapDekP256(wrap: SeWrap, shared: Buffer, recipientPub: Buffer): Buffer {
+  const kek = deriveSeKek(shared, ub64(wrap.epk), recipientPub);
+  const d = createDecipheriv("aes-256-gcm", kek, ub64(wrap.iv));
+  d.setAAD(recipientPub);
+  d.setAuthTag(ub64(wrap.tag));
+  return Buffer.concat([d.update(ub64(wrap.ct)), d.final()]);
+}
+
+export const seFingerprint = (pub: Buffer): string => createHash("sha256").update(pub).digest("hex").slice(0, 16);

@@ -68,6 +68,7 @@ ${bold("sharing")}
   hush team verify <name>       a safety number to compare over a call
   hush ci create <name> --sets a,b    a CI identity that reads only those sets
   hush id [--create]            show or create this machine's key
+  hush id --enclave             make a key in this Mac's Secure Enclave (Touch ID per use)
   hush link <vault> [--env e]   point this repo at a vault you already have
   hush merge-driver --install   merge vault.json key by key in this clone's git merges
   hush merge [status|pick]      finish a git merge that stopped on the vault; choose per key

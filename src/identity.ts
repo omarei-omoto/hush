@@ -17,11 +17,12 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
-  generateIdentity, encodeSecret, decodeSecret, encodePub, signerForIdentity, signerFromSeed,
+  generateIdentity, encodeSecret, decodeSecret, encodePub, encodeSePub, signerForIdentity, signerFromSeed,
   type Identity, type Opener, type Signer,
 } from "./crypto.ts";
 import { ageIdentityPath, recipientsForIdentity, ageAvailable } from "./age.ts";
 import { powershellPath, restrictToOwner } from "./platform.ts";
+import { loadEnclaveIdentity } from "./enclave.ts";
 
 /**
  * Resolved per call. As a module constant this captured HUSH_HOME at import,
@@ -177,17 +178,22 @@ export function loadIdentity(account = "default"): ResolvedIdentity | null {
     configurable: true,
   };
 
+  // A Secure Enclave identity, if this Mac has made one: only its public half
+  // and the path of the sealed blob. Reading them wakes nothing.
+  const se = platform() === "darwin" ? loadEnclaveIdentity() ?? undefined : undefined;
+
   if (x25519) {
     return Object.defineProperty(
-      { ...x25519.id, source: x25519.source } as ResolvedIdentity,
+      { ...x25519.id, ...(se ? { se } : {}), source: x25519.source } as ResolvedIdentity,
       "age",
       ageProp,
     );
   }
 
-  // No software key: an age identity is the only way in, so resolve it eagerly.
+  // No software key: an age identity or the enclave is the only way in.
   const age = loadAgeOpener();
-  if (age) return { age, source: `age identity (${age.identityPath})` };
+  if (age) return { age, ...(se ? { se } : {}), source: `age identity (${age.identityPath})` };
+  if (se) return { se, source: "Secure Enclave" };
   return null;
 }
 
@@ -323,7 +329,7 @@ export function migrateIdentityToKeychain(account = "default"): { ok: boolean; m
 
 /** How to show this identity to a human. An age identity shows its recipient. */
 export const publicKeyOf = (id: Opener): string =>
-  id.pub ? encodePub(id.pub) : (id.age?.recipients[0] ?? "(no identity)");
+  id.pub ? encodePub(id.pub) : id.se ? encodeSePub(id.se.pub) : (id.age?.recipients[0] ?? "(no identity)");
 
 // ------------------------------------------------------------------ signing
 

@@ -54,7 +54,9 @@ export async function cmdVerify(a: Args): Promise<void> {
   else info(`${broken.length ? red("✗") : green("✓")} decryption  ${dim(`${ok} value(s) readable`)}`);
   for (const b of broken) info(`    ${red(b)}`);
 
-  const orphaned = Object.keys(vault.data.recipients).filter((fp) => !vault.data.dek.wraps[fp]);
+  // A scoped member holds no vault key by design — only the keys of its sets —
+  // so it is orphaned only if it holds none of those either.
+  const orphaned = vault.members().filter((m) => !m.canDecrypt);
   info(`${orphaned.length ? yellow("!") : green("✓")} members  ${dim(`${vault.members().length} listed, ${orphaned.length} without a key wrap`)}`);
 
   // The other direction, and the one that matters: a key wrap nobody is listed

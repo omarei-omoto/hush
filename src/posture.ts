@@ -21,6 +21,7 @@ import { loadPolicy } from "./mcp.ts";
 import { globalVaultExists } from "./library.ts";
 import { mcpRegistrations } from "./agents.ts";
 import { keyAges } from "./freshness.ts";
+import { loadEnclaveIdentity } from "./enclave.ts";
 
 export type Rung = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -142,7 +143,9 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
 
   // Rung 5: the private key is non-extractable, held by hardware via an age plugin.
   const agePath = ageAvailable() ? ageIdentityPath() : null;
-  const hardware = Boolean(agePath && identityPlugin(agePath));
+  // Or this Mac's Secure Enclave (enclave.ts): non-extractable, and every use
+  // needs a fingerprint — the same rung, with nothing to buy or install.
+  const hardware = Boolean(agePath && identityPlugin(agePath)) || Boolean(loadEnclaveIdentity());
 
   const strayEnv = projectRoot
     ? [".env", ".env.local", ".env.production"].filter((f) => existsSync(join(projectRoot, f)))

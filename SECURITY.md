@@ -189,8 +189,9 @@ The floor and the approval now hold on their own terms: the floor keeps the
 neither of which the caller can supply.
 
 If that matters for your threat model, use a hardware identity
-([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with `age-plugin-yubikey` or
-`age-plugin-se` the key is non-extractable and every unwrap needs a touch.
+([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with a Secure Enclave key
+(`hush secure --hardware` on a Mac) or `age-plugin-yubikey`, the key is
+non-extractable and every unwrap needs a touch.
 
 **Redaction is defence in depth, not a boundary.** It masks known values in a
 child's output. It cannot see a value that has been base64'd, encrypted,

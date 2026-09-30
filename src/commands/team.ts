@@ -66,7 +66,7 @@ export async function cmdTeam(a: Args): Promise<void> {
       const role = m.ci ? cyan("ci    ") : m.role === "admin" ? yellow("admin ") : dim("member");
       info(
         `  ${m.name.padEnd(width)}  ${role}  ` +
-          `${dim(m.pk.slice(0, 20) + "…")}  ${m.kind === "age" ? cyan("age") : dim("key")}  ${state}  ${scope}`.trimEnd(),
+          `${dim(m.pk.slice(0, 20) + "…")}  ${m.kind === "se" ? cyan("enclave") : m.kind === "age" ? cyan("age") : dim("key")}  ${state}  ${scope}`.trimEnd(),
       );
     }
     if (unaccepted.size) {

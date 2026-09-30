@@ -232,6 +232,11 @@ describe("F-2: a member who reads only some sets", () => {
     const v = Vault.fromData("x", d);
     assert.throws(() => v.materialize(t.bob.id, "prod"));
     assert.throws(() => v.materialize(t.bob.id, "default"));
+
+    // And `hush verify` does not call a scoped member orphaned: holding no vault
+    // key is what scoped means.
+    const verified = t.alice.run(["verify"]);
+    assert.match(verified.out, /2 listed, 0 without a key wrap/, verified.out);
     t.cleanup();
   });
 

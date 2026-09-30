@@ -61,58 +61,71 @@ request. Someone at your unlocked laptop cannot use your keys.
 
 **What it does not buy:** protection of the key at rest. It is a gate.
 
-## Tier 2 — Secure Enclave identity (the real thing, blocked on signing)
+## Tier 2 — Secure Enclave identity (shipped in 1.0)
 
-The correct end state. Instead of an X25519 key in the login keychain, your hush
-identity becomes a **P-256 key generated inside the Secure Enclave**, created
-with:
+The correct end state, and it no longer needs anything bought or installed:
 
-```swift
-SecAccessControlCreateWithFlags(
-  kCFAllocatorDefault,
-  kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-  [.privateKeyUsage, .biometryCurrentSet],   // ← invalidated if fingerprints change
-  &error)
+```bash
+hush secure --hardware        # on a Mac: makes the key, adds it to the vault as you
+hush id --enclave             # or just make the key and print it
 ```
 
-The private key **cannot be extracted, by anyone, including root**. Unwrapping
-the vault's data key becomes `SecKeyCopyKeyExchangeResult(...)`, which the
-enclave will only perform after a successful Touch ID.
+Your hush identity becomes a **P-256 key generated inside the Secure Enclave**,
+created with `[.privateKeyUsage, .userPresence]`. The private key **cannot be
+extracted, by anyone, including root**. What hush keeps is the sealed
+`dataRepresentation` the enclave hands back (`~/.hush/enclave-identity.blob`) —
+useless on any other Mac — and the public half beside it. Unwrapping the vault's
+data key is a key agreement the enclave performs only after a fingerprint (or
+the Mac's password, the system fallback), enforced by the enclave itself.
 
-This fits hush's existing crypto almost exactly: the DEK wrap is already
-ephemeral-ECDH → HKDF-SHA256 → AES-256-GCM. Swapping X25519 for P-256 for these
-recipients is a contained change, because Apple's `.ecdhKeyExchangeStandard` and
-Node's `diffieHellman` both return the raw X coordinate.
+The wrap mirrors hush's X25519 one: ephemeral P-256 ECDH → HKDF-SHA256 (salt
+`epk ‖ recipient`, info `hush/v3/se-kek`) → AES-256-GCM with the recipient's
+public key as AAD. Members show up as `hush_se_…` (65-byte X9.63 point, base64url)
+and as `enclave` in `hush team ls`. An enclave key cannot sign, so like an age
+hardware key it carries the machine's stored Ed25519 signing key (`--spk`); your
+own enclave key, added by you as an admin, gets it automatically.
 
-### Why it isn't shipped
+`test/enclave.test.ts` checks the wrap against an independent WebCrypto
+implementation and runs the whole upgrade — add the enclave key, read with it
+alone, retire the software key, the enclave member signs the change — through a
+software P-256 stand-in. The same flow was run against the real enclave on an
+M1 Max, macOS 26.
 
-Creating a *permanent* Secure Enclave key requires the `keychain-access-groups`
-entitlement. Verified on an M1 Max running macOS 26:
+### Why this used to be blocked, and isn't
+
+The first attempt made a *keychain* Secure Enclave key (`SecKeyCreateRandomKey`
+with `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent`). That needs the
+`keychain-access-groups` entitlement:
 
 ```
 ad-hoc signed, no entitlements    → OSStatus -34018 (errSecMissingEntitlement)
 ad-hoc signed, with entitlements  → process killed by AMFI (exit 137)
 ```
 
-There is no way around it. The entitlement must be backed by a real provisioning
-profile, which means an **Apple Developer ID ($99/year)**.
+and the entitlement needs a provisioning profile — an Apple Developer ID.
 
-### The path when you want it
+CryptoKit's `SecureEnclave.P256.KeyAgreement.PrivateKey` sidesteps the keychain
+entirely: the key is not a keychain item, and `dataRepresentation` is an
+enclave-sealed blob the app stores itself. No entitlement is involved, so the
+ad-hoc-signed helper hush compiles for itself (`native/hush-enclave.swift`,
+built by `/usr/bin/swiftc` only — see `src/swift.ts`) can create, reload and use
+the key. Verified: create, reload from the blob in a new process, agreement
+matches the software side.
 
-1. Enrol in the Apple Developer Program.
-2. Build `hush-se` (a ~150-line Swift helper: `create`, `pubkey`, `ecdh`,
-   `delete`), sign it with your Developer ID, notarize it.
-3. Ship the signed binary as an optional package — `@omarei/hush-secure-enclave` —
-   rather than in the core, so `npm i -g @omarei/hush` stays dependency-free.
-4. Add a `hush_pk_se_…` recipient type. P-256 public keys are 65 bytes (X9.63
-   uncompressed) versus X25519's 32.
+### Choices worth knowing
 
-**One consequence worth wanting:** an enclave key cannot move between machines.
-Each device gets its own identity and is added with `hush team add`. That is
-strictly better — you can revoke a stolen laptop without touching your desktop.
-
-`[.biometryCurrentSet]` also means the key self-destructs if someone enrols a new
-fingerprint. Use `.biometryAny` if that is too aggressive for your users.
+- **`.userPresence`, not `.biometryCurrentSet`.** `biometryCurrentSet` destroys
+  the key when a fingerprint is enrolled or removed — one new finger and every
+  vault the key held is gone unless another member re-adds you. `userPresence`
+  accepts Touch ID or the Mac's password. Someone running as you knows neither.
+- **`--presence none`** makes a key that is still non-extractable but usable
+  without anyone present: for a build Mac, never a laptop.
+- **One key per machine.** An enclave key cannot move. Each device is its own
+  member, which is what you want: `hush team rm <device>` revokes a stolen
+  laptop without touching anything else.
+- **The upgrade is not finished until the software key is retired.** `hush
+  secure --hardware` says so and prints the `hush team rm` to run; until then
+  the vault is as strong as the software key.
 
 ## Tier 3 — YubiKey, Secure Enclave, TPM: shipped, via age
 
@@ -167,9 +180,10 @@ hardware backends nobody on this project has to maintain. hush recipients are
 also now interoperable with age identities, which is a better story than any
 bespoke integration would have been.
 
-**`age-plugin-se` is signed and notarized by its author**, so the Tier 2
-Developer-ID wall is simply routed around. That is the whole argument for this
-approach in one sentence.
+**`age-plugin-se` is signed and notarized by its author**, which is how hush
+offered the Secure Enclave before Tier 2 found its way around the Developer-ID
+wall. It still works, and a plugin identity someone set up wins over the
+first-party one in `hush secure --hardware`.
 
 ### Still not built, deliberately
 
@@ -180,9 +194,10 @@ user wants hardware protection today, `age-plugin-tpm` already covers it.
 ## Where this leaves things
 
 1. **Tier 1 Touch ID** — shipped, honest about being a gate.
-2. **age bridge** — shipped. Covers YubiKey, Secure Enclave, TPM, FIDO2.
-3. **First-party `hush-se`** — not worth $99/yr unless `age-plugin-se` proves
-   too slow or too awkward in practice. Revisit only with evidence.
+2. **Tier 2 Secure Enclave identity** — shipped in 1.0, first-party, nothing to
+   install on a Mac with Xcode Command Line Tools.
+3. **age bridge** — shipped. Covers YubiKey, TPM, FIDO2, and the enclave via
+   `age-plugin-se` for anyone who prefers it.
 
 ## Things to get right whenever you do this
 

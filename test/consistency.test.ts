@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
-const mcp = read("src/mcp.ts");
+// The server is mcp.ts (protocol, tool list, policy defaults) and mcp-tools.ts
+// (what each tool does); a check about "the MCP server" reads both.
+const mcp = read("src/mcp.ts") + "\n" + read("src/mcp-tools.ts");
 /**
  * The CLI is src/cli.ts (the dispatcher and the COMMANDS table) plus the
  * shared helpers in src/cli/ and one file per command in src/commands/. A
@@ -31,7 +33,7 @@ const cliFiles = [
   ),
 ];
 const cli = cliFiles.map(read).join("\n");
-const ui = read("src/ui.ts");
+const ui = read("src/ui.ts") + "\n" + read("src/ui-api.ts") + "\n" + read("src/ui-state.ts");
 const skill = read("skills/hush/SKILL.md");
 const readme = read("README.md");
 const security = read("SECURITY.md");
@@ -192,7 +194,7 @@ describe("configuration has no dead knobs", () => {
     // policy.ts holds checkCommand/checkEnv/checkScopes, which is where
     // allowCommands and allowEnvs are actually read now that mcp.ts and cli.ts
     // both call them rather than each keeping their own copy.
-    const consumers = [cli, ...["mcp.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"].map((f) => read("src/" + f))]
+    const consumers = [cli, ...["mcp.ts", "mcp-tools.ts", "ui.ts", "ui-api.ts", "ui-state.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"].map((f) => read("src/" + f))]
       .join("\n");
     for (const field of fields) {
       const reads = [...consumers.matchAll(new RegExp(`\\.${field}\\b`, "g"))].length;

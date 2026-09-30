@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Vault } from "../src/vault.ts";
-import { resolveStageTtl, DEFAULT_STAGE_TTL_MS } from "../src/ui.ts";
+import { resolveStageTtl, DEFAULT_STAGE_TTL_MS } from "../src/ui-api.ts";
 import { generateIdentity, encodeSecret, encodePub } from "../src/crypto.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");

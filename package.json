@@ -49,7 +49,7 @@
   },
   "scripts": {
     "hush": "node src/cli.ts",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/commands/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "build:check": "node scripts/check-reproducible.mjs",

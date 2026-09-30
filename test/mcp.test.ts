@@ -374,7 +374,7 @@ describe("policy has no dead knobs", () => {
     // policy.ts now holds checkCommand/checkEnv/checkScopes — moved out of
     // mcp.ts so cli.ts can call the same checks — which is where
     // allowCommands and allowEnvs are actually read.
-    const all = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
+    const all = ["mcp.ts", "mcp-tools.ts", "cli.ts", "ui.ts", "ui-api.ts", "ui-state.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
       .map((f) => readFileSync(join(src, f), "utf8"))
       .join("\n");
 
@@ -1096,7 +1096,7 @@ describe("tool text only names tools that exist", () => {
       (s.replies.find((r) => r.id === 1)!.result as unknown as { tools: { name: string }[] }).tools.map((t) => t.name),
     );
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const file of ["../src/mcp.ts", "../skills/hush/SKILL.md"]) {
+    for (const file of ["../src/mcp.ts", "../src/mcp-tools.ts", "../skills/hush/SKILL.md"]) {
       const text = readFileSync(join(here, file), "utf8");
       const mentioned = new Set(text.match(/\bhush_[a-z_]+\b/g) ?? []);
       for (const name of mentioned) {

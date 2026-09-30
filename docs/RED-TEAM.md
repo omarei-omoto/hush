@@ -67,7 +67,7 @@ identity from the keychain" (out of scope): it never touches the identity or
 the vault's crypto. It defeats the approval *gate*, using nothing but the
 ordinary filesystem write access every coding agent already has.
 
-**Existing precedent, and where the line is:** `test/cli.test.ts` already had
+**Existing precedent, and where the line is:** `test/commands/policy.test.ts` already had
 four tests establishing that a *forged* `run:`-scoped grant *is* honoured
 across process boundaries — deliberately, so "Allow 15 min" survives the next
 `hush` invocation being a new process (a CLI run is a fresh process every
@@ -84,7 +84,7 @@ written to disk (`persistToDisk = req.action !== "reveal" && req.action !==
 (e.g. `hush ui`'s server) via the in-memory map, which a separate process
 cannot forge into. `run` keeps disk persistence, unchanged.
 
-**Tests:** `test/cli.test.ts` — *"a forged reveal grant on disk is never
+**Tests:** `test/commands/policy.test.ts` — *"a forged reveal grant on disk is never
 honoured, even with biometry required"*, *"a forged add grant on disk is
 never honoured — an agent cannot pre-approve planting its own secret"*.
 Confirmed red (value printed / key planted) with the fix reverted, green with
@@ -144,7 +144,7 @@ disclose more than an attacker-controlled `grants.local.json` written
 directly already would (same JSON shape, same effect on the reading
 process's own decision), so there is no additional read-side risk to close.
 
-**Test:** `test/cli.test.ts` — *"a symlinked grants.local.json cannot be used
+**Test:** `test/commands/policy.test.ts` — *"a symlinked grants.local.json cannot be used
 to clobber the user's policy floor"*. Confirmed red (floor file replaced)
 with the `lstatSync` guard removed, green with it restored.
 
@@ -461,9 +461,9 @@ root is the repository's, so `packages/app` is inside it. Tests in
 
 | Test | Fails without the fix | Passes with it |
 |---|---|---|
-| `test/cli.test.ts` — "a forged reveal grant on disk is never honoured, even with biometry required" | Yes — prints `sk_live_cli` | Yes |
-| `test/cli.test.ts` — "a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret" | Yes — plants `PLANTED_KEY` | Yes |
-| `test/cli.test.ts` — "a symlinked grants.local.json cannot be used to clobber the user's policy floor" | Yes — floor file replaced with grant JSON | Yes |
+| `test/commands/policy.test.ts` — "a forged reveal grant on disk is never honoured, even with biometry required" | Yes — prints `sk_live_cli` | Yes |
+| `test/commands/policy.test.ts` — "a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret" | Yes — plants `PLANTED_KEY` | Yes |
+| `test/commands/policy.test.ts` — "a symlinked grants.local.json cannot be used to clobber the user's policy floor" | Yes — floor file replaced with grant JSON | Yes |
 | `test/mcp.test.ts` — "npx reaches a denied interpreter…" (pinning, not a fix) | N/A — pins existing, documented behaviour | Yes |
 | `test/mcp.test.ts` — "allowCommands — not denyCommands — is what actually stops the npx indirection" (pinning) | N/A | Yes |
 

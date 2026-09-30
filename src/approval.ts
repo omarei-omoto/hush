@@ -165,7 +165,7 @@ export interface ApprovalDeps {
    * OS-owned paths, root-owned, not group/world-writable). A test supplies a
    * resolver to point at a fixture.
    */
-  resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog") => string | null;
+  resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog" | "powershell") => string | null;
 }
 
 export async function requestApproval(

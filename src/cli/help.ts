@@ -89,7 +89,7 @@ ${bold("agents")}
 ${bold("other")}
   hush init [name]               create a vault here (.hush/vault.json — commit it)
   hush doctor                    check this machine's setup
-  hush hook <zsh|bash|fish>      auto-load on cd (least safe; unloads on leave)
+  hush hook <zsh|bash|fish|powershell>  auto-load on cd (least safe; unloads on leave)
   hush export [--out .env]       write plaintext out (last resort)
   hush get <KEY>                 reveal one value (asks first)
   hush scan [dir]                what does this codebase need, and is it in the vault?

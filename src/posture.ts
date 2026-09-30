@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Vault } from "./vault.ts";
-import { loadIdentity, hushHome } from "./identity.ts";
+import { loadIdentity, hushHome, isSecureStore } from "./identity.ts";
 import { biometryStatus } from "./biometry.ts";
 import { identityPlugin, ageIdentityPath, ageAvailable } from "./age.ts";
 import { loadPolicy } from "./mcp.ts";
@@ -178,7 +178,7 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       id: "keychain",
       gap: "your key is a loose file on disk",
       label: "your key is in the OS keychain, not a loose file",
-      pass: Boolean(id && (id.source === "macOS Keychain" || hardware)),
+      pass: Boolean(id && (isSecureStore(id.source) || hardware)),
       command: "hush id --create --force",
       why: "a file at ~/.hush/identity is copied by any backup or sync client",
     },

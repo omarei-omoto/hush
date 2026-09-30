@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, statSync, accessSync, realpathSync, constants as fsConstants } from "node:fs";
 import { join, dirname, extname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { onPath as whichOnPath } from "../which.ts";
 
 export function readIfExists(path: string): string | null {
   try {
@@ -36,21 +37,9 @@ export function onPath(name: string): string | null {
     } catch { /* not runnable */ }
     return null;
   }
-  const dirs = (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":");
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
-  for (const dir of dirs) {
-    if (!dir) continue;
-    for (const ext of extensions) {
-      const candidate = join(dir, name + ext.toLowerCase());
-      try {
-        if (statSync(candidate).isFile()) {
-          accessSync(candidate, fsConstants.X_OK);
-          return candidate;
-        }
-      } catch { /* not this one */ }
-    }
-  }
-  return null;
+  // PATH itself: the one lookup, shared with the age bridge and the
+  // clipboard, which knows Windows' extension order (see which.ts).
+  return whichOnPath(name);
 }
 
 /** Walk up from `start` looking for `filename`. Used by `hush dev` to find package.json. */

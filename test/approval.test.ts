@@ -48,8 +48,8 @@ const noBiometry: ApprovalDeps = { authenticate: () => Promise.resolve("unavaila
  * — that was the vulnerability: the gated process could set it.
  */
 const onlyDialog =
-  (only: "osascript" | "zenity" | "kdialog") =>
-  (cmd: "osascript" | "zenity" | "kdialog"): string | null =>
+  (only: "osascript" | "zenity" | "kdialog" | "powershell") =>
+  (cmd: "osascript" | "zenity" | "kdialog" | "powershell"): string | null =>
     cmd === only ? join(FIXTURES, cmd) : null;
 
 /** Linux, with a fixture standing in for one real toolkit. */
@@ -335,7 +335,7 @@ describe("backend selection", () => {
   });
 
   test("linux with no display at all is not available — the queue is used instead", () => {
-    const both = (cmd: "osascript" | "zenity" | "kdialog") => join(FIXTURES, cmd);
+    const both = (cmd: "osascript" | "zenity" | "kdialog" | "powershell") => join(FIXTURES, cmd);
     const backend = detectBackend({ env: {}, platform: () => "linux", resolveProgram: both });
     assert.equal(backend, null);
     // WAYLAND_DISPLAY counts as a display just as much as DISPLAY does.

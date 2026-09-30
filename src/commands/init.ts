@@ -26,7 +26,7 @@ export async function cmdInit(a: Args): Promise<void> {
     info(`${green("✓")} identity created  ${dim(`(stored in ${id.source})`)}`);
   }
 
-  const memberName = str(a, "as") || process.env.USER || "me";
+  const memberName = str(a, "as") || process.env.USER || process.env.USERNAME || "me";
   mkdirSync(hushDir, { recursive: true });
   Vault.create(
     vaultPath,

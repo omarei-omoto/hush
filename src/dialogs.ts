@@ -15,9 +15,10 @@ import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
 import { join as joinPath } from "node:path";
 import type { Decision, SecretEntryResult } from "./approval.ts";
+import { powershellPath } from "./platform.ts";
 
 /** The dialog toolkits hush knows how to drive. */
-export type BackendName = "osascript" | "zenity" | "kdialog";
+export type BackendName = "osascript" | "zenity" | "kdialog" | "powershell";
 
 export interface DialogBackend {
   name: BackendName;
@@ -53,7 +54,7 @@ interface RunResult {
 
 function run(cmd: string, args: string[], timeoutMs: number): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
       const e = err as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null;
       resolve({
         ok: !e,
@@ -93,6 +94,8 @@ const SYSTEM_BIN_DIRS = ["/usr/bin", "/bin", "/usr/local/bin"] as const;
  * That is a worse experience and a much better boundary.
  */
 function systemProgram(cmd: BackendName): string | null {
+  // Windows: %SystemRoot%\System32, which an ordinary user cannot write.
+  if (cmd === "powershell") return process.platform === "win32" ? powershellPath() : null;
   for (const dir of SYSTEM_BIN_DIRS) {
     const path = joinPath(dir, cmd);
     try {
@@ -285,6 +288,99 @@ const makeKdialogBackend = (program: string): DialogBackend => ({
   },
 });
 
+// ------------------------------------------------------------- powershell
+//
+// Windows (F-7, beta). A WinForms window from Windows PowerShell 5.1, which
+// every supported Windows ships. The request travels as base64 JSON inside
+// -EncodedCommand, so no text from it is ever quoted into a script or a
+// command line; the window is top-most, re-raised if it loses the front, and
+// closes itself when the wait runs out. A typed secret comes back on stdout,
+// never through argv.
+
+const psPayload = (x: unknown): string => Buffer.from(JSON.stringify(x), "utf8").toString("base64");
+const encoded = (script: string): string => Buffer.from(script, "utf16le").toString("base64");
+
+/** The approval script. Prints once, session, deny or timeout. Exported for tests. */
+export function powershellApprovalScript(
+  req: { summary: string; detail: string[]; code: string; ttlLabel: string | null },
+  timeoutMs: number,
+): string {
+  const payload = psPayload({
+    title: "hush — approve this?",
+    body: [req.summary, "", ...req.detail, "", `Approval code: ${req.code}`].join("\r\n"),
+    ttl: req.ttlLabel,
+    ms: Math.max(1000, timeoutMs),
+  });
+  return `$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$r = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json
+$f = New-Object Windows.Forms.Form -Property @{ Text=$r.title; TopMost=$true; StartPosition='CenterScreen'; FormBorderStyle='FixedDialog'; MaximizeBox=$false; MinimizeBox=$false; ControlBox=$false; AutoSize=$true; AutoSizeMode='GrowAndShrink'; Padding=12 }
+$l = New-Object Windows.Forms.Label -Property @{ Text=$r.body; AutoSize=$true; MaximumSize=(New-Object Drawing.Size 520,0) }
+$p = New-Object Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection='TopDown'; AutoSize=$true }
+$b = New-Object Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection='RightToLeft'; AutoSize=$true; Dock='Fill' }
+$script:answer = 'timeout'
+function Add-Choice($text, $value) { $x = New-Object Windows.Forms.Button -Property @{ Text=$text; AutoSize=$true }; $x.Add_Click({ $script:answer = $value; $f.Close() }.GetNewClosure()); $b.Controls.Add($x) | Out-Null; $x }
+if ($r.ttl) { Add-Choice $r.ttl 'session' | Out-Null }
+$once = Add-Choice 'Allow once' 'once'
+Add-Choice 'Deny' 'deny' | Out-Null
+$p.Controls.Add($l) | Out-Null; $p.Controls.Add($b) | Out-Null; $f.Controls.Add($p) | Out-Null
+$f.AcceptButton = $once
+$t = New-Object Windows.Forms.Timer -Property @{ Interval=$r.ms }
+$t.Add_Tick({ $t.Stop(); $f.Close() })
+$raise = New-Object Windows.Forms.Timer -Property @{ Interval=45000 }
+$raise.Add_Tick({ $f.TopMost = $true; $f.Activate() })
+$f.Add_Shown({ $t.Start(); $raise.Start(); $f.Activate() })
+[void]$f.ShowDialog()
+[Console]::Out.Write($script:answer)`;
+}
+
+/** The secret-entry script. Prints the value, or nothing when cancelled. Exported for tests. */
+export function powershellSecretScript(req: { title: string; lines: string[]; label: string }, timeoutMs: number): string {
+  const payload = psPayload({
+    title: req.title,
+    body: [...req.lines, "", `Paste the value for ${req.label}:`].join("\r\n"),
+    ms: Math.max(1000, timeoutMs),
+  });
+  return `$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$r = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json
+$f = New-Object Windows.Forms.Form -Property @{ Text=$r.title; TopMost=$true; StartPosition='CenterScreen'; FormBorderStyle='FixedDialog'; MaximizeBox=$false; MinimizeBox=$false; AutoSize=$true; AutoSizeMode='GrowAndShrink'; Padding=12 }
+$p = New-Object Windows.Forms.FlowLayoutPanel -Property @{ FlowDirection='TopDown'; AutoSize=$true }
+$l = New-Object Windows.Forms.Label -Property @{ Text=$r.body; AutoSize=$true; MaximumSize=(New-Object Drawing.Size 520,0) }
+$x = New-Object Windows.Forms.TextBox -Property @{ UseSystemPasswordChar=$true; Width=480 }
+$save = New-Object Windows.Forms.Button -Property @{ Text='Save'; DialogResult='OK' }
+$cancel = New-Object Windows.Forms.Button -Property @{ Text='Cancel'; DialogResult='Cancel' }
+$p.Controls.AddRange(@($l, $x, $save, $cancel)); $f.Controls.Add($p) | Out-Null
+$f.AcceptButton = $save; $f.CancelButton = $cancel
+$t = New-Object Windows.Forms.Timer -Property @{ Interval=$r.ms }
+$t.Add_Tick({ $t.Stop(); $f.DialogResult = 'Cancel'; $f.Close() })
+$f.Add_Shown({ $t.Start(); $f.Activate(); $x.Focus() })
+if ($f.ShowDialog() -eq 'OK') { [Console]::Out.Write($x.Text) }`;
+}
+
+const psArgs = (script: string): string[] =>
+  ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-STA", "-EncodedCommand", encoded(script)];
+
+const makePowershellBackend = (program: string): DialogBackend => ({
+  name: "powershell",
+  program,
+  async approve(req, timeoutMs) {
+    const { ok, killed, out } = await run(program, psArgs(powershellApprovalScript(req, timeoutMs)), timeoutMs + 15_000);
+    if (killed || !ok) return "timeout";
+    if (out === "once") return "once";
+    if (out === "session" && req.ttlLabel) return "session";
+    if (out === "timeout") return "timeout";
+    return "deny";
+  },
+  async enterSecret(req, timeoutMs) {
+    const { ok, killed, out } = await run(program, psArgs(powershellSecretScript(req, timeoutMs)), timeoutMs + 15_000);
+    // run() trims; a secret's own surrounding whitespace is not something a
+    // pasted API key carries.
+    if (killed || !ok || !out) return { value: null, cancelled: true };
+    return { value: out, cancelled: false };
+  },
+});
+
 /** The real-world facts `detectBackend` needs, each supplied by the caller rather than read globally — see the file header. */
 export interface DialogEnv {
   env: NodeJS.ProcessEnv;
@@ -342,6 +438,10 @@ export function detectBackend(opts: DialogEnv): DialogBackend | null {
     const kdialog = resolve("kdialog");
     if (kdialog) return makeKdialogBackend(kdialog);
     return null;
+  }
+  if (plat === "win32") {
+    const ps = resolve("powershell");
+    return ps ? makePowershellBackend(ps) : null;
   }
   return null;
 }

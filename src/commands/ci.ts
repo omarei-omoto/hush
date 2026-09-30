@@ -13,6 +13,7 @@
  * comes with a warning about scrollback. `--out <file>` writes it to a new
  * 0600 file instead.
  */
+import { restrictToOwner } from "../platform.ts";
 import { openSync, writeSync, closeSync } from "node:fs";
 import { generateIdentity, encodePub, encodeSecret } from "../crypto.ts";
 import { requireIdentity } from "../identity.ts";
@@ -50,6 +51,7 @@ export async function cmdCi(a: Args): Promise<void> {
     if (out) {
       // wx: never over an existing file, never through a planted link.
       const fd = openSync(out, "wx", 0o600);
+      restrictToOwner(out);
       try {
         writeSync(fd, secret + "\n");
       } finally {

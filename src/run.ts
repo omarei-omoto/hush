@@ -8,6 +8,8 @@
  */
 import { spawn } from "node:child_process";
 import { Redactor } from "./redact.ts";
+import { spawnPlan } from "./platform.ts";
+import { onPath } from "./which.ts";
 import { isValidKeyName } from "./vault.ts";
 
 export interface RunOptions {
@@ -83,9 +85,14 @@ export function runWithSecrets(
   };
 
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
+    // On Windows a bare "npm" is npm.cmd, which only cmd.exe can run; see
+    // platform.ts. Everywhere else this is exactly (command, args).
+    const plan = spawnPlan(process.platform === "win32" ? (onPath(command) ?? command) : command, args);
+    const child = spawn(plan.command, plan.args, {
       cwd: opts.cwd ?? process.cwd(),
       env,
+      windowsHide: true,
+      ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       // stdout/stderr are always piped so the redactor can see them; only the
       // destination differs between capture and stream mode.
       stdio: ["inherit", "pipe", "pipe"],

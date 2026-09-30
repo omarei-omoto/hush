@@ -42,10 +42,13 @@ hush team rm sam                # re-keys the vault, re-seals every value
 > independent reimplementation — but that is not the same as someone qualified
 > having looked at it.
 >
-> Development happens on macOS; Linux is covered by CI.
-> **Windows is not supported yet** — the package declares it, so `npm install`
-> refuses there rather than half-working. [Tell me what broke](https://github.com/omarei-omoto/hush/issues)
-> if you try it somewhere unusual.
+> Development happens on macOS; Linux is covered by CI. **Windows is in beta**:
+> your key is kept with DPAPI, approvals are a native Windows dialog, `hush run
+> npm …` works through `npm.cmd`, secret files get owner-only ACLs, and there is
+> a PowerShell hook — a Windows CI job checks those paths, but it has not had
+> much real use yet. Fingerprint approval (Windows Hello) is not there yet.
+> [Tell me what broke](https://github.com/omarei-omoto/hush/issues) if you try
+> it somewhere unusual.
 >
 > Found a way to read a vault you should not? Please [report it
 > privately](https://github.com/omarei-omoto/hush/security/advisories/new)
@@ -944,7 +947,7 @@ a first-party Secure Enclave implementation is not worth building.
 
 ## The shell hook
 
-`hush hook zsh` (or `bash` / `fish`) prints a directory hook that loads secrets
+`hush hook zsh` (or `bash` / `fish` / `powershell`) prints a directory hook that loads secrets
 on `cd` and **unsets them again when you leave**. Without that unload you carry
 production credentials into every unrelated process you start afterwards, which
 is worse than not using hush at all.
@@ -1016,7 +1019,7 @@ agents
 other
   hush init [name]               create a vault here (.hush/vault.json — commit it)
   hush doctor                    check this machine's setup
-  hush hook <zsh|bash|fish>      auto-load on cd (least safe; unloads on leave)
+  hush hook <zsh|bash|fish|powershell>  auto-load on cd (least safe; unloads on leave)
   hush export [--out .env]       write plaintext out (last resort)
   hush get <KEY>                 reveal one value (asks first)
   hush scan [dir]                what does this codebase need, and is it in the vault?

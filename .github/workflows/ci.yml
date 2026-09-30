@@ -88,6 +88,44 @@ jobs:
           ./node_modules/.bin/hush run --quiet -- sh -c 'echo "$CI_KEY"' | grep -q 'redacted:CI_KEY'
           ./node_modules/.bin/hush verify
 
+  windows:
+    name: windows (beta) · the real Windows paths
+    runs-on: windows-latest
+    # Beta: this job reports and does not block until Windows has had real use.
+    # The main suite is POSIX-shaped (file modes, sh); this exercises what is
+    # Windows-specific end to end: DPAPI for the identity, npm.cmd through
+    # cmd.exe, redaction, and the PowerShell hook.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: npm ci
+      - name: platform tests
+        run: node --test test/platform.test.ts
+      - name: smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:HUSH_HOME = Join-Path $env:RUNNER_TEMP 'hushhome'
+          $env:HUSH_NO_NUDGE = '1'; $env:NO_COLOR = '1'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'src\cli.ts'
+          node $cli --version
+          node $cli id --create
+          $id = node $cli id | Out-String
+          if ($id -notmatch 'Windows DPAPI') { throw "identity is not in DPAPI: $id" }
+          $proj = Join-Path $env:RUNNER_TEMP 'proj'; New-Item -ItemType Directory $proj | Out-Null; Set-Location $proj
+          node $cli init win --no-agent
+          node $cli add SMOKE_KEY=smoke_value_123456 --to default
+          $o = node $cli run --quiet -- node -e "console.log(process.env.SMOKE_KEY)" | Out-String
+          if ($o -notmatch 'redacted:SMOKE_KEY') { throw "the value was not injected and redacted: $o" }
+          node $cli run --quiet -- npm --version
+          if ($LASTEXITCODE -ne 0) { throw "npm.cmd did not run through hush" }
+          node $cli verify
+          $hook = node $cli hook powershell | Out-String
+          if ($hook -notmatch 'ConvertFrom-Json') { throw "no PowerShell hook" }
+
   fuzz:
     name: deeper fuzzing
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@
 import {
   existsSync, readFileSync, openSync, writeSync, closeSync, unlinkSync, statSync, realpathSync,
 } from "node:fs";
-import { dirname, join, resolve, isAbsolute } from "node:path";
+import { dirname, join, resolve, isAbsolute, sep } from "node:path";
 import { createHash } from "node:crypto";
 import {
   decodePub,
@@ -447,7 +447,7 @@ export function resolveVaultPath(start = process.cwd()): { vaultPath: string; hu
       // An absolute path in a committed link.json is not portable anyway — it
       // cannot exist on a teammate's machine — so it is either yours or it is
       // someone else's idea of where you should look. Never silent.
-      if (!resolve(target).startsWith(resolve(hushHome()) + "/")) {
+      if (!resolve(target).startsWith(resolve(hushHome()) + sep)) {
         process.stderr.write(
           `hush: ${linkPath} points outside ~/.hush — reading ${target}\n`,
         );

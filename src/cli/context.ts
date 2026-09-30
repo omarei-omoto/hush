@@ -153,7 +153,7 @@ export function dieOnApproval(ap: { decision: string; note?: string }, what: str
  */
 export function makeProjectVault(hushDir: string, root: string, quiet = false): Vault {
   const id = loadIdentity() ?? createIdentity();
-  const memberName = process.env.USER || "me";
+  const memberName = process.env.USER || process.env.USERNAME || "me";
   const vaultName = basename(root);
   const { vault, created } = ensureProjectVault(
     hushDir,

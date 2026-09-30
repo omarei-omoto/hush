@@ -4,13 +4,14 @@
  * Resolution order:
  *   1. $HUSH_IDENTITY            — for CI. The key itself, not a path.
  *   2. $HUSH_IDENTITY_FILE       — path to a key file.
- *   3. OS keychain               — macOS Keychain / libsecret, when available.
+ *   3. The OS's secure store     — the macOS Keychain, or on Windows a DPAPI-protected
+ *                                  file (`~/.hush/<account>.dpapi`) only this user can open.
  *   4. ~/.hush/identity          — chmod 600 fallback.
  *
  * The private key never enters a vault file, never enters a repo, and is never
  * returned by any MCP tool.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import {
   type Identity, type Opener, type Signer,
 } from "./crypto.ts";
 import { ageIdentityPath, recipientsForIdentity, ageAvailable } from "./age.ts";
+import { powershellPath, restrictToOwner } from "./platform.ts";
 
 /**
  * Resolved per call. As a module constant this captured HUSH_HOME at import,
@@ -37,10 +39,64 @@ const KEYCHAIN_SERVICE = "hush-identity";
  * matters because that path is the only one in hush that can destroy a key.
  */
 const keychainUsable = (): boolean =>
-  platform() === "darwin" && process.env.HUSH_NO_KEYCHAIN !== "1";
+  (platform() === "darwin" || platform() === "win32") && process.env.HUSH_NO_KEYCHAIN !== "1";
+
+/** What the secure store is called here, for `hush doctor` and the ladder. */
+export const storeLabel = (): string => (platform() === "win32" ? "Windows DPAPI" : "macOS Keychain");
+
+/** Whether an identity's source is the OS's secure store rather than a loose file. */
+export const isSecureStore = (source: string | undefined): boolean =>
+  source === "macOS Keychain" || source === "Windows DPAPI";
+
+// ------------------------------------------------------------ Windows DPAPI
+//
+// DPAPI encrypts with a key tied to this Windows user's logon: the file can
+// sit in ~/.hush and nobody else — another user, a copy of the disk — can
+// open it. The secret travels to PowerShell on stdin, never in argv, and the
+// scripts carry no data of their own.
+
+const DPAPI_PROTECT =
+  "$s=[Console]::In.ReadToEnd(); Add-Type -AssemblyName System.Security; " +
+  "$b=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($s),$null,'CurrentUser'); " +
+  "[Console]::Out.Write([Convert]::ToBase64String($b))";
+const DPAPI_UNPROTECT =
+  "$s=[Console]::In.ReadToEnd().Trim(); Add-Type -AssemblyName System.Security; " +
+  "$b=[Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($s),$null,'CurrentUser'); " +
+  "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))";
+
+const dpapiFile = (account: string): string => join(hushHome(), `${account.replace(/[^A-Za-z0-9_-]/g, "_")}.dpapi`);
+
+function powershell(script: string, input: string): string | null {
+  const ps = powershellPath();
+  if (!ps) return null;
+  const r = spawnSync(ps, ["-NoProfile", "-NonInteractive", "-Command", script], {
+    input,
+    encoding: "utf8",
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  return r.status === 0 ? r.stdout : null;
+}
+
+function dpapiGet(account: string): string | null {
+  const file = dpapiFile(account);
+  if (!existsSync(file)) return null;
+  const plain = powershell(DPAPI_UNPROTECT, readFileSync(file, "utf8"));
+  return plain ? plain.trim() : null;
+}
+
+function dpapiSet(account: string, secret: string): boolean {
+  const sealed = powershell(DPAPI_PROTECT, secret);
+  if (!sealed) return false;
+  mkdirSync(hushHome(), { recursive: true, mode: 0o700 });
+  writeFileSync(dpapiFile(account), sealed.trim(), { mode: 0o600 });
+  restrictToOwner(dpapiFile(account));
+  return dpapiGet(account) === secret;
+}
 
 function keychainGet(account: string): string | null {
   if (!keychainUsable()) return null;
+  if (platform() === "win32") return dpapiGet(account);
   try {
     return execFileSync(
       "security",
@@ -54,6 +110,7 @@ function keychainGet(account: string): string | null {
 
 function keychainSet(account: string, secret: string): boolean {
   if (!keychainUsable()) return false;
+  if (platform() === "win32") return dpapiSet(account, secret);
   try {
     // `-w` with no value makes security read the password from stdin. Passing
     // it as an argument would expose the private key in the process table to
@@ -102,7 +159,7 @@ export function loadIdentity(account = "default"): ResolvedIdentity | null {
       return { id: readFileIdentity(p), source: `$HUSH_IDENTITY_FILE (${p})` };
     }
     const fromKeychain = keychainGet(account);
-    if (fromKeychain) return { id: decodeSecret(fromKeychain), source: "macOS Keychain" };
+    if (fromKeychain) return { id: decodeSecret(fromKeychain), source: storeLabel() };
     if (existsSync(identityFile())) return { id: readFileIdentity(identityFile()), source: identityFile() };
     return null;
   })();
@@ -150,11 +207,12 @@ export function createIdentity(account = "default", force = false): ResolvedIden
   const encoded = encodeSecret(id);
 
   if (keychainSet(account, encoded)) {
-    return { ...id, source: "macOS Keychain" };
+    return { ...id, source: storeLabel() };
   }
   mkdirSync(hushHome(), { recursive: true, mode: 0o700 });
   writeFileSync(identityFile(), encoded, { mode: 0o600 });
   chmodSync(identityFile(), 0o600);
+  restrictToOwner(identityFile());
   return { ...id, source: identityFile() };
 }
 
@@ -216,7 +274,7 @@ export function decideMigration(f: MigrationFacts): MigrationDecision {
   if (!f.readBackMatches) {
     return { ok: false, deleteFile: false, message: "keychain read-back did not match; the file was left in place" };
   }
-  return { ok: true, deleteFile: true, message: "key moved into the macOS Keychain" };
+  return { ok: true, deleteFile: true, message: `key moved into the ${storeLabel()}` };
 }
 
 export function migrateIdentityToKeychain(account = "default"): { ok: boolean; message: string } {
@@ -298,6 +356,7 @@ export function signerFor(id: Opener, create = false): Signer | null {
     mkdirSync(hushHome(), { recursive: true, mode: 0o700 });
     writeFileSync(signingFile(), encoded, { mode: 0o600 });
     chmodSync(signingFile(), 0o600);
+    restrictToOwner(signingFile());
   }
   return signerFor(id, false);
 }

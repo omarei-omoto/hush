@@ -2,7 +2,7 @@
  * `hush install-mcp` and `hush install-skill` — tell coding agents about hush.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve as resolvePath } from "node:path";
+import { join, dirname, sep, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertProjectHushDir } from "../vault.ts";
 import { hushHome } from "../identity.ts";
@@ -52,7 +52,7 @@ async function confirmWrites(a: Args, plan: { name: string; file: string; note?:
 
 /** Said next to a file outside the project, which changes more than this project. */
 const outsideNote = (file: string, root: string): string | undefined =>
-  file.startsWith(resolvePath(root) + "/") ? undefined : "your user config — applies to every project";
+  file.startsWith(resolvePath(root) + sep) ? undefined : "your user config — applies to every project";
 
 export async function cmdInstallMcp(a: Args): Promise<void> {
   // Registering an agent needs the folder, not a vault: "approvals on — hush

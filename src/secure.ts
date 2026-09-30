@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { Vault, ValidationError } from "./vault.ts";
 import { assess, shouldNudge, recordNudge, snooze, type Posture } from "./posture.ts";
-import { loadIdentity, migrateIdentityToKeychain, publicKeyOf, hushHome } from "./identity.ts";
+import { loadIdentity, migrateIdentityToKeychain, publicKeyOf, hushHome, storeLabel } from "./identity.ts";
 import { ensureFloor } from "./policy.ts";
 import { ensureHelper, biometryStatus, type BiometryDeps } from "./biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin, recipientsForIdentity } from "./age.ts";
@@ -223,7 +223,7 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
     case "keychain": {
       const id = loadIdentity();
       if (!id) return out(red("  no identity to migrate"));
-      out(`  This moves your existing key into the macOS Keychain and deletes the file.`);
+      out(`  This moves your existing key into the ${storeLabel()} and deletes the file.`);
       out(`  ${dim("Your public key does not change, so you stay a member of every vault.")}`);
       out(`  ${dim(publicKeyOf(id))}`);
       if (!(await ask("  Migrate now?"))) return out(dim("  left alone"));

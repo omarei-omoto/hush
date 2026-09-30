@@ -1,6 +1,7 @@
 /**
  * `hush export` — plaintext out, as a last resort (and the names the shell hook needs).
  */
+import { restrictToOwner } from "../platform.ts";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { audit } from "../vault.ts";
@@ -87,6 +88,7 @@ export async function cmdExport(a: Args): Promise<void> {
     // writeFileSync only applies mode on creation; an existing file keeps its
     // old permissions, which for a stray .env is usually 0644.
     chmodSync(outFile, 0o600);
+    restrictToOwner(outFile);
     const gi = join(process.cwd(), ".gitignore");
     const entry = outFile.replace(/^\.\//, "");
     const current = existsSync(gi) ? readFileSync(gi, "utf8") : "";

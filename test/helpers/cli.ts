@@ -18,7 +18,7 @@ export const ZENITY = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtu
 export const clickingAllow = {
   authenticate: async () => "unavailable" as const,
   platform: () => "linux",
-  resolveDialogProgram: (cmd: "osascript" | "zenity" | "kdialog") => (cmd === "zenity" ? ZENITY : null),
+  resolveDialogProgram: (cmd: "osascript" | "zenity" | "kdialog" | "powershell") => (cmd === "zenity" ? ZENITY : null),
 };
 
 /**

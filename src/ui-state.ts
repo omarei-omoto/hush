@@ -69,7 +69,7 @@ export function requireProjectVault(ctx: UiCtx): Vault {
 
 /** The founding-member shape Vault.create()/ensureProjectVault() want, built the same way `hush init` builds it. */
 function memberOf(id: ResolvedIdentity): Parameters<typeof Vault.create>[2] {
-  const name = process.env.USER || "me";
+  const name = process.env.USER || process.env.USERNAME || "me";
   return id.pub ? { name, pub: id.pub, priv: id.priv } : { name, ageRecipient: id.age!.recipients[0] };
 }
 
@@ -282,7 +282,7 @@ export function state(ctx: UiCtx) {
   // No project vault to name you in: fall back to the library's membership,
   // then to what a first vault would call you, rather than crashing on
   // vault.memberName() with no vault to ask.
-  const meName = vault ? vault.memberName(id) : libraryVault ? libraryVault.memberName(id) : (process.env.USER || "me");
+  const meName = vault ? vault.memberName(id) : libraryVault ? libraryVault.memberName(id) : (process.env.USER || process.env.USERNAME || "me");
 
   // The repo's own requireApproval, read raw rather than through the merged
   // floor+repo+base policy: the switches on the page are asking "what does

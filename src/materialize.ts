@@ -24,7 +24,8 @@
  *     agent surface is built not to allow.
  */
 import { mkdtempSync, openSync, writeFileSync, closeSync, unlinkSync, rmdirSync, statSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { restrictToOwner } from "./platform.ts";
+import { join, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { ValidationError, isValidKeyName } from "./vault.ts";
 
@@ -154,6 +155,7 @@ export function materialize(
       if (spec.path === null) {
         const dir = mkdtempSync(join(tmpdir(), "hush-"));
         chmodSync(dir, 0o700);
+        restrictToOwner(dir);
         dirs.push(dir);
         target = join(dir, spec.key.toLowerCase());
       } else {
@@ -173,7 +175,7 @@ export function materialize(
       }
 
       if (spec.path !== null) {
-        const parent = target.slice(0, target.lastIndexOf("/")) || ".";
+        const parent = dirname(target) || ".";
         if (worldWritable(parent)) {
           onWarn(
             `${parent} is world-writable, so the file hush writes there can be read by other users ` +
@@ -187,6 +189,8 @@ export function materialize(
       let fd: number;
       try {
         fd = openSync(target, "wx", 0o600);
+        // On Windows the mode means little; the ACL is what keeps others out.
+        restrictToOwner(target);
       } catch (e) {
         const code = (e as { code?: string }).code;
         if (code === "EEXIST") {

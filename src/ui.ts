@@ -9,6 +9,7 @@
  *     explicit click that gets written to the audit log
  *   - no CDN, no external fonts, no third-party JS. Everything is inline.
  */
+import { system32 } from "./platform.ts";
 import { createServer, type IncomingMessage } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -127,11 +128,15 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
     process.stdout.write(`\n  hush ui  →  ${link}\n\n  ${vaultLine}\n  Ctrl-C to stop.\n\n`);
     if (opts.open !== false) {
       import("node:child_process").then(({ spawn }) => {
-        const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+        // Windows: rundll32's URL handler keeps the #fragment the token is in;
+        // `start` would hand "&" in it to cmd.exe.
+        const win = process.platform === "win32" ? system32("rundll32.exe") : null;
+        const cmd = process.platform === "darwin" ? "open" : win ?? "xdg-open";
         // A server, a container or an SSH session has no xdg-open. spawn()
         // reports that as an 'error' event, and an unhandled one took the
         // whole server down a moment after it printed the link.
-        const child = spawn(cmd, [link], { stdio: "ignore", detached: true });
+        const args = win ? ["url.dll,FileProtocolHandler", link] : [link];
+        const child = spawn(cmd, args, { stdio: "ignore", detached: true, windowsHide: true });
         child.on("error", () => {
           process.stdout.write(`  (could not open a browser here — open the link above yourself)\n\n`);
         });

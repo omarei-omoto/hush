@@ -18,7 +18,19 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
 const mcp = read("src/mcp.ts");
-const cli = read("src/cli.ts");
+/**
+ * The CLI is src/cli.ts (the dispatcher and the COMMANDS table) plus the
+ * shared helpers in src/cli/ and one file per command in src/commands/. A
+ * check about "the CLI" reads all of it, so moving code between those files
+ * can never move it out of a check's sight.
+ */
+const cliFiles = [
+  "src/cli.ts",
+  ...["src/cli", "src/commands"].flatMap((d) =>
+    readdirSync(join(root, d)).filter((f) => f.endsWith(".ts")).map((f) => `${d}/${f}`),
+  ),
+];
+const cli = cliFiles.map(read).join("\n");
 const ui = read("src/ui.ts");
 const skill = read("skills/hush/SKILL.md");
 const readme = read("README.md");
@@ -142,7 +154,10 @@ describe("configuration has no dead knobs", () => {
     // If an export is deliberately part of the public API rather than used
     // internally, a test counts as a use — which is the right bar for anything
     // other people are meant to call.
-    const srcFiles = readdirSync(join(root, "src")).filter((f) => f.endsWith(".ts"));
+    // Recursive: the CLI lives in src/cli/ and src/commands/ as well.
+    const srcFiles = (readdirSync(join(root, "src"), { recursive: true }) as string[])
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => f.split("\\").join("/"));
     const everything =
       srcFiles.map((f) => read("src/" + f)).join("\n") +
       readdirSync(join(root, "test"))
@@ -177,8 +192,7 @@ describe("configuration has no dead knobs", () => {
     // policy.ts holds checkCommand/checkEnv/checkScopes, which is where
     // allowCommands and allowEnvs are actually read now that mcp.ts and cli.ts
     // both call them rather than each keeping their own copy.
-    const consumers = ["mcp.ts", "cli.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"]
-      .map((f) => read("src/" + f))
+    const consumers = [cli, ...["mcp.ts", "ui.ts", "secure.ts", "posture.ts", "approval.ts", "policy.ts"].map((f) => read("src/" + f))]
       .join("\n");
     for (const field of fields) {
       const reads = [...consumers.matchAll(new RegExp(`\\.${field}\\b`, "g"))].length;
@@ -235,7 +249,7 @@ describe("facts are stated once", () => {
     // It used to be typed into src/cli.ts, src/mcp.ts and package.json, with
     // nothing keeping them together — so `hush --version` and the version the
     // MCP server reports to a client could disagree with what was published.
-    const declarations = ["src/cli.ts", "src/mcp.ts", "src/version.ts", "src/ui.ts"]
+    const declarations = [...cliFiles, "src/mcp.ts", "src/version.ts", "src/ui.ts"]
       .filter((f) => /const VERSION\s*=\s*"/.test(read(f)));
     assert.deepEqual(declarations, ["src/version.ts"], "the version is declared in more than one file");
 
@@ -269,7 +283,7 @@ describe("facts are stated once", () => {
   test("the default policy is not retyped anywhere", () => {
     // A hand-written copy in `hush install-mcp` is how `allowReveal` kept being
     // written into every new project after it had stopped meaning anything.
-    const literals = ["src/cli.ts", "src/secure.ts"].filter((f) =>
+    const literals = [...cliFiles, "src/secure.ts"].filter((f) =>
       /requireApproval:\s*\[\s*"run"/.test(read(f)),
     );
     assert.deepEqual(literals, [], `the default policy is retyped in ${literals.join(", ")}`);

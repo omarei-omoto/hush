@@ -327,7 +327,9 @@ const T=(function(){
   if(m){
     t=m[1];
     try{sessionStorage.setItem("hush-t",t)}catch(e){}
-    history.replaceState(null,"",location.pathname);
+    // Keep a section named alongside the token (#t=…&team), drop the token.
+    const rest=location.hash.slice(1).split("&").filter(function(p){return p&&!/^t=/.test(p)}).join("&");
+    history.replaceState(null,"",location.pathname+(rest?"#"+rest:""));
   }else{
     try{t=sessionStorage.getItem("hush-t")||""}catch(e){}
   }

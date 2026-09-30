@@ -114,8 +114,10 @@ export async function cmdTeam(a: Args): Promise<void> {
       info(`${green("✓")} nothing to ${sub}: this machine has already accepted this vault as it stands`);
       return;
     }
-    // Everything but the closing "if you expected this" pair, which is this command.
-    for (const line of describeTrustProblems(pending).slice(0, -2)) info(line);
+    // Everything but the closing advice, which is this command.
+    const lines = describeTrustProblems(pending);
+    const advice = pending.unsigned || pending.commitMismatch || pending.downgraded ? 1 : 2;
+    for (const line of lines.slice(0, -advice)) info(line);
     const provenance = lastVaultCommit(vault.path);
     if (provenance) info(dim(`  last change to the vault file: ${provenance}`));
     info("");

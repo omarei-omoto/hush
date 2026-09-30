@@ -99,6 +99,10 @@ describe("V-1b: the header is signed", () => {
     assert.notEqual(ran.code, 0, "a re-keyed vault nobody signed was used:\n" + ran.out);
     assert.doesNotMatch(ran.out, /API_BASE=/);
     assert.match(ran.out, /signed header does not hold/);
+    // A forged signature is not something a person can vouch for: no "accept".
+    assert.doesNotMatch(ran.out, /If you expected this/);
+    assert.match(ran.out, /cannot be accepted/);
+    assert.notEqual(t.bob.run(["team", "accept", "--yes"]).code, 0, "a forged vault was accepted");
     t.cleanup();
   });
 

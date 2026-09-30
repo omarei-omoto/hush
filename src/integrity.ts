@@ -535,6 +535,12 @@ export function describeTrustProblems(p: Pending): string[] {
       "  so hush will not decrypt or add anything here until you have checked with whoever added them.",
     );
   }
-  lines.push("  If you expected this:  hush team accept", "  If you did not:        hush team reject   (how to undo it)");
+  // A signature that does not hold is not something to accept: nobody can
+  // vouch for the forged part, whoever you ask. Restoring is the only way out.
+  if (p.unsigned || p.commitMismatch || p.downgraded) {
+    lines.push("  This cannot be accepted. Restore the vault from before it changed:  hush team reject   (shows how)");
+  } else {
+    lines.push("  If you expected this:  hush team accept", "  If you did not:        hush team reject   (how to undo it)");
+  }
   return lines;
 }

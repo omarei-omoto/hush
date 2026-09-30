@@ -4,6 +4,76 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-30
+
+**Breaking: vault format hush/v3.** A signed vault can be opened only by hush
+0.8 or newer. Vaults are signed when made with `hush init`, or the first time an
+admin changes an existing vault's membership, or with `hush team sign`.
+Everyone on the team should upgrade before that happens.
+
+### Signed vaults: only an admin can change who can read one
+
+An admin now signs the vault's header — every member's keys and role, the sets
+a scoped member may read, and a commitment to every data key — and every
+member's hush checks the signature against admins their machine already trusts,
+and checks that the key it unwrapped is the one the header commits to.
+
+- A change signed by an admin you trust arrives with a one-line notice ("alice
+  changed who can read this vault: added dana (signed)"). A header that is
+  unsigned, forged, signed by a non-admin, or stripped of a signature it had is
+  refused and cannot be accepted — `hush team reject` shows how to restore it.
+  One signed by an admin this machine has never seen waits for `hush team
+  accept`.
+- This closes what 0.6's pinning could not tell apart from a teammate's
+  rotation: someone who is not a member re-keying the vault without adding
+  themselves, to plant a value.
+- Only admins can add or remove members, rotate, or change set access in a
+  signed vault. Members still add and change values.
+- `hush id` prints your encryption and signing key as one string. An older
+  32-byte `hush_pk_` still joins a vault; it just cannot sign as an admin.
+- `hush team verify <name>` prints a sixty-digit safety number to compare over a
+  call.
+- A hardware-only (age) admin signs with a separate software key kept in the
+  keychain; adding your own hardware key as an admin attaches it for you.
+
+### Giving someone only some sets
+
+- `hush team add junior <key> --sets dev,staging` makes a scoped member who
+  reads only those sets; each gets a key of its own, wrapped for every full
+  member too. `hush team rm junior --from staging` takes one away and rotates
+  only that set.
+- A run skips sets you were not given and says so; `--use prod` says who can
+  grant it. The app's Team section shows who reads what, and can add a scoped
+  member.
+
+### CI identities and a GitHub Action
+
+- `hush ci create github --sets ci,staging | gh secret set HUSH_IDENTITY` makes a
+  scoped machine identity — never an admin, never a signer — and hands its key
+  straight to the secret store. `hush ci ls`, `hush ci rm`.
+- `uses: omarei-omoto/hush@v1` installs hush, masks the identity, and checks it
+  can read the vault. In GitHub Actions, `hush run` has GitHub mask every
+  injected value line by line — for CI identities only.
+
+### After someone leaves
+
+- `hush team rm` marks every value the removed member could read as exposed
+  until it is set again. `hush exposed` lists them with where to replace each
+  (Stripe, OpenAI, AWS, GitHub and twenty-odd more).
+- `hush ls --age` shows how long since each value was replaced.
+  `"rotateAfterDays"` in a policy (a number, or per set) makes `hush level` and
+  `hush doctor` list overdue values; a floor can ask sooner, never later.
+
+### Also
+
+- The vault merge understands signed vaults and set keys, re-signs a merged
+  header as the admin merging (or refuses), and rotates a set's key when
+  someone who held it is no longer entitled.
+- `hush ui` links can name a section after the token (`#t=…&team`).
+- `vault.ts` is split into `vault-files.ts` and `vault.ts`; the signed header
+  lives in `header.ts`. An independent WebCrypto implementation verifies the
+  signature format.
+
 ## 0.7.0 — 2026-09-30
 
 ### Vault merges go key by key

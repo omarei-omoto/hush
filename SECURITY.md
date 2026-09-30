@@ -84,11 +84,20 @@ covers them in full — see *What it does not protect* — but in short:
 - Revocation protects future values only. Anyone who could read a secret has.
 - Git history is permanent.
 - An approval has to come from something the gated process cannot supply: a
-  dialog drawn on your screen by an OS-owned program, or your fingerprint. There
-  is deliberately no file to answer. A host with no desktop *and* no biometric
-  helper cannot ask you anything, so it refuses the gated action instead of
-  pretending. Nothing in the environment can make an approval easier — the one
-  switch that exists (`HUSH_NO_DIALOG`) can only make hush refuse.
+  dialog drawn on your screen by an OS-owned program, your fingerprint, or an
+  answer signed by a device you paired with (the relay, below). There is
+  deliberately no file to answer. A host with none of those cannot ask you
+  anything, so it refuses the gated action instead of pretending. Nothing in the
+  environment can make an approval easier — the one switch that exists
+  (`HUSH_NO_DIALOG`) can only make hush refuse.
+- The approval relay ([docs/RELAY.md](./docs/RELAY.md)) carries only sealed,
+  signed messages: a relay cannot read a request, change one, answer one, or
+  replay an old answer — only delay or drop them, which is a refusal. Its
+  weak point is the requester's own `~/.hush`: something running as you there
+  can rewrite the pairing to trust an "approver" of its own, just as it can read
+  a software key in the same directory. The relay puts a person in front of
+  everything that goes through hush on a remote machine; against code already
+  running as you on it, the answer is a hardware identity.
 
 ---
 

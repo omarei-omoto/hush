@@ -546,9 +546,20 @@ lapses: you get a refusal, not a quiet yes.
 Set `"requireApproval": []` to turn it off. On a Linux desktop the dialog is
 `zenity` or `kdialog`, whichever is installed. With no desktop at all — a
 server, CI — there is nothing to put the request in front of you, so an
-approval-gated action is refused rather than waved through; set `biometry` to
-`"required"` on a machine with a fingerprint reader, or leave the gated
-actions out of that machine's policy.
+approval-gated action is refused rather than waved through — unless you pair
+it with a device that has you at it:
+
+```bash
+hush approvals pair --relay https://relay.example     # on the server: prints a code and a QR code
+hush approvals accept hushpair1:…                     # on your laptop
+hush approvals listen                                 # on your laptop: the dialog, or Touch ID
+```
+
+The request travels sealed to your laptop and the answer comes back signed; the
+relay in between can read neither and forge neither. No relay? `hush relay serve`
+on the laptop and `ssh -R 8787:localhost:8787 server` carries it over your SSH
+session, with nobody else involved. [docs/RELAY.md](./docs/RELAY.md) is the
+protocol.
 
 ## What the agent may run
 

@@ -79,6 +79,11 @@ ${bold("hardening")}
   hush secure approval --for 30m  ask before anything uses a key; 30m is how long an "Allow" lasts
   hush biometry [setup|test]    gate approvals behind Touch ID
   hush age                      use a YubiKey / Secure Enclave / TPM via age
+  hush approvals pair --relay <url>   no one at this machine? send its approvals to your laptop
+  hush approvals accept <code>  (on the laptop) approve for the machine that showed the code
+  hush approvals listen         (on the laptop) answer them with a dialog or Touch ID
+  hush approvals [ls|rm <name>] what is paired with this machine
+  hush relay serve              run a relay (it only ever sees sealed messages)
   hush verify                   check the vault decrypts and has not been rolled back
   hush audit [verify]           what hush did here; verify checks nothing was edited out
   hush rotate                   new vault key, same values

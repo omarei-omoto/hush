@@ -37,6 +37,7 @@ import { cmdDoctor } from "./commands/doctor.ts";
 import { cmdMerge, cmdMergeDriver } from "./commands/merge.ts";
 import { cmdCi } from "./commands/ci.ts";
 import { cmdExposed } from "./commands/exposed.ts";
+import { cmdApprovals, cmdRelay } from "./commands/approvals.ts";
 import { bold, cyan, die, dim, out, red } from "./cli/output.ts";
 import { FULL_HELP, SHORT_HELP } from "./cli/help.ts";
 import { onPath } from "./cli/programs.ts";
@@ -84,6 +85,8 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   merge: cmdMerge,
   ci: cmdCi,
   exposed: cmdExposed,
+  approvals: cmdApprovals,
+  relay: cmdRelay,
   "merge-driver": cmdMergeDriver,
 };
 

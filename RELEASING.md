@@ -33,7 +33,12 @@ A release is a signed tag. Nothing is published from anyone's laptop.
      with GitHub build provenance (Sigstore), and creates the GitHub release
      from the tag with the changelog section as notes, the binaries, the sums,
      `hush.rb` (Homebrew), `hush.json` (Scoop) and the winget manifests;
+   - lists the version in the official MCP registry (`server.json`), signed in
+     with the workflow's GitHub OIDC identity;
    - pushes the formula to the Homebrew tap when `HOMEBREW_TAP_TOKEN` exists.
+     Without it the tap catches up by itself within six hours: its own workflow
+     takes `hush.rb` from the latest release after checking every hash in it
+     against that release's `SHA256SUMS`.
 7. **winget.** Submit the manifests from `winget-manifests.tar.gz` to
    [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — by hand
    (`wingetcreate submit <dir>`) until the package is established there.
@@ -43,10 +48,10 @@ A release is a signed tag. Nothing is published from anyone's laptop.
 Nothing here is needed for a release to work — without it the binaries ship
 ad-hoc signed, and Homebrew users are one manual formula copy behind.
 
-- **Homebrew tap.** Create `omarei-omoto/homebrew-tap` (an empty repository with
-  a `Formula/` directory). Make a fine-grained token with *Contents: write* on
-  that repository only, and store it as the `HOMEBREW_TAP_TOKEN` secret. Users
-  then `brew install omarei-omoto/tap/hush`.
+- **Homebrew tap.** `omarei-omoto/homebrew-tap` exists and updates itself from
+  each release. For an immediate update instead of within six hours, make a
+  fine-grained token with *Contents: write* on that repository only and store
+  it as the `HOMEBREW_TAP_TOKEN` secret.
 - **Apple Developer ID** ($99/year). With it, the macOS binaries are signed with
   the hardened runtime and notarized, so a copy downloaded in a browser opens
   without a Gatekeeper warning. (curl and Homebrew do not quarantine, so they

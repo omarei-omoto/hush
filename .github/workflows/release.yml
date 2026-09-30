@@ -89,6 +89,18 @@ jobs:
       # makes a publish that cannot attach it fail rather than go out without.
       - run: npm publish --provenance --access public
 
+      # The official MCP registry, signed in with this workflow's GitHub OIDC
+      # identity (the io.github.omarei-omoto/* namespace) — no token. The
+      # publisher is pinned and checked against the registry release's sums.
+      - name: list this version in the MCP registry
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/mcpp.tgz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  /tmp/mcpp.tgz" | sha256sum -c -
+          tar xzf /tmp/mcpp.tgz -C /tmp mcp-publisher
+          /tmp/mcp-publisher login github-oidc
+          /tmp/mcp-publisher publish server.json
+
   binaries:
     name: build and test the binaries
     needs: verify
@@ -243,8 +255,9 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --title "hush ${GITHUB_REF_NAME#v}" --notes-file /tmp/notes.md
           fi
-      # The tap is a separate repository, so it needs a token of its own: a
-      # fine-grained token with Contents: write on omarei-omoto/homebrew-tap only.
+      # The tap updates itself from each release (its own workflow, its own
+      # token). This step only makes that immediate, and only if a token with
+      # Contents: write on omarei-omoto/homebrew-tap is configured.
       - name: update the Homebrew tap
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

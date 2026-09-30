@@ -15,7 +15,7 @@ import { confirm, promptLine } from "../cli/prompts.ts";
  */
 export async function cmdRm(a: Args): Promise<void> {
   const loose = ctxLoose(a);
-  requireIdentity();
+  const id = requireIdentity();
   const name = a._[0];
   if (!name) die("Usage: hush rm <KEY> [--from <set>]  |  hush rm <set> [--yes]");
 
@@ -45,9 +45,7 @@ export async function cmdRm(a: Args): Promise<void> {
         die(`Removing a whole set needs confirmation.`, `Pass --yes: hush rm ${name} --yes`);
       }
     }
-    delete vault.data.envs[name];
-    if (vault.data.meta) delete vault.data.meta[name];
-    vault.markStructural();
+    vault.removeSet(id, name);
     vault.save();
     audit(loose.hushDir, { actor: "cli", action: "rm.set", set: name, where });
     info(`${green("✓")} removed set ${bold(name)}`);

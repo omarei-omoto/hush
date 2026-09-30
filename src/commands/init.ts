@@ -32,7 +32,7 @@ export async function cmdInit(a: Args): Promise<void> {
     vaultPath,
     name,
     id.pub
-      ? { name: memberName, pub: id.pub }
+      ? { name: memberName, pub: id.pub, priv: id.priv }
       : { name: memberName, ageRecipient: id.age!.recipients[0] },
   );
   ensureGitignore(hushDir);

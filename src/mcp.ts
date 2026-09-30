@@ -87,6 +87,13 @@ export interface Policy {
    * headless box where no dialog can ever appear it is two minutes of nothing.
    */
   approvalTimeoutSeconds: number;
+  /**
+   * How many days a value may go without being replaced before `hush level`,
+   * `hush doctor` and `hush ls --age` call it overdue (F-6). A number for every
+   * set, or an object from set name to days with "*" for the rest. Unset means
+   * no reminders. A reminder, not a gate: nothing is refused over it.
+   */
+  rotateAfterDays?: number | Record<string, number>;
   /** "off" | "preferred" | "required" — gate approvals behind Touch ID. */
   biometry: "off" | "preferred" | "required";
   /**

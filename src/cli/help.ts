@@ -44,6 +44,8 @@ ${bold("daily")}
   hush request [METHOD] <url> [--header 'Name: $VAR'] [--data @file]
                                            call an API with a secret injected, response redacted
   hush ls [<set>]                          library, project, what is used — or one set's keys
+  hush ls [<set>] --age                    how long since each value was replaced, oldest first
+  hush exposed                             values someone removed could still use, and where to replace them
   hush rm <KEY> [--from <set>]             remove a key
   hush rm <set> [--yes]                    remove a whole set
   hush ui                                  open the local app to manage everything
@@ -60,6 +62,11 @@ ${bold("sharing")}
   hush team add <name> <pk>     re-wraps the key for them; commit and they're in
   hush team rm <name>           removes them and re-encrypts everything
   hush team accept|reject       someone else changed who can read the vault — check, then decide
+  hush team add <n> <pk> --sets a,b   a member who reads only those sets
+  hush team rm <name> --from <set>    take one set away from a scoped member
+  hush team sign                sign this vault (admins only change who can read it)
+  hush team verify <name>       a safety number to compare over a call
+  hush ci create <name> --sets a,b    a CI identity that reads only those sets
   hush id [--create]            show or create this machine's key
   hush link <vault> [--env e]   point this repo at a vault you already have
   hush merge-driver --install   merge vault.json key by key in this clone's git merges

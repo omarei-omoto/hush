@@ -57,7 +57,7 @@ hush team rm sam                # re-keys the vault, re-seals every value
 - **Using it** — [Sets](#sets) · [Coming from another tool](#coming-from-another-tool) · [Several keys for one service](#several-keys-for-one-service) · [Running things](#running-things) · [Credentials that are a file](#credentials-that-are-a-file) · [The app](#the-app)
 - **Checking config** — [What a value should look like](#what-a-value-should-look-like) · [Finding what a codebase needs](#finding-what-a-codebase-needs)
 - **Agents** — [What your agent gets](#what-your-agent-gets) · [Adding a key off-transcript](#adding-a-key-without-pasting-it-into-the-chat) · [Approvals](#approving-what-runs) · [Policy](#what-the-agent-may-run)
-- **Your team** — [Adding someone](#adding-a-teammate) · [Removing someone](#removing-someone) · [Membership changes](#when-someone-else-changes-who-can-read-it) · [Merging](#when-two-branches-both-change-the-vault) · [CI](#ci)
+- **Your team** — [Adding someone](#adding-a-teammate) · [Only some sets](#giving-someone-only-some-sets) · [Removing someone](#removing-someone) · [Membership changes](#when-someone-else-changes-who-can-read-it) · [Merging](#when-two-branches-both-change-the-vault) · [CI](#ci) · [After someone leaves](#what-someone-removed-could-still-use)
 - **Hardening** — [The security ladder](#the-security-ladder) · [Touch ID](#touch-id) · [Hardware keys](#hardware-keys)
 - **Reference** — [Commands](#commands) · [How the crypto works](#how-the-crypto-works) · [What hush does not do](#what-hush-does-not-do)
 - **Contributing** — [Development](#development) · [Contributing](#contributing-1) · [License](#license)
@@ -685,21 +685,50 @@ Nobody has to maintain a manifest. The code is the manifest.
 
 ## Adding a teammate
 
-They run `hush id --create` and send you one line:
+They run `hush id --create` and send you one line — their encryption key and
+their signing key, together:
 
 ```
-hush_pk_1xMUlHhmUKj0O_oRPgusa3rYileLjwFcLdSLS2H8KhY
+hush_pk_1xMUlHhmUKj0O_oRPgusa3rYileLjwFcLdSLS2H8KhYog_51Vx0R5kOew0GsoADAILwdX8Jg_0XhoB2wa2vMZY
 ```
 
 You run:
 
 ```bash
-hush team add sam hush_pk_1xMUlHhmUKj0O_oRPgusa3rYileLjwFcLdSLS2H8KhY
+hush team add sam hush_pk_1xMU…      # --role admin to let them manage the team too
 git commit -am "add sam"
 ```
 
 That is onboarding. They `git pull` and `hush run` works. No account, no invite,
 no server, nothing pasted into chat.
+
+**Signed vaults.** A vault made with `hush init` is signed (hush/v3): its header
+— who can read it, and a commitment to every data key — carries an admin's
+signature, and every member's hush checks it before decrypting anything. Only an
+admin can change who can read the vault; members can still add and change
+values. An older vault is signed the first time an admin changes its membership,
+or with `hush team sign`. To make sure the key a vault lists for someone is
+really theirs, compare safety numbers over a call:
+
+```bash
+hush team verify sam      # sixty digits; sam runs `hush team verify <you>` and reads theirs
+```
+
+## Giving someone only some sets
+
+Not everyone needs everything. A *scoped* member reads only the sets you name:
+
+```bash
+hush team add junior hush_pk_… --sets dev,staging
+hush team rm junior --from staging     # take one away; that set gets a new key
+```
+
+Each of those sets gets a key of its own, wrapped for every full member and for
+the scoped members given it; everything else stays out of reach — not hidden in
+the UI, but unreadable with their key and the vault file both in hand. A run in
+a project that also uses sets they were not given skips those and says so;
+asking for one by name (`--use prod`) says who can grant it. `hush ls <set>`
+shows who can read a restricted set.
 
 ## Removing someone
 
@@ -727,6 +756,14 @@ accepted. When you pull a vault with a member *you* did not add, hush stops:
   If you expected this:  hush team accept
   If you did not:        hush team reject   (how to undo it)
 ```
+
+In a **signed** vault this only happens when something is off: a change signed
+by an admin your machine already trusts arrives with a one-line notice ("alice
+changed who can read this vault: added dana (signed)"), and hush refuses a
+header that is unsigned, signed by someone who is not an admin, or signed by an
+admin your machine has never seen — the last one until you have checked them
+with `hush team verify`. The prompt above is what an **unsigned** (older) vault
+gets for any membership change.
 
 Nothing is decrypted or added until you decide — a member added by someone who
 is not a real teammate would read every secret added from then on. Check with
@@ -768,13 +805,50 @@ finishes it.
 
 ## CI
 
+Give CI an identity of its own that reads only what the jobs need:
+
 ```bash
-# store the private key as a CI secret
-HUSH_IDENTITY=$HUSH_CI_KEY hush run -- npm test
+hush ci create github --sets ci,staging | gh secret set HUSH_IDENTITY
+git commit -am "CI can read ci and staging"
 ```
 
-Give CI its own identity (`hush id --create` on a throwaway machine, then
-`hush team add ci <pk>`) so you can revoke it independently.
+Piped, it prints the private key alone, straight into the secret store, and
+keeps it nowhere. A CI identity is a scoped member marked as a machine: never an
+admin, never able to sign, and `hush ci rm github` rotates only the sets it
+could read.
+
+In GitHub Actions:
+
+```yaml
+- uses: actions/setup-node@v4
+  with: { node-version: 22 }
+- uses: omarei-omoto/hush@v1
+  with:
+    identity: ${{ secrets.HUSH_IDENTITY }}
+- run: hush run -- npm test
+```
+
+The action masks the identity, installs hush, and checks the identity can read
+the vault before any later step needs it. In a job, `hush run` also has GitHub
+mask every injected value line by line, so GitHub's own log redaction applies on
+top of hush's — only for a CI identity, so an agent on a laptop setting
+`GITHUB_ACTIONS` itself gets nothing printed. Anywhere else,
+`HUSH_IDENTITY=… hush run -- npm test` works the same way.
+
+## What someone removed could still use
+
+`hush team rm sam` re-keys everything Sam could read, so their copy of the repo
+opens nothing new. What they already read, they have. Every value they could
+read is marked until it is set again:
+
+```bash
+hush exposed           # each value, who could read it, and where to replace it (Stripe, OpenAI, AWS, …)
+hush ls --age          # every value, oldest first
+```
+
+`"rotateAfterDays": 90` in a policy (or `{ "prod": 30, "*": 180 }`) makes
+`hush level` and `hush doctor` list values older than that. A floor can ask to
+be told sooner than a repository does, never later.
 
 ---
 
@@ -898,6 +972,8 @@ daily
   (pass-through: npm run dev, python app.py, … run the same way)
   hush dev [script]                        find package.json, run it with them injected
   hush ls [<set>]                          library, project, what is used — or one set's keys
+  hush ls [<set>] --age                    how long since each value was replaced, oldest first
+  hush exposed                             values someone removed could still use, and where to replace them
   hush rm <KEY> [--from <set>]             remove a key
   hush rm <set> [--yes]                    remove a whole set
   hush ui                                  open the local app to manage everything
@@ -914,6 +990,11 @@ sharing
   hush team add <name> <pk>     re-wraps the key for them; commit and they're in
   hush team rm <name>           removes them and re-encrypts everything
   hush team accept|reject       someone else changed who can read the vault — check, then decide
+  hush team add <n> <pk> --sets a,b   a member who reads only those sets
+  hush team rm <name> --from <set>    take one set away from a scoped member
+  hush team sign                sign this vault (admins only change who can read it)
+  hush team verify <name>       a safety number to compare over a call
+  hush ci create <name> --sets a,b    a CI identity that reads only those sets
   hush id [--create]            show or create this machine's key
   hush link <vault> [--env e]   point this repo at a vault you already have
   hush merge-driver --install   merge vault.json key by key in this clone's git merges
@@ -955,28 +1036,41 @@ Vault files hold only ciphertext and public keys. Your private key never leaves 
 
 ```
                         ┌─ wrapped for ana ────┐
-  DEK (random 32B) ─────┼─ wrapped for sam ────┼──► .hush/vault.json
-        │               └─ wrapped for ci ─────┘      (commit this)
+  vault key (32B) ──────┼─ wrapped for sam ────┼──► .hush/vault.json
+        │               └─ wrapped for ci  ──X  (ci is scoped: no vault key)
         │
-        └─► AES-256-GCM per value, AAD = "hush/v2|<generation>|<env>|<KEY>"
+        └─► AES-256-GCM per value, AAD = "hush/v2|<generation>|<set>|<KEY>"
+
+  "staging" key (32B) ──── wrapped for ana, sam, ci   (a set with a key of its own)
+
+  header { members, roles, sets each may read, key generations, key commitments }
+        └─► Ed25519 signature by an admin
 ```
 
-- **Per-value:** AES-256-GCM under the vault's data key. The AAD binds the
-  ciphertext to its `env|KEY` slot and to the key generation that sealed it, so
-  values cannot be swapped between slots and a generation number cannot be
-  edited to fake freshness.
-- **Per-recipient:** the DEK is wrapped once per member — ephemeral X25519 →
-  ECDH → HKDF-SHA256 → AES-256-GCM. This is the age/ECIES construction.
-- **Adding a member** re-wraps the existing DEK. Nothing is re-encrypted.
-- **Removing a member** mints a new DEK generation and re-seals every value.
-- **Pinning.** Encrypting to a public key says nothing about who did it, and
-  every member's public key is in the file — so anyone can build a vault that
-  opens for your whole team. Each machine therefore remembers, per vault, the
-  members it accepted, a commitment to the data key behind each generation
-  (`HKDF(DEK, vault id, generation)`, which reveals nothing about the key), and
-  which vault lives at which path. A member it did not add, a different key
-  for a generation it has seen, or a different vault in the same place is
-  refused until you run `hush team accept`.
+- **Per-value:** AES-256-GCM under the key of the set it is in — the vault key,
+  or the set's own key if it has one. The AAD binds the ciphertext to its
+  `set|KEY` slot and to the key generation that sealed it, so values cannot be
+  swapped between slots and a generation cannot be edited to fake freshness.
+- **Per-recipient:** a key is wrapped once per member who may hold it —
+  ephemeral X25519 → ECDH → HKDF-SHA256 → AES-256-GCM. This is the age/ECIES
+  construction. Full members hold the vault key and every set key; a scoped
+  member holds only the keys of their sets.
+- **Adding a member** re-wraps the existing keys. Nothing is re-encrypted.
+- **Removing a member** mints new keys for everything they could read and
+  re-seals it.
+- **The signed header (hush/v3).** Encrypting to a public key says nothing
+  about who did it, and every member's public key is in the file — so without a
+  signature anyone could build a vault that opens for your whole team. The
+  header lists every member, their role, the sets a scoped member may read, and
+  a commitment to each data key (`HKDF(key, vault id, generation)`, which
+  reveals nothing about the key). An admin signs it with an Ed25519 key derived
+  from their identity (a hardware identity keeps a separate one). A member
+  checks the signature against an admin their machine already trusts, and
+  checks that the key they unwrapped is the one the header commits to.
+- **Pinning.** Each machine also remembers, per vault, the members and admins
+  it accepted, the key commitment for each generation, and which vault lives at
+  which path — which is what catches an unsigned or downgraded copy, and what
+  an older, unsigned vault relies on alone.
 - **Your private key** lives in the macOS Keychain, or `~/.hush/identity` at
   mode 0600. It is never in a vault file, never in a repo, and is stripped from
   the environment of anything `hush run` launches.
@@ -985,15 +1079,20 @@ The vault file holds ciphertext, public keys, and metadata. That is all:
 
 ```json
 {
-  "scheme": "hush/v2",
-  "dek": { "generation": 2, "wraps": { "a1b2…": { "epk": "…", "ct": "…" } } },
-  "recipients": { "a1b2…": { "name": "ana", "pk": "hush_pk_…", "role": "admin" } },
+  "scheme": "hush/v3",
+  "dek": { "generation": 2, "commit": "9f1c…", "wraps": { "a1b2…": { "epk": "…", "ct": "…" } } },
+  "recipients": {
+    "a1b2…": { "name": "ana", "pk": "hush_pk_…", "spk": "hush_spk_…", "role": "admin" },
+    "c3d4…": { "name": "ci", "pk": "hush_pk_…", "role": "member", "ci": true, "sets": ["staging"] }
+  },
+  "setKeys": { "staging": { "generation": 1, "commit": "4e07…", "wraps": { "a1b2…": {}, "c3d4…": {} } } },
   "envs": {
     "default": {
       "DATABASE_URL": { "iv": "…", "ct": "…", "tag": "…", "gen": 2, "v": 2,
                         "updatedBy": "ana", "updatedAt": "2026-01-01T00:00:00Z" }
     }
-  }
+  },
+  "signature": { "by": "a1b2…", "sig": "…" }
 }
 ```
 

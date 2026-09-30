@@ -19,7 +19,7 @@ export async function cmdGlobal(a: Args): Promise<void> {
     if (existsSync(path)) die(`A vault called "${target}" already exists.`, `Adopt it with: hush global ${target}`);
     const id = loadIdentity() ?? createIdentity();
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    Vault.create(path, target, { name: "me", pub: id.pub, ageRecipient: id.age?.recipients[0] });
+    Vault.create(path, target, { name: "me", pub: id.pub, priv: id.priv, ageRecipient: id.age?.recipients[0] });
     saveConfig({ globalVault: target });
     info(`${green("✓")} your library is vault ${bold(target)}`);
     info(dim(`  ${path}`));

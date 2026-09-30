@@ -2,7 +2,8 @@
  * `hush run`, `hush dev` and pass-through (`hush npm run dev`) — run a command with secrets injected.
  */
 import { dirname, basename } from "node:path";
-import { audit } from "../vault.ts";
+import { audit, type Vault } from "../vault.ts";
+import type { Opener } from "../crypto.ts";
 import { requireIdentity } from "../identity.ts";
 import { runWithSecrets } from "../run.ts";
 import { MIN_REDACTABLE } from "../redact.ts";
@@ -39,7 +40,10 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
   }
 
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, unreadable } = composeSets(loose.vault, id, loose.hushDir, extra);
+  // A scoped member or CI identity in a project that also uses sets they were
+  // never given: skipped, and said, so a missing variable has an explanation.
+  if (unreadable.length) process.stderr.write(dim(`hush: not yours to read, skipped: ${unreadable.join(", ")}\n`));
 
   // Same checks the MCP server applies to hush_run, so a plain shell cannot
   // walk around a policy an agent's MCP tools would have been refused by.
@@ -194,6 +198,8 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
     }
   }
 
+  githubMasks(loose.vault, id, secrets);
+
   const result = await runWithSecrets(argv[0], argv.slice(1), {
     cwd: process.cwd(),
     secrets,
@@ -240,4 +246,24 @@ export async function cmdDev(a: Args): Promise<void> {
  */
 export async function runPassThrough(argv: string[]): Promise<void> {
   return runCommand({ _: [], rest: [], flags: {} }, argv);
+}
+
+/**
+ * In GitHub Actions, have GitHub mask every injected value in the job log too,
+ * on top of hush's own redaction: `::add-mask::` per line of each value (a PEM
+ * is several lines, and GitHub masks line by line).
+ *
+ * Only for a CI identity (`hush ci create`). The mask command carries the
+ * value on stdout, and on a person's own machine — where an agent could set
+ * GITHUB_ACTIONS=true itself — that would print it straight into the agent's
+ * transcript. A CI identity's key is only ever in the CI.
+ */
+function githubMasks(vault: Vault | null, id: Opener, secrets: Record<string, string>): void {
+  if (process.env.GITHUB_ACTIONS !== "true" || !vault) return;
+  if (!vault.data.recipients[vault.meFingerprint(id)]?.ci) return;
+  const lines = new Set<string>();
+  for (const v of Object.values(secrets)) {
+    for (const line of v.split(/\r?\n/)) if (line.trim().length >= 3) lines.add(line);
+  }
+  for (const line of lines) process.stdout.write(`::add-mask::${line}\n`);
 }

@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { Vault } from "../src/vault.ts";
 import { resolveStageTtl, DEFAULT_STAGE_TTL_MS } from "../src/ui.ts";
-import { generateIdentity, encodeSecret } from "../src/crypto.ts";
+import { generateIdentity, encodeSecret, encodePub } from "../src/crypto.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
 const SECRET_VALUE = "sk_live_ui_test_value_do_not_leak";
@@ -1637,5 +1637,31 @@ describe("ui server — the Agent section's endpoints", () => {
       assert.ok(m.fingerprint.length > 0, "a member has no fingerprint to show in the Team ledger");
       assert.ok(m.kind === "key" || m.kind === "hardware", `unexpected member kind: ${m.kind}`);
     }
+  });
+});
+
+describe("ui server — signed vaults and scoped members (hush/v3)", () => {
+  test("state says whether the vault is signed, and each member's sets and CI flag", async () => {
+    const st = (await (await api("/api/state")).json()) as {
+      signed: boolean | null;
+      members: { sets: string[] | null; ci: boolean }[];
+    };
+    assert.equal(typeof st.signed, "boolean");
+    for (const m of st.members) {
+      assert.ok(m.sets === null || Array.isArray(m.sets));
+      assert.equal(typeof m.ci, "boolean");
+    }
+  });
+
+  test("/api/team refuses a malformed set list, and a member given sets reads only those", async () => {
+    const bad = await api("/api/team", { name: "x", pk: encodePub(generateIdentity().pub), sets: "prod" });
+    assert.equal(bad.status, 400);
+    const scoped = generateIdentity();
+    const r = await api("/api/team", { name: "scoped-ui", pk: encodePub(scoped.pub), sets: ["fal/personal"] });
+    assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    const st = (await (await api("/api/state")).json()) as { signed: boolean; members: { name: string; sets: string[] | null }[] };
+    assert.equal(st.signed, true, "giving someone only some sets should have signed the vault");
+    assert.deepEqual(st.members.find((m) => m.name === "scoped-ui")?.sets, ["fal/personal"]);
+    await api("/api/team", { action: "remove", name: "scoped-ui" });
   });
 });

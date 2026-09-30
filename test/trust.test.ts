@@ -364,24 +364,53 @@ describe("V-1: ordinary team changes keep working", () => {
     t.cleanup();
   });
 
-  test("a member someone else added is refused until accepted, then works", () => {
+  test("in a signed vault, a member an admin added is accepted, and said", () => {
     const t = team();
     t.alice.run(["team", "add", "bob", t.bob.pk]);
     t.bob.run(["verify"]);
     const dave = generateIdentity();
     t.alice.run(["team", "add", "dave", encodePub(dave.pub)]);
 
-    const refused = t.bob.run(runPrint);
+    const ran = t.bob.run(runPrint);
+    assert.equal(ran.code, 0, ran.out);
+    assert.match(ran.out, /API_BASE=\[redacted:API_BASE\]/);
+    assert.match(ran.out, /alice changed who can read this vault: added dave \(signed\)/, ran.out);
+    assert.doesNotMatch(t.bob.run(runPrint).out, /added dave/, "the notice repeats");
+    t.cleanup();
+  });
+
+  test("in an unsigned (v2) vault, a member someone else added is refused until accepted, then works", () => {
+    const t = team();
+    // A v2 vault with Alice as admin and Bob as a member — built in-process and
+    // stripped of its signature before anyone's hush has seen it signed.
+    const v = Vault.open(t.vaultPath);
+    v.addRecipient(t.alice.id, "bob", t.bob.pk);
+    v.save();
+    const data = JSON.parse(readFileSync(t.vaultPath, "utf8"));
+    data.scheme = "hush/v2";
+    delete data.signature;
+    for (const r of Object.values(data.recipients) as { spk?: string }[]) delete r.spk;
+    writeFileSync(t.vaultPath, JSON.stringify(data, null, 2));
+    t.alice.run(["verify"]);
+    t.bob.run(["verify"]);
+
+    // Bob is a member, not an admin: his addition is not signed.
+    const dave = generateIdentity();
+    const added = t.bob.run(["team", "add", "dave", encodePub(dave.pub)]);
+    assert.equal(added.code, 0, added.out);
+    assert.equal(JSON.parse(readFileSync(t.vaultPath, "utf8")).scheme, "hush/v2", "a member's change signed the vault");
+
+    const refused = t.alice.run(runPrint);
     assert.notEqual(refused.code, 0, refused.out);
     assert.match(refused.out, /dave/, "the refusal does not name who was added:\n" + refused.out);
 
-    const noTty = t.bob.run(["team", "accept"]);
+    const noTty = t.alice.run(["team", "accept"]);
     assert.notEqual(noTty.code, 0, "accept went through with nobody asked:\n" + noTty.out);
 
-    const accepted = t.bob.run(["team", "accept", "--yes"]);
+    const accepted = t.alice.run(["team", "accept", "--yes"]);
     assert.equal(accepted.code, 0, accepted.out);
     assert.match(accepted.out, /dave/);
-    assert.match(t.bob.run(runPrint).out, /API_BASE=\[redacted:API_BASE\]/);
+    assert.match(t.alice.run(runPrint).out, /API_BASE=\[redacted:API_BASE\]/);
     t.cleanup();
   });
 

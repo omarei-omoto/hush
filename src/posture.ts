@@ -20,6 +20,7 @@ import { identityPlugin, ageIdentityPath, ageAvailable } from "./age.ts";
 import { loadPolicy } from "./mcp.ts";
 import { globalVaultExists } from "./library.ts";
 import { mcpRegistrations } from "./agents.ts";
+import { keyAges } from "./freshness.ts";
 
 export type Rung = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -54,6 +55,12 @@ export interface Posture {
   checks: Check[];
   next: Check | null;
   risk: Risk;
+  /** Values past the policy's rotateAfterDays (F-6), by set/KEY. Not a rung: a reminder. */
+  overdue: string[];
+  /** Values readable by someone since removed, until they are set again. */
+  exposed: string[];
+  /** hush/v3: the vault's header is signed by an admin. Null with no vault. */
+  signed: boolean | null;
 }
 
 const RUNG_NAMES: Record<Rung, string> = {
@@ -225,12 +232,16 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
   }
 
   const next = checks.find((c) => !c.pass) ?? null;
+  const ages = vault ? keyAges(vault, policy) : [];
   return {
     rung,
     name: RUNG_NAMES[rung],
     checks,
     next,
     risk: vault ? assessRisk(vault) : { weight: 0, reasons: [] },
+    overdue: ages.filter((k) => k.overdue).map((k) => `${k.set}/${k.key}`),
+    exposed: ages.filter((k) => k.exposed.length).map((k) => `${k.set}/${k.key}`),
+    signed: vault ? vault.signed : null,
   };
 }
 

@@ -17,6 +17,7 @@ import { biometryStatus } from "../biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin } from "../age.ts";
 import { type Args } from "../cli/args.ts";
 import { driverInstalled } from "./merge.ts";
+import { keyAges } from "../freshness.ts";
 import { bold, cyan, dim, green, info, red } from "../cli/output.ts";
 import { readIfExists } from "../cli/programs.ts";
 
@@ -155,6 +156,16 @@ export async function cmdDoctor(_a: Args): Promise<void> {
     const agePath = ageIdentityPath();
     const plugin = agePath ? identityPlugin(agePath) : null;
     check(Boolean(plugin), "hardware key", plugin ? `age-plugin-${plugin}` : "age installed, but the identity is a software key");
+  }
+
+  // Signed, overdue, exposed: the vault's own state, beyond this machine's.
+  if (vault) {
+    check(vault.signed, "vault signed", vault.signed ? "only an admin can change who can read it" : "an admin can run hush team sign");
+    const ages = keyAges(vault, policy);
+    const exposed = ages.filter((k) => k.exposed.length);
+    const overdue = ages.filter((k) => k.overdue);
+    if (exposed.length) check(false, "exposed values", `${exposed.length} readable by someone since removed — hush exposed`);
+    if (overdue.length) check(false, "rotation", `${overdue.length} past rotateAfterDays — hush ls --age`);
   }
 
   // A vault in git merges key by key only where this clone has asked for it.

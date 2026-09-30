@@ -22,6 +22,8 @@ import {
   diffieHellman,
   hkdfSync,
   createHash,
+  sign as edSign,
+  verify as edVerify,
   type KeyObject,
 } from "node:crypto";
 
@@ -61,6 +63,13 @@ export const SCHEME = "hush/v1";
  * existing key wraps keep unwrapping.
  */
 export const SCHEME_V2 = "hush/v2";
+/**
+ * The signed format (V-1b, 1.0): the vault's header — who can read it, and a
+ * commitment to every data key — is signed by an admin, so a vault rebuilt by
+ * someone who is not one no longer opens anywhere. Values seal exactly as in
+ * v2; only the header is new.
+ */
+export const SCHEME_V3 = "hush/v3";
 
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 const ub64 = (s: string) => Buffer.from(s, "base64");
@@ -231,4 +240,88 @@ export function dekCommit(dek: Buffer, vaultId: string, generation: number): str
   return Buffer.from(
     hkdfSync("sha256", dek, Buffer.from(vaultId, "utf8"), Buffer.from(`hush/dek-commit/${generation}`), 16),
   ).toString("hex");
+}
+
+// ------------------------------------------------------------------ signing
+
+export const SPK_PREFIX = "hush_spk_";
+
+/** An Ed25519 key that signs vault headers. */
+export interface Signer {
+  /** Raw 32-byte Ed25519 public key. */
+  spk: Buffer;
+  sign: (message: Buffer) => Buffer;
+}
+
+/** PKCS#8 wrapping for a raw Ed25519 seed (RFC 8410): a fixed 16-byte prefix. */
+const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+
+export function signerFromSeed(seed: Buffer): Signer {
+  if (seed.length !== 32) throw new Error("an Ed25519 seed is 32 bytes");
+  const priv = createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_PREFIX, seed]), format: "der", type: "pkcs8" });
+  const jwk = createPublicKey(priv).export({ format: "jwk" }) as { x: string };
+  return { spk: ub64u(jwk.x), sign: (message) => edSign(null, message, priv) };
+}
+
+/**
+ * The signing key that belongs to an X25519 identity.
+ *
+ * Derived, not stored: HKDF with its own label keeps it independent of the
+ * encryption key, and every identity that already exists — in a keychain, a
+ * file, an environment variable — has one without anything moving. A
+ * hardware-only (age) identity has no software key to derive from and keeps a
+ * separate one (identity.ts).
+ */
+export function signerForIdentity(id: Identity): Signer {
+  const seed = Buffer.from(hkdfSync("sha256", id.priv, Buffer.from("hush/v3"), Buffer.from("hush/v3/signing"), 32));
+  return signerFromSeed(seed);
+}
+
+export const encodeSpk = (spk: Buffer): string => SPK_PREFIX + b64u(spk);
+
+export function decodeSpk(s: string): Buffer {
+  const t = s.trim();
+  if (!t.startsWith(SPK_PREFIX)) throw new ValidationError(`not a hush signing key: ${t.slice(0, 16)}…`);
+  const raw = ub64u(t.slice(SPK_PREFIX.length));
+  if (raw.length !== 32) throw new ValidationError("a signing key is 32 bytes");
+  return raw;
+}
+
+export function verifySignature(spk: Buffer, message: Buffer, signature: Buffer): boolean {
+  try {
+    const key = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: b64u(spk) }, format: "jwk" });
+    return edVerify(null, message, key, signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * JSON with its keys sorted at every level and no whitespace — the bytes a
+ * signature covers. Two writers that build the same header in a different
+ * order, or pretty-print it differently, produce the same bytes.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A safety number for two signing keys: sixty digits both people can read to
+ * each other and compare. Order-independent, so both compute the same one.
+ */
+export function safetyNumber(a: Buffer, b: Buffer): string {
+  const [x, y] = [a, b].sort(Buffer.compare);
+  const digest = createHash("sha512").update("hush/safety-number/v1").update(x).update(y).digest();
+  const groups: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    groups.push(String(digest.readUInt32BE(i * 4) % 100000).padStart(5, "0"));
+  }
+  return groups.join(" ");
 }

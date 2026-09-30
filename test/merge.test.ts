@@ -9,17 +9,19 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Vault, type VaultFile } from "../src/vault.ts";
 import { generateIdentity, encodePub, type Identity } from "../src/crypto.ts";
 import { mergeVaults } from "../src/merge.ts";
+import { verifyHeader } from "../src/header.ts";
 
 const owner = generateIdentity();
 const leaving = generateIdentity();
 const joiners: Record<string, Identity> = { ours: generateIdentity(), theirs: generateIdentity() };
+const scopedIds: Record<string, Identity> = { ours: generateIdentity(), theirs: generateIdentity() };
 
 type Model = { values: Map<string, string>; members: Set<string> };
 
@@ -38,7 +40,9 @@ function baseVault(): { data: VaultFile; model: Model } {
     v.set(owner, env, key, val);
   }
   v.addRecipient(owner, "remove-me", encodePub(leaving.pub));
-  const data = JSON.parse(JSON.stringify(v.data)) as VaultFile;
+  // Saved, as it would be in a repository: a v3 vault is signed on save.
+  v.save();
+  const data = JSON.parse(readFileSync(join(dir, "vault.json"), "utf8")) as VaultFile;
   rmSync(dir, { recursive: true, force: true });
   return { data, model: { values: new Map(Object.entries(values)), members: new Set(["owner", "remove-me"]) } };
 }
@@ -69,6 +73,14 @@ const OPS: Op[] = [
   { name: "rotate", rotates: true, apply: (v) => { v.rotate(owner); } },
   { name: "team add", rotates: false, apply: (v, m, side) => { v.addRecipient(owner, `add-${side}`, encodePub(joiners[side].pub)); m.members.add(`add-${side}`); } },
   { name: "team rm", rotates: true, apply: (v, m) => { v.removeRecipient(owner, "remove-me"); m.members.delete("remove-me"); } },
+  {
+    // A scoped member for "staging": the set gets a key of its own (hush/v3).
+    name: "grant set", rotates: false,
+    apply: (v, m, side) => {
+      v.addRecipient(owner, `scoped-${side}`, encodePub(scopedIds[side].pub), "member", { sets: ["staging"] });
+      m.members.add(`scoped-${side}`);
+    },
+  },
 ];
 
 /** An independent, obviously-correct three-way merge of the plaintext model. */
@@ -141,6 +153,14 @@ describe("F-1: merging two branches of a vault", () => {
         }
         assert.equal(merged.canRead(leaving), expected.members.has("remove-me"), "a removed member can still decrypt");
         assert.deepEqual(merged.staleValues(), [], "a value was left under an older key");
+        if (merged.signed) assert.ok(verifyHeader(r.data!).ok, `the merged vault is not validly signed: ${JSON.stringify(verifyHeader(r.data!))}`);
+        // A scoped member reads their set and nothing else.
+        for (const [side, sid] of Object.entries(scopedIds)) {
+          if (!expected.members.has(`scoped-${side}`) || !merged.hasSet("staging") || !merged.isRestricted("staging")) continue;
+          assert.ok(merged.canReadSet(sid, "staging"), `scoped-${side} cannot read the set they were given`);
+          assert.ok(!merged.canReadSet(sid, "default"), `scoped-${side} can read a set they were not given`);
+          merged.materialize(sid, "staging");
+        }
         assert.deepEqual(merged.unlistedWraps(), [], "a key wrap belongs to no listed member");
 
         // Nothing a merge reports carries a value.

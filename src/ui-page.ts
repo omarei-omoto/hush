@@ -1066,8 +1066,9 @@ function renderLibrary(page){
 /* ------------------------------------------------------------------- team */
 
 function renderTeam(page){
-  page.append(h("header",{class:"head"},h("div",null,h("h1",null,"Team"),
-    h("p",{text:"People who can decrypt this project's vault. Removing someone re-encrypts everything, so their old copy opens nothing new."}))));
+  page.append(h("header",{class:"head"},h("div",null,h("h1",null,"Team",
+      S.signed===true?h("span",{class:"badge ok",style:"margin-left:10px;vertical-align:middle"},"signed"):S.signed===false?h("span",{class:"badge",style:"margin-left:10px;vertical-align:middle"},"unsigned"):null),
+    h("p",{text:"People who can decrypt this project's vault. Removing someone re-encrypts everything, so their old copy opens nothing new."+(S.signed?" Only an admin can change who is on this list.":"")}))));
   if(S.folder.state!=="vault"){
     page.append(h("div",{class:"banner"},icon("info"),h("span",{text:"This project has no vault yet. Adding someone makes one at .hush/vault.json — commit it so they can read it."})));
   }
@@ -1077,8 +1078,9 @@ function renderTeam(page){
       const me=m.name===S.me.name;
       list.append(h("div",{class:"li"},h("div",{class:"avatar",text:initials(m.name)}),
         h("div",{class:"body"},h("div",{class:"t"},m.name,me?h("span",{class:"badge"},"you"):null,h("span",{class:"badge"+(m.role==="admin"?" ok":"")},m.role),
-          m.kind==="hardware"?h("span",{class:"badge"},icon("lock"),"hardware key"):null),
-          h("div",{class:"d mono",text:(m.fingerprint||"").slice(0,16)})),
+          m.kind==="hardware"?h("span",{class:"badge"},icon("lock"),"hardware key"):null,
+          m.ci?h("span",{class:"badge"},"CI"):null),
+          h("div",{class:"d mono",text:(m.fingerprint||"").slice(0,16)+(m.sets?"  ·  reads "+(m.sets.join(", ")||"nothing"):"")})),
         me?null:h("button",{type:"button",class:"btn sm ghost dangerous",onclick:function(){
           confirmDialog("Remove "+m.name+"?","Everything is re-encrypted without them. Rotate any key they may have copied at its provider.","Remove",
             async function(){const r=await api("/api/team",{action:"remove",name:m.name});await refresh(r);toast(r.notice||"removed "+m.name)});
@@ -1088,12 +1090,16 @@ function renderTeam(page){
   }
   const who=h("input",{class:"input",placeholder:"sam",autocomplete:"off"});
   const pk=h("input",{class:"input mono",placeholder:"hush_pk_… or age1…",autocomplete:"off",spellcheck:"false"});
-  const f=h("form",{class:"row",style:"margin-top:14px"},field("Name",who),field("Their public key",pk),h("button",{type:"submit",class:"btn primary"},"Give access"));
+  // Blank means every set. Names give a scoped member just those (signed vaults).
+  const only=h("input",{class:"input",placeholder:"every set",autocomplete:"off"});
+  const f=h("form",{class:"row",style:"margin-top:14px"},field("Name",who),field("Their public key",pk),
+    S.signed?field("Only these sets",only):null,h("button",{type:"submit",class:"btn primary"},"Give access"));
   f.onsubmit=async function(ev){
     ev.preventDefault();
     if(!who.value.trim()){who.focus();return}
     if(!/^(hush_pk_|age1)/.test(pk.value.trim())){toast("that doesn't look like a public key — it starts with hush_pk_ or age1",{error:true});pk.focus();return}
-    const r=await api("/api/team",{name:who.value.trim(),pk:pk.value.trim()});
+    const sets=only.value.split(",").map(function(x){return x.trim()}).filter(Boolean);
+    const r=await api("/api/team",{name:who.value.trim(),pk:pk.value.trim(),sets:sets});
     await refresh(r);toast(r.vaultCreated?VAULT_MADE:"gave "+who.value.trim()+" access — commit .hush/vault.json");
   };
   page.append(h("section",{class:"card pad section"},h("h3",null,"Add someone"),

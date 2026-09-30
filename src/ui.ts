@@ -118,9 +118,9 @@ function requireProjectVault(ctx: UiCtx): Vault {
 }
 
 /** The founding-member shape Vault.create()/ensureProjectVault() want, built the same way `hush init` builds it. */
-function memberOf(id: ResolvedIdentity): { name: string; pub?: Buffer; ageRecipient?: string } {
+function memberOf(id: ResolvedIdentity): Parameters<typeof Vault.create>[2] {
   const name = process.env.USER || "me";
-  return id.pub ? { name, pub: id.pub } : { name, ageRecipient: id.age!.recipients[0] };
+  return id.pub ? { name, pub: id.pub, priv: id.priv } : { name, ageRecipient: id.age!.recipients[0] };
 }
 
 /**
@@ -456,6 +456,8 @@ function state(ctx: UiCtx) {
 
   return {
     vault: vault ? vault.data.name : null,
+    // hush/v3: only an admin can change who can read it, and every member checks.
+    signed: vault ? vault.signed : null,
     trust,
     me: { name: meName, pk: publicKeyOf(id) },
     defaultEnv: ctx.defaultEnv,
@@ -513,6 +515,9 @@ function state(ctx: UiCtx) {
           fingerprint: m.fingerprint,
           kind: m.kind === "age" ? "hardware" : "key",
           canDecrypt: m.canDecrypt,
+          // hush/v3: a scoped member reads only these; a CI identity is a machine.
+          sets: m.sets ?? null,
+          ci: m.ci === true,
         }))
       : [],
   };
@@ -654,9 +659,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
 
       if (action === "delete") {
         const keys = Object.keys(v.data.envs[String(name)] ?? {});
-        delete v.data.envs[String(name)];
-        if (v.data.meta) delete v.data.meta[String(name)];
-        v.markStructural();
+        v.removeSet(id, String(name));
         v.save();
         if (inLibrary) {
           saveLinks(ctx.hushDir, loadLinks(ctx.hushDir).filter((l) => l !== String(name)));
@@ -703,6 +706,7 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
         Vault.create(path, target, {
           name: "me",
           pub: id.pub,
+          priv: id.priv,
           ageRecipient: id.age?.recipients[0],
         });
         saveConfig({ globalVault: target });
@@ -975,9 +979,13 @@ async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, 
           ...(vaultCreated ? { vaultCreated: true } : {}),
         });
       }
-      v.addRecipient(id, name, pk);
+      const { sets, role } = body;
+      if (sets !== undefined && (!Array.isArray(sets) || sets.some((x: unknown) => typeof x !== "string"))) {
+        return json(res, 400, { error: "sets must be a list of set names" });
+      }
+      v.addRecipient(id, name, pk, role === "admin" ? "admin" : "member", { sets: (sets as string[] | undefined) ?? [] });
       v.save();
-      audit(ctx.hushDir, { actor: "ui", action: "team.add", name });
+      audit(ctx.hushDir, { actor: "ui", action: "team.add", name, sets: sets ?? [] });
       return json(res, 200, { ...state(ctx), ...(vaultCreated ? { vaultCreated: true } : {}) });
     }
 

@@ -19,8 +19,8 @@ to the latest release only.
 
 | Version | Supported |
 |---|---|
-| 0.6.x | yes |
-| < 0.6 | no — upgrade; see the CHANGELOG for what changed |
+| 0.8.x | yes |
+| < 0.8 | no — upgrade; see the CHANGELOG for what changed |
 
 ## What is in scope
 
@@ -31,6 +31,13 @@ Anything that lets someone read a secret they should not be able to:
   them — including through `hush_run`'s output.
 - Reaching the local UI from another machine, or without the session token.
 - A revoked member still being able to decrypt.
+- A vault that someone who is not a member rebuilt, re-keyed or re-signed being
+  decrypted without a refusal — a new member, a new data key, or planted values
+  accepted with no signature from an admin this machine trusts (hush/v3), or with
+  no `hush team accept` (an older, unsigned vault).
+- A scoped member, or a CI identity, reading a set it was not given.
+- A member who is not an admin changing a signed vault's membership or keys in
+  a way other members' hush accepts.
 - Getting a value out through `hush request` / `hush_request`: in a header the
   caller named, in a query string or body it opted into, or reflected back in a
   response the redactor failed to mask.
@@ -98,6 +105,8 @@ read before you trust it with anything real.
 | A value moved between slots | AAD binds each ciphertext to `env\|KEY` — a staging URL cannot be pasted into the prod slot |
 | Sharing without a server | The data key is wrapped once per member (X25519 ECDH → HKDF → AES-GCM), so `git push` is the whole distribution mechanism |
 | Offboarding | `hush team rm` mints a new data key and re-seals every value; the removed member's checkout decrypts nothing new |
+| A vault replaced by someone who is not a member | hush/v3: an admin signs the header (members, roles, key commitments); every member checks the signature against admins it already trusts, and that the key it unwrapped matches. Every machine also pins what it has accepted, so an unsigned or downgraded copy is refused |
+| Some people seeing only some sets | A set can have a key of its own, wrapped only for full members and the scoped members given it; `hush ci create` makes CI identities that are scoped by construction |
 | Secrets reaching a model | The MCP server has no tool that returns a value. `hush_run` injects and streams back redacted output |
 | A credential reaching an API without reaching the caller | `hush_request` substitutes inside hush's own process; nothing is substituted into the URL, and a redirect to another host is refused rather than followed |
 | A secret reaching a file without reaching the scrollback | `hush run --materialize` writes one file at `0600`, created with `wx`, removed on ordinary exit and best-effort after a `SIGKILL` (see the known-limitations list above), gated on `reveal` |
@@ -210,6 +219,23 @@ random salt — and `hush audit verify` names the first line that does not follo
 Anything running as you can still rewrite the whole file and recompute the
 chain, or cut lines off the end. A log nobody on the machine can rewrite has to
 live somewhere else.
+
+**Trust on first use.** The first time a machine sees a vault, it trusts it as
+it stands — its members, its admins' signing keys. Everything after that is
+checked against that first look. A vault forged *before* your first clone is
+not caught by the signature; `hush team verify <admin>` (a safety number you
+compare over a call) is what closes that gap.
+
+**A hardware admin signs with a software key.** A YubiKey or Secure Enclave key
+reached through age can decrypt but not sign, so an admin whose identity is
+hardware-only signs with a separate Ed25519 key kept in the keychain (or a 0600
+file). Stealing it lets someone change who can read the vault — and so read
+what is added afterwards — but not decrypt anything already there.
+
+**Members can write values.** The signature covers who holds which key, not
+what is in the values: any member holding a key can set a value, as before. A
+member acting in bad faith is out of scope for the vault; keeping non-members
+out is not.
 
 **No zeroisation.** Decrypted values live in JS strings and are collected
 whenever the runtime feels like it. A core dump or swap file may contain them.

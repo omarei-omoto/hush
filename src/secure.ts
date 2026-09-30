@@ -59,6 +59,15 @@ export function renderLevel(p: Posture): void {
     for (const r of p.risk.reasons) out(`    ${dim("·")} ${r}`);
   }
 
+  // Not rungs — the ladder is about how keys are held — but things to do.
+  if (p.signed === false) out(`\n  ${yellow("!")} this vault is not signed: an admin can run ${cyan("hush team sign")}`);
+  if (p.exposed.length) {
+    out(`\n  ${yellow("!")} ${p.exposed.length} value(s) were readable by someone since removed  ${cyan("hush exposed")}`);
+  }
+  if (p.overdue.length) {
+    out(`\n  ${yellow("!")} ${p.overdue.length} value(s) are past your rotateAfterDays: ${dim(p.overdue.slice(0, 4).join(", "))}${p.overdue.length > 4 ? dim("…") : ""}  ${cyan("hush ls --age")}`);
+  }
+
   if (p.next) {
     out();
     out(`  ${bold("Next")} ${dim("→")} ${p.next.label}`);

@@ -38,8 +38,9 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { dekCommit } from "./crypto.ts";
+import { dekCommit, SCHEME_V3 } from "./crypto.ts";
 import { safeText, type Vault, type TrustView } from "./vault.ts";
+import { verifyHeader, setKeyCommit } from "./header.ts";
 
 /**
  * Resolved per call, not at import. A module-level constant captures HUSH_HOME
@@ -66,6 +67,10 @@ interface Seen {
   commits?: Record<string, string>;
   /** The last generation a "rotated by someone else" notice was shown for. */
   noticed?: number;
+  /** hush/v3: the admins this machine trusts to sign, by fingerprint → signing key. */
+  admins?: Record<string, string>;
+  /** This vault has been seen signed; an unsigned copy of it is a downgrade. */
+  signed?: boolean;
 }
 
 const seenPath = (vaultId: string): string =>
@@ -244,6 +249,8 @@ export interface Pending {
   path: string;
   generation: number;
   commit: string;
+  /** The key this is about: absent for the vault key, the set's name for a set's own key. */
+  set?: string;
   /** A different vault now sits where this one was. */
   replaced?: { was: string };
   /** The data key behind a generation already seen is not the one seen then. */
@@ -256,9 +263,23 @@ export interface Pending {
   rotated: boolean;
   /** Nothing pinned for this vault yet: this is the first look. */
   firstUse: boolean;
+  /** hush/v3: signed by an admin this machine already trusts — its changes are accepted. */
+  signedBy?: { fingerprint: string; name: string };
+  /** hush/v3: the header's signature does not hold. */
+  unsigned?: { why: string };
+  /** hush/v3: signed, but by an admin this machine has never seen. */
+  unknownSigner?: { fingerprint: string; name: string; spk: string };
+  /** hush/v3: the key unwrapped is not the one the signed header commits to. */
+  commitMismatch?: boolean;
+  /** This vault was signed when this machine last saw it, and is not now. */
+  downgraded?: boolean;
 }
 
-export const hasProblems = (p: Pending): boolean => Boolean(p.replaced || p.keyChanged || p.added.length);
+export const hasProblems = (p: Pending): boolean =>
+  Boolean(
+    p.replaced || p.keyChanged || p.unsigned || p.unknownSigner || p.commitMismatch || p.downgraded ||
+      (p.added.length && !p.signedBy),
+  );
 
 /**
  * Raised instead of decrypting anything from a vault that changed in a way no
@@ -281,10 +302,25 @@ export class TrustError extends Error {
 export const isTrustError = (e: unknown): e is TrustError =>
   e instanceof TrustError || (e as { trust?: boolean })?.trust === true;
 
+/** Where the commitment for the key in a view is pinned. */
+const commitSlot = (view: TrustView): string => (view.set ? `set:${view.set}:${view.generation}` : String(view.generation));
+
+const commitOf = (view: TrustView): string =>
+  view.set ? setKeyCommit(view.dek, view.vaultId, view.set, view.generation) : dekCommit(view.dek, view.vaultId, view.generation);
+
+/** Is this signer one this machine trusts to change who can read the vault? */
+function trustedSigner(seen: Seen | null, fp: string, spk: string | undefined): boolean {
+  if (seen?.admins) return Boolean(spk) && seen.admins[fp] === spk;
+  // Pinned before the vault was signed (v2): the first signature is trusted if
+  // it comes from a member this machine had accepted — the upgrade itself.
+  if (seen?.recipients) return Boolean(seen.recipients[fp]);
+  return true; // first look: trust on first use
+}
+
 /** What differs, without recording anything. Needs the data key to commit to. */
 export function pendingChanges(view: TrustView): Pending {
   const seen = readSeen(view.vaultId);
-  const commit = dekCommit(view.dek, view.vaultId, view.generation);
+  const commit = commitOf(view);
   const bound = readPaths()[realOf(view.path)];
 
   const pending: Pending = {
@@ -292,6 +328,7 @@ export function pendingChanges(view: TrustView): Pending {
     path: view.path,
     generation: view.generation,
     commit,
+    ...(view.set ? { set: view.set } : {}),
     added: [],
     removed: [],
     rotated: false,
@@ -300,7 +337,7 @@ export function pendingChanges(view: TrustView): Pending {
 
   if (bound && bound !== view.vaultId) pending.replaced = { was: bound };
 
-  const pinnedCommit = seen?.commits?.[String(view.generation)];
+  const pinnedCommit = seen?.commits?.[commitSlot(view)];
   if (pinnedCommit && pinnedCommit !== commit) pending.keyChanged = { generation: view.generation };
 
   if (seen?.recipients) {
@@ -312,10 +349,29 @@ export function pendingChanges(view: TrustView): Pending {
     }
   }
 
+  if (view.data.scheme === SCHEME_V3) {
+    const check = verifyHeader(view.data);
+    if (!check.ok) {
+      pending.unsigned = { why: check.why };
+    } else {
+      const signer = view.data.recipients[check.by];
+      const signed = view.set ? view.data.setKeys?.[view.set]?.commit : view.data.dek.commit;
+      if (signed !== commit) pending.commitMismatch = true;
+      if (trustedSigner(seen, check.by, signer.spk)) {
+        pending.signedBy = { fingerprint: check.by, name: signer.name };
+      } else {
+        pending.unknownSigner = { fingerprint: check.by, name: signer.name, spk: signer.spk ?? "" };
+      }
+    }
+  } else if (seen?.signed) {
+    pending.downgraded = true;
+  }
+
   // A newer generation than any whose key was checked here is a rotation (or a
   // removal, which rotates). Said once per generation, not on every command.
-  if (seen?.commits) {
-    const newestChecked = Math.max(...Object.keys(seen.commits).map(Number));
+  if (!view.set && seen?.commits) {
+    const checked = Object.keys(seen.commits).filter((k) => /^\d+$/.test(k)).map(Number);
+    const newestChecked = checked.length ? Math.max(...checked) : 0;
     if (view.generation > newestChecked && (seen.noticed ?? 0) < view.generation) pending.rotated = true;
   }
   return pending;
@@ -328,18 +384,27 @@ export function pendingChanges(view: TrustView): Pending {
  */
 export function recordTrusted(view: TrustView, opts: { noticed?: boolean } = {}): void {
   const seen = readSeen(view.vaultId);
-  const commits = { ...(seen?.commits ?? {}), [String(view.generation)]: dekCommit(view.dek, view.vaultId, view.generation) };
+  const commits = { ...(seen?.commits ?? {}), [commitSlot(view)]: commitOf(view) };
   const recipients: Record<string, PinnedRecipient> = {};
   for (const [fp, r] of Object.entries(view.recipients)) recipients[fp] = { name: r.name, pk: r.pk };
-  const newer = !seen || view.generation >= seen.generation;
+  const signed = view.data.scheme === SCHEME_V3 && verifyHeader(view.data).ok;
+  const admins: Record<string, string> = {};
+  if (signed) {
+    for (const [fp, r] of Object.entries(view.data.recipients)) {
+      if (r.role === "admin" && !r.ci && !r.sets && r.spk) admins[fp] = r.spk;
+    }
+  }
+  // Only the vault key's generation drives the rollback mark.
+  const newer = view.set ? false : !seen || view.generation >= seen.generation;
   writeSeen(view.vaultId, {
     recipients,
     commits,
+    ...(signed ? { admins, signed: true } : {}),
     // The rollback mark only moves forward here; `hush verify --accept` is the
     // one deliberate way down.
-    generation: newer ? view.generation : seen!.generation,
-    members: newer ? Object.values(view.recipients).map((r) => r.name).sort() : seen!.members,
-    ...(opts.noticed || !seen ? { noticed: Math.max(seen?.noticed ?? 0, view.generation) } : {}),
+    generation: seen && !newer ? seen.generation : view.set ? (seen?.generation ?? view.data.dek.generation) : view.generation,
+    members: seen && !newer ? seen.members : Object.values(view.recipients).map((r) => r.name).sort(),
+    ...(opts.noticed || !seen ? { noticed: Math.max(seen?.noticed ?? 0, view.set ? 0 : view.generation) } : {}),
   });
   bindPath(view.path, view.vaultId);
 }
@@ -353,11 +418,24 @@ export function verifyTrust(view: TrustView): string[] {
   const pending = pendingChanges(view);
   if (hasProblems(pending)) throw new TrustError(pending);
   const notices: string[] = [];
-  if (pending.rotated) {
+  const names = (xs: string[]) => xs.map((n) => safeText(n, 64)).join(", ");
+  if (pending.signedBy && (pending.added.length || pending.removed.length)) {
+    const parts = [
+      pending.added.length ? `added ${names(pending.added.map((a) => a.name))}` : "",
+      pending.removed.length ? `removed ${names(pending.removed)}` : "",
+    ].filter(Boolean);
+    notices.push(`${safeText(pending.signedBy.name, 64)} changed who can read this vault: ${parts.join("; ")} (signed)`);
+  } else if (pending.rotated) {
     notices.push(
       pending.removed.length
-        ? `the vault key was rotated by someone else (removed: ${pending.removed.map((n) => safeText(n, 64)).join(", ")})`
+        ? `the vault key was rotated by someone else (removed: ${names(pending.removed)})`
         : "the vault key was rotated by someone else",
+    );
+  }
+  if (pending.firstUse && pending.signedBy) {
+    notices.push(
+      `first look at this vault from this machine: signed by ${safeText(pending.signedBy.name, 64)}. ` +
+        `Check it is really them: hush team verify ${safeText(pending.signedBy.name, 64)}`,
     );
   }
   recordTrusted(view, { noticed: pending.rotated });
@@ -375,21 +453,36 @@ export function acceptPending(view: TrustView, shown: Pending): void {
     now.commit === shown.commit &&
     now.generation === shown.generation &&
     now.added.map((a) => a.fingerprint).sort().join() === shown.added.map((a) => a.fingerprint).sort().join() &&
-    (now.replaced?.was ?? "") === (shown.replaced?.was ?? "");
+    (now.replaced?.was ?? "") === (shown.replaced?.was ?? "") &&
+    (now.unknownSigner?.fingerprint ?? "") === (shown.unknownSigner?.fingerprint ?? "");
   if (!same) {
     throw new Error("The vault changed again while you were looking at it. Run `hush team accept` again.");
   }
+  if (now.unsigned || now.commitMismatch) {
+    throw new Error(
+      "This vault's signature does not hold, so there is nothing trustworthy to accept. Restore it (hush team reject shows how).",
+    );
+  }
   recordTrusted(view, { noticed: true });
+  // An admin nobody here had seen is trusted from now on: that is what was accepted.
+  if (now.unknownSigner) {
+    const seen = readSeen(view.vaultId);
+    writeSeen(view.vaultId, { admins: { ...(seen?.admins ?? {}), [now.unknownSigner.fingerprint]: now.unknownSigner.spk } });
+  }
 }
 
 /**
  * Fingerprints listed in a vault that this machine has not accepted — without
- * the data key, for `hush team ls`. Empty on a first look, which is accepted
- * the moment anything is decrypted.
+ * the data key, for `hush team ls`. A v3 vault signed by an admin this machine
+ * trusts has none: its signature is the acceptance. Empty on a first look.
  */
 export function unacceptedMembers(vault: Vault): string[] {
   const seen = readSeen(vault.data.id);
   if (!seen?.recipients) return [];
+  if (vault.data.scheme === SCHEME_V3) {
+    const check = verifyHeader(vault.data);
+    if (check.ok && trustedSigner(seen, check.by, vault.data.recipients[check.by]?.spk)) return [];
+  }
   return Object.keys(vault.data.recipients).filter((fp) => !seen.recipients![fp]);
 }
 
@@ -402,13 +495,37 @@ export function describeTrustProblems(p: Pending): string[] {
       "  Someone replaced this project's vault. Nothing will be decrypted or added until you accept it.",
     );
   }
+  if (p.downgraded) {
+    lines.push(
+      "This vault was signed by an admin when this machine last saw it, and it is not signed now.",
+      "  Stripping the signature is how a forged vault would get past the check. Treat it as forged.",
+    );
+  }
+  if (p.unsigned) {
+    lines.push(
+      `This vault's signed header does not hold: ${p.unsigned.why}.`,
+      "  Someone changed who can read it without an admin's signature. Treat it as forged.",
+    );
+  }
+  if (p.commitMismatch) {
+    lines.push(
+      `The key you unwrapped${p.set ? ` for set "${p.set}"` : ""} is not the one the vault's signed header names.`,
+      "  Someone swapped a key wrap without an admin's signature. Treat it as forged.",
+    );
+  }
+  if (p.unknownSigner) {
+    lines.push(
+      `This vault is signed by ${safeText(p.unknownSigner.name, 64) ?? "someone"}, an admin this machine has not seen before.`,
+      `  Check it is really them before accepting: hush team verify ${safeText(p.unknownSigner.name, 64) ?? ""}`,
+    );
+  }
   if (p.keyChanged) {
     lines.push(
       `The data key behind generation ${p.keyChanged.generation} of this vault is not the one this machine saw before.`,
       "  No hush command does that: re-keying always moves to a new generation. Treat this vault as forged.",
     );
   }
-  if (p.added.length) {
+  if (p.added.length && !p.signedBy) {
     lines.push("This vault's membership changed, and nobody on this machine accepted it:");
     for (const a of p.added) {
       lines.push(`  new: ${safeText(a.name, 64) ?? "unknown"}  ${a.pk.slice(0, 24)}…  (fingerprint ${a.fingerprint})`);

@@ -3,8 +3,11 @@
  */
 import { usedSets, librarySets, openGlobal, globalVaultName, globalVaultExists, linkNameFor } from "../library.ts";
 import { type Args, bool } from "../cli/args.ts";
+import { keyAges, describeAge } from "../freshness.ts";
+import { loadPolicy } from "../mcp.ts";
+import { policyFor } from "../cli/context.ts";
 import { ctxLoose, isSetUp } from "../cli/context.ts";
-import { bold, cyan, die, dim, green, info, out, shown, warn } from "../cli/output.ts";
+import { bold, cyan, die, dim, green, info, out, red, shown, warn, yellow } from "../cli/output.ts";
 
 /**
  * `hush ls` — the one-screen overview: your library, this project, and which
@@ -27,8 +30,35 @@ export async function cmdLs(a: Args): Promise<void> {
     if (meta.description) info(`  ${dim(meta.description)}`);
     if (meta.whenToUse) info(`  ${dim("when: " + meta.whenToUse)}`);
     info("");
+    if (meta.restricted) info(`  ${dim("readable by: " + (meta.readers ?? []).join(", "))}`);
     if (!meta.keys.length) info(dim("  (no keys yet)"));
+    if (bool(a, "age")) {
+      const ages = keyAges(home, policyFor(loose.hushDir) ?? loadPolicy(loose.hushDir)).filter((k) => k.set === setName);
+      const width = Math.max(0, ...ages.map((k) => k.key.length));
+      for (const k of ages) {
+        const flags = [k.overdue ? red(`overdue (limit ${k.limit} days)`) : "", k.exposed.length ? yellow(`exposed to ${k.exposed.join(", ")}`) : ""]
+          .filter(Boolean)
+          .join("  ");
+        info(`  ${k.key.padEnd(width)}  ${dim(describeAge(k.days))}  ${flags}`.trimEnd());
+      }
+      return;
+    }
     for (const k of meta.keys) info(`  ${k}`);
+    return;
+  }
+
+  if (bool(a, "age")) {
+    // Every set this folder can see, oldest first: the order a person rotates in.
+    const policy = policyFor(loose.hushDir) ?? loadPolicy(loose.hushDir);
+    const rows = [
+      ...(project ? keyAges(project, policy).map((k) => ({ ...k, where: "project" })) : []),
+      ...(library ? keyAges(library, policy).map((k) => ({ ...k, where: "library" })) : []),
+    ].sort((x, y) => (y.days ?? 0) - (x.days ?? 0));
+    if (!rows.length) return info(dim("Nothing stored yet."));
+    for (const k of rows) {
+      const flags = [k.overdue ? red("overdue") : "", k.exposed.length ? yellow("exposed") : ""].filter(Boolean).join(" ");
+      info(`  ${dim(describeAge(k.days).padEnd(10))} ${bold(k.key)} ${dim(`${shown(k.set)} · ${k.where}`)} ${flags}`.trimEnd());
+    }
     return;
   }
 

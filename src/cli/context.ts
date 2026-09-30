@@ -157,7 +157,7 @@ export function makeProjectVault(hushDir: string, root: string, quiet = false): 
   const vaultName = basename(root);
   const { vault, created } = ensureProjectVault(
     hushDir,
-    id.pub ? { name: memberName, pub: id.pub } : { name: memberName, ageRecipient: id.age!.recipients[0] },
+    id.pub ? { name: memberName, pub: id.pub, priv: id.priv } : { name: memberName, ageRecipient: id.age!.recipients[0] },
     vaultName,
   );
   if (created) {

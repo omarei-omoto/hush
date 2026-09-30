@@ -14,7 +14,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { generateIdentity, encodeSecret, decodeSecret, encodePub, type Identity, type Opener } from "./crypto.ts";
+import { randomBytes } from "node:crypto";
+import {
+  generateIdentity, encodeSecret, decodeSecret, encodePub, signerForIdentity, signerFromSeed,
+  type Identity, type Opener, type Signer,
+} from "./crypto.ts";
 import { ageIdentityPath, recipientsForIdentity, ageAvailable } from "./age.ts";
 
 /**
@@ -262,3 +266,38 @@ export function migrateIdentityToKeychain(account = "default"): { ok: boolean; m
 /** How to show this identity to a human. An age identity shows its recipient. */
 export const publicKeyOf = (id: Opener): string =>
   id.pub ? encodePub(id.pub) : (id.age?.recipients[0] ?? "(no identity)");
+
+// ------------------------------------------------------------------ signing
+
+const SSK_PREFIX = "hush_ssk_";
+const signingFile = (): string => join(hushHome(), "signing-key");
+
+/**
+ * The key this identity signs vault headers with (hush/v3).
+ *
+ * An X25519 identity derives it (crypto.ts signerForIdentity), so it exists
+ * wherever the identity does. An identity that is only an age recipient — a
+ * YubiKey, the Secure Enclave — cannot sign with the hardware, so it keeps a
+ * separate Ed25519 key: in the keychain where there is one, otherwise a 0600
+ * file beside where the identity would be. `create` makes one on first need.
+ *
+ * Losing that key costs the ability to *change* a vault's membership, never
+ * the ability to read it; any other admin can take over (`hush team add … --role
+ * admin`), and a new key is made the next time this one is needed.
+ */
+export function signerFor(id: Opener, create = false): Signer | null {
+  if (id.pub && id.priv) return signerForIdentity({ pub: id.pub, priv: id.priv });
+  const stored = keychainGet("signing") ?? (existsSync(signingFile()) ? readFileSync(signingFile(), "utf8").trim() : null);
+  if (stored?.startsWith(SSK_PREFIX)) {
+    const seed = Buffer.from(stored.slice(SSK_PREFIX.length), "base64url");
+    if (seed.length === 32) return signerFromSeed(seed);
+  }
+  if (!create) return null;
+  const encoded = SSK_PREFIX + randomBytes(32).toString("base64url");
+  if (!keychainSet("signing", encoded)) {
+    mkdirSync(hushHome(), { recursive: true, mode: 0o700 });
+    writeFileSync(signingFile(), encoded, { mode: 0o600 });
+    chmodSync(signingFile(), 0o600);
+  }
+  return signerFor(id, false);
+}

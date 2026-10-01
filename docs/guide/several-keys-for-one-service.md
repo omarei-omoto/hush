@@ -69,5 +69,7 @@ hush env describe "FAL MODIO" --only-in "~/code/modio-*" --only-in "~/clients/mo
 hush env describe "FAL MODIO" --anywhere            # lift the rule
 ```
 
-The library view in `hush ui` still shows and edits the set wherever you open
-it. The rule is about where the key is *used*, not where you manage it.
+In `hush ui`, a set's Edit dialog has the same rule as **Only in these
+folders**, one pattern per line; leave it blank for any folder. The library
+view still shows and edits the set wherever you open it: the rule is about
+where the key is *used*, not where you manage it.

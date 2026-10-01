@@ -350,6 +350,31 @@ describe("ui server — one list of sets, at two levels", () => {
       "an unqualified write did not land in the project",
     );
   });
+
+  test("/api/env describe sets, keeps and clears the folders a set may be used in", async () => {
+    await api("/api/global", { create: true });
+    const made = (await (await api("/api/env", { action: "create", where: "library", label: "Kept Set" })).json()) as { created: string };
+    type WithRule = { name: string; onlyIn: string[]; usableHere: boolean };
+    const rule = async (r: Response) => ((await r.json()) as { library: WithRule[] }).library.find((x) => x.name === made.created)!;
+
+    const set = await api("/api/env", { action: "describe", where: "library", name: made.created, onlyIn: ["/nowhere/allowed-*"] });
+    assert.equal(set.status, 200);
+    const kept = await rule(set);
+    assert.deepEqual(kept.onlyIn, ["/nowhere/allowed-*"]);
+    assert.equal(kept.usableHere, false, "this folder is not under /nowhere, so the set is not usable here");
+
+    // Saving the description alone leaves the rule as it was.
+    const desc = await rule(await api("/api/env", { action: "describe", where: "library", name: made.created, description: "for elsewhere" }));
+    assert.deepEqual(desc.onlyIn, ["/nowhere/allowed-*"], "editing the description dropped the folder rule");
+
+    const bad = await api("/api/env", { action: "describe", where: "library", name: made.created, onlyIn: ["relative/path"] });
+    assert.notEqual(bad.status, 200, "a relative folder pattern was accepted");
+    assert.match(await bad.text(), /not a full path/);
+
+    const cleared = await rule(await api("/api/env", { action: "describe", where: "library", name: made.created, onlyIn: [] }));
+    assert.deepEqual(cleared.onlyIn, []);
+    assert.equal(cleared.usableHere, true);
+  });
 });
 
 describe("ui dropzone — staging a dropped .env", () => {

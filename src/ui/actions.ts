@@ -160,17 +160,25 @@ function editSetDialog(where,set){
   const name=h("input",{class:"input",value:set.label});
   const desc=h("input",{class:"input",value:set.description||"",placeholder:"What is it for?"});
   const when=h("input",{class:"input",value:set.whenToUse||"",placeholder:"e.g. deploys only, never in tests"});
+  const before=(set.onlyIn||[]).join("\n");
+  const only=h("textarea",{class:"input",rows:"2",spellcheck:"false",placeholder:"~/code/modio-*"});
+  only.value=before;
   dialog({
     title:"Edit "+set.label,submit:"Save",
     body:[field("Name",name,set.name==="default"?"":"Renaming re-seals every value under the new name."),
-      field("Description",desc),field("When to use it",when,"Shown to your agent when it picks a set.")],
+      field("Description",desc),field("When to use it",when,"Shown to your agent when it picks a set."),
+      field("Only in these folders",only,"One per line. Anywhere else, hush refuses this set — for you and your agent. Blank: any folder. * matches within a folder name, ** across folders.")],
     onSubmit:async function(){
       const label=name.value.trim();
       let next=null;
       if(label&&label!==set.label){next=await api("/api/env",{action:"rename",where:where,name:set.name,label:label})}
       const renamed=next&&next.renamed?next.renamed:set.name;
-      if(desc.value!==(set.description||"")||when.value!==(set.whenToUse||"")){
-        next=await api("/api/env",{action:"describe",where:where,name:renamed,description:desc.value.trim(),whenToUse:when.value.trim()});
+      const folders=only.value.split("\n").map(function(l){return l.trim()}).filter(Boolean);
+      const foldersChanged=folders.join("\n")!==before;
+      if(desc.value!==(set.description||"")||when.value!==(set.whenToUse||"")||foldersChanged){
+        const payload={action:"describe",where:where,name:renamed,description:desc.value.trim(),whenToUse:when.value.trim()};
+        if(foldersChanged)payload.onlyIn=folders;
+        next=await api("/api/env",payload);
       }
       await refresh(next);toast("saved");
     },

@@ -199,7 +199,7 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
      * set's name is bound into every value's AAD, so the values are re-sealed.
      */
     case "/api/env": {
-      const { action, where, name, label, description, whenToUse, service } = body;
+      const { action, where, name, label, description, whenToUse, onlyIn, service } = body;
       const inLibrary = where !== "project";
       const id = requireIdentity();
 
@@ -271,6 +271,9 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
           ...(typeof label === "string" ? { label } : {}),
           ...(typeof description === "string" ? { description } : {}),
           ...(typeof whenToUse === "string" ? { whenToUse } : {}),
+          // The folders the set may be used in; an empty list means anywhere.
+          // Each pattern is checked by describeEnv, and a bad one is a 400.
+          ...(Array.isArray(onlyIn) ? { onlyIn: onlyIn.map(String).map((p) => p.trim()).filter(Boolean) } : {}),
         });
         v.save();
         audit(ctx.hushDir, { actor: "ui", action: "env.describe", where, name });

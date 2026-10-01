@@ -98,6 +98,13 @@ jobs:
           curl -fsSL -o /tmp/mcpp.tgz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
           echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  /tmp/mcpp.tgz" | sha256sum -c -
           tar xzf /tmp/mcpp.tgz -C /tmp mcp-publisher
+          # The registry checks npm for this version, and npm takes a moment to
+          # serve a fresh publish (0.10.0's listing failed on exactly that).
+          v="$(node -p "require('./package.json').version")"
+          for i in $(seq 1 30); do
+            [ "$(npm view "@omarei/hush@$v" version 2>/dev/null)" = "$v" ] && break
+            sleep 10
+          done
           /tmp/mcp-publisher login github-oidc
           /tmp/mcp-publisher publish server.json
 

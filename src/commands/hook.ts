@@ -39,6 +39,48 @@ _hush_hook`);
     return;
   }
 
+  if (shell === "nu") {
+    out(`def --env _hush_unload [] {
+  let keys = ($env.HUSH_LOADED_KEYS? | default "" | split row " " | where {|key| $key != ""})
+  for key in $keys { hide-env --ignore-errors $key }
+  hide-env --ignore-errors HUSH_LOADED_KEYS HUSH_LOADED_DIR
+}
+def --env _hush_hook [] {
+  let root_result = (hush root | complete)
+  let root = if $root_result.exit_code == 0 { $root_result.stdout | str trim } else { "" }
+  let loaded = ($env.HUSH_LOADED_DIR? | default "")
+  if $root == $loaded { return }
+  _hush_unload
+  if $root == "" { return }
+
+  let names_result = (hush export --names | complete)
+  let export_result = (hush export --format json | complete)
+  if $names_result.exit_code != 0 or $export_result.exit_code != 0 { return }
+
+  let secrets = ($export_result.stdout | from json)
+  let available = ($secrets | columns)
+  let keys = (
+    $names_result.stdout
+    | lines
+    | where {|name| ($name =~ '^[A-Za-z_][A-Za-z0-9_]*$') and ($name in $available)}
+  )
+  let safe_secrets = (
+    $keys
+    | reduce --fold {} {|name, acc| $acc | upsert $name ($secrets | get $name)}
+  )
+  load-env $safe_secrets
+  $env.HUSH_LOADED_DIR = $root
+  $env.HUSH_LOADED_KEYS = ($keys | str join " ")
+}
+$env.config.hooks.env_change.PWD = (
+  $env.config.hooks.env_change.PWD?
+  | default []
+  | append {|before, after| _hush_hook}
+)
+_hush_hook`);
+    return;
+  }
+
   if (shell === "fish") {
     out(`function _hush_unload
   if set -q HUSH_LOADED_KEYS

@@ -85,7 +85,7 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
           // click on Reveal or Remove. base-uri/form-action: nothing injected
           // could redirect a relative URL or a form post off this origin.
           "content-security-policy":
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; " +
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; " +
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
           "referrer-policy": "no-referrer",
           "x-content-type-options": "nosniff",

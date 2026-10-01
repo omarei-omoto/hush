@@ -47,6 +47,12 @@ in it applies here until it is added (`hush use <set>`, or
 `hush use default --library` for their catch-all set). Don't ask which set unless there are several and no
 obvious default.
 
+Some sets are kept for certain folders only: `hush_list_sets` shows
+`only in: ~/code/modio-*`, and adds `NOT usable in this project` where that
+applies. hush refuses such a set outside those folders. Don't look for a way
+around it (another set holding the same key, a copy, an export). Tell the user
+which set is kept for which folders, and ask which key this project should use.
+
 ## Running something that needs credentials
 
 Always `hush_run`. Never construct an env var yourself, never read `.env`, never

@@ -56,7 +56,9 @@ function offerRow(where,set,link){
   return h("div",{class:"offer"},
     h("div",{class:"what"},h("b",{text:set.label}),h("div",{text:(set.description?set.description+" · ":"")+(set.keys.length?sample:"no keys yet")})),
     h("span",{class:"badge"},plural(set.keys.length,"key")),
-    h("button",{type:"button",class:"btn sm",onclick:function(){useHere(link,set.label,true)}},icon("plus"),"Use here"));
+    set.usableHere===false
+      ?h("button",{type:"button",class:"btn sm",disabled:true,title:"Only for "+set.onlyIn.join(", ")},"Other folders only")
+      :h("button",{type:"button",class:"btn sm",onclick:function(){useHere(link,set.label,true)}},icon("plus"),"Use here"));
 }
 
 function renderProject(page){
@@ -129,11 +131,13 @@ function setupPanel(){
     const box=h("div",{class:"card",style:"margin-top:14px"});
     S.library.forEach(function(set){
       const covered=Object.keys(sug.provider).filter(function(k){return sug.provider[k]===set.name});
-      const cb=h("input",{type:"checkbox",checked:sug.picks.indexOf(set.name)>-1,"aria-label":"Use "+set.label+" here"});
+      // Kept for other folders: shown, so it is not a mystery, but not offered.
+      const here=set.usableHere!==false;
+      const cb=h("input",{type:"checkbox",checked:here&&sug.picks.indexOf(set.name)>-1,disabled:!here,"aria-label":"Use "+set.label+" here"});
       cb.onchange=sync;
-      checks[set.name]=cb;
-      box.append(h("label",{class:"offer",style:"cursor:pointer"},cb,
-        h("div",{class:"what"},h("b",{text:set.label}),h("div",{text:covered.length?"covers "+covered.join(", "):(set.description||set.keys.join(", ")||"no keys yet")})),
+      if(here)checks[set.name]=cb;
+      box.append(h("label",{class:"offer",style:here?"cursor:pointer":"opacity:.55"},cb,
+        h("div",{class:"what"},h("b",{text:set.label}),h("div",{text:!here?"only for "+set.onlyIn.join(", "):covered.length?"covers "+covered.join(", "):(set.description||set.keys.join(", ")||"no keys yet")})),
         covered.length?h("span",{class:"badge ok"},covered.length+" needed"):h("span",{class:"badge"},plural(set.keys.length,"key"))));
     });
     card.append(box);

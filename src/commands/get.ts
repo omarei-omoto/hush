@@ -23,11 +23,13 @@ export async function cmdGet(a: Args): Promise<void> {
   // library link included — not a single literal env, so a key that only a
   // used library set provides is findable at all in a vault-less folder.
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, blocked } = composeSets(loose.vault, id, loose.hushDir, extra);
   if (!Object.prototype.hasOwnProperty.call(secrets, key)) {
     die(
       `No secret "${key}" in any set this project uses.`,
-      missing.length ? `Your library is missing: ${missing.join(", ")}` : undefined,
+      blocked.length
+        ? `Skipped here, because they are only for other folders: ${blocked.map((b) => `${b.name} (${b.onlyIn.join(", ")})`).join("; ")}`
+        : missing.length ? `Your library is missing: ${missing.join(", ")}` : undefined,
     );
   }
 

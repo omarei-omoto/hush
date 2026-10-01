@@ -4,6 +4,33 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.10.0 — 2026-10-01
+
+### A key can be kept to some projects
+
+`hush env describe "FAL MODIO" --only-in "~/code/modio-*"` makes a set usable
+only in folders matching the pattern, and in folders inside them. Anywhere
+else hush refuses it: for `run`, `get`, `export`, `request`, `hush use`, and
+an agent's `hush_run` and `hush_request` alike. A project that linked it
+earlier has it skipped, with a line saying so. `hush_list_sets`, `hush ls` and
+the app show the rule, and mark where it doesn't apply. `--anywhere` lifts it.
+In the app, a set's Edit dialog has the same rule as **Only in these folders**.
+
+### A new look
+
+hush has a mark and a wordmark (Manrope, as outlines, so no font is needed).
+`hush ui` is redesigned around them: warm paper, white cards, ink for text and
+the redaction bars, a matching dark theme, and the mark as the tab icon. The
+docs site and the README use the same identity, and the README opens with a
+banner. The app still fetches nothing from the network.
+
+### Fixed
+
+- `hush env describe <set> --when …` no longer clears the set's description
+  and label. A flag left out now leaves that field as it was.
+- `hush env describe` takes a set's shown name ("FAL MODIO") as well as its
+  stored one (`fal-modio`).
+
 ## 0.9.0 — 2026-09-30
 
 Everything planned for 0.9: hush without Node, a key in the Secure Enclave,

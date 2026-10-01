@@ -32,6 +32,7 @@ daily
 sets          — a set you name, describe and reuse
   hush env rename <name> <new name>    re-seals every value under the new name
   hush env describe <name> [--description <t>] [--when <t>]
+  hush env describe <name> --only-in "~/code/modio-*"   usable only in those folders (--anywhere undoes it)
   hush env move <KEY>… --to <set>      carve one big pile into named sets
   hush global [<vault>|--create]       which vault holds your library
 

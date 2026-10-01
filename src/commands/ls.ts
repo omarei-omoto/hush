@@ -1,13 +1,17 @@
 /**
  * `hush ls` — your library, this project, and what is used (plus the old `envs` / `accounts` names).
  */
-import { usedSets, librarySets, openGlobal, globalVaultName, globalVaultExists, linkNameFor } from "../library.ts";
+import { usedSets, librarySets, openGlobal, globalVaultName, globalVaultExists, linkNameFor, placeOf, allowedAt } from "../library.ts";
 import { type Args, bool } from "../cli/args.ts";
 import { keyAges, describeAge } from "../freshness.ts";
 import { loadPolicy } from "../mcp.ts";
 import { policyFor } from "../cli/context.ts";
 import { ctxLoose, isSetUp } from "../cli/context.ts";
 import { bold, cyan, die, dim, green, info, out, red, shown, warn, yellow } from "../cli/output.ts";
+
+/** "only in ~/code/modio-*", and whether that includes where this is running. */
+const onlyInLine = (onlyIn: string[], place: string): string =>
+  dim(`only in ${onlyIn.join(", ")}`) + (allowedAt(onlyIn, place) ? "" : yellow("  — not usable here"));
 
 /**
  * `hush ls` — the one-screen overview: your library, this project, and which
@@ -29,6 +33,7 @@ export async function cmdLs(a: Args): Promise<void> {
     info(`${bold(meta.label)} ${dim(`(${shown(meta.name)})`)}`);
     if (meta.description) info(`  ${dim(meta.description)}`);
     if (meta.whenToUse) info(`  ${dim("when: " + meta.whenToUse)}`);
+    if (meta.onlyIn) info(`  ${onlyInLine(meta.onlyIn, placeOf(loose.hushDir))}`);
     info("");
     if (meta.restricted) info(`  ${dim("readable by: " + (meta.readers ?? []).join(", "))}`);
     if (!meta.keys.length) info(dim("  (no keys yet)"));
@@ -80,7 +85,8 @@ export async function cmdLs(a: Args): Promise<void> {
     );
   }
 
-  const line = (s: { name: string; label: string; description?: string; whenToUse?: string; keys: string[] }, where: "library" | "project") => {
+  const place = placeOf(loose.hushDir);
+  const line = (s: { name: string; label: string; description?: string; whenToUse?: string; onlyIn?: string[]; keys: string[] }, where: "library" | "project") => {
     // The library's default is the one set with a meaning beyond its name.
     const role = where === "library" && s.name === "default" ? dim("  — your catch-all; hush use default --library to use it in a folder") : "";
     info(
@@ -88,6 +94,7 @@ export async function cmdLs(a: Args): Promise<void> {
     );
     if (s.description) info(`      ${dim(s.description)}`);
     if (s.whenToUse) info(`      ${dim("when: " + s.whenToUse)}`);
+    if (s.onlyIn) info(`      ${onlyInLine(s.onlyIn, place)}`);
   };
 
   info(bold("YOUR LIBRARY") + (globalVaultExists() ? dim(`  (${globalVaultName()})`) : ""));

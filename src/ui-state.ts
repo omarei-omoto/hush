@@ -12,7 +12,7 @@ import { assess } from "./posture.ts";
 import { biometryStatus } from "./biometry.ts";
 import { AGENTS, mcpRegistrations } from "./agents.ts";
 import { Vault, ValidationError } from "./vault.ts";
-import { librarySets, openGlobal, usedSets, globalVaultName, globalVaultExists, namedVaults, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor } from "./library.ts";
+import { librarySets, openGlobal, usedSets, globalVaultName, globalVaultExists, namedVaults, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor, placeOf, allowedAt } from "./library.ts";
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG } from "./services.ts";
 import { preview } from "./redact.ts";
@@ -219,6 +219,10 @@ export function state(ctx: UiCtx) {
     }
   };
 
+  // A set may be kept for some folders only ("only in"): the page shows the
+  // rule, and does not offer the set where it would be refused.
+  const place = placeOf(ctx.hushDir);
+  const usableHere = (onlyIn?: string[]) => !onlyIn || allowedAt(onlyIn, place);
   const projectSets = vault
     ? vault.sets().map((s) => ({
         where: "project" as const,
@@ -227,6 +231,8 @@ export function state(ctx: UiCtx) {
         description: s.description ?? "",
         whenToUse: s.whenToUse ?? "",
         source: s.source ?? "",
+        onlyIn: s.onlyIn ?? [],
+        usableHere: usableHere(s.onlyIn),
         keys: s.keys,
         secrets: describe(vault, s.name),
         used: used.includes(s.name),
@@ -254,6 +260,8 @@ export function state(ctx: UiCtx) {
     description: s.description ?? "",
     whenToUse: s.whenToUse ?? "",
     source: s.source ?? "",
+    onlyIn: s.onlyIn ?? [],
+    usableHere: usableHere(s.onlyIn),
     keys: s.keys,
     secrets: libraryVault ? describe(libraryVault, s.name) : [],
     // What the page sends to /api/link: the library's default is recorded as
@@ -275,7 +283,7 @@ export function state(ctx: UiCtx) {
     return {
       needed,
       files: files.size,
-      ...suggestSets(needed, library.map((s) => ({ name: s.name, keys: s.keys }))),
+      ...suggestSets(needed, library.filter((s) => usableHere(s.onlyIn)).map((s) => ({ name: s.name, keys: s.keys }))),
     };
   })() : undefined;
 

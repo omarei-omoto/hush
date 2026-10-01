@@ -7,7 +7,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
-import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor } from "./library.ts";
+import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import {
   checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
@@ -104,6 +104,7 @@ interface ListedSet {
   label: string;
   description?: string;
   whenToUse?: string;
+  onlyIn?: string[];
   keys: string[];
   where: "library" | "project";
   used: boolean;
@@ -125,6 +126,7 @@ function listSets(ctx: Ctx): ListedSet[] {
     label: s.label,
     description: s.description,
     whenToUse: s.whenToUse,
+    onlyIn: s.onlyIn,
     keys: s.keys,
     where: "project",
     used: used.has(s.name),
@@ -134,6 +136,7 @@ function listSets(ctx: Ctx): ListedSet[] {
     label: s.label,
     description: s.description,
     whenToUse: s.whenToUse,
+    onlyIn: s.onlyIn,
     keys: s.keys,
     where: "library",
     used: used.has(linkNameFor("library", s.name)),
@@ -186,7 +189,12 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       const lines = all.map((s) => {
         const flags = [s.where, s.used ? "used by this project" : null].filter(Boolean).join(", ");
         const label = s.label === s.name ? s.name : `${s.label} (${s.name})`;
-        const notes = [s.description, s.whenToUse ? `when: ${s.whenToUse}` : null].filter(Boolean).join("  —  ");
+        const limit = s.onlyIn
+          ? allowedAt(s.onlyIn, placeOf(ctx.hushDir))
+            ? `only in: ${s.onlyIn.join(", ")}`
+            : `only in: ${s.onlyIn.join(", ")} — NOT usable in this project; hush will refuse it here`
+          : null;
+        const notes = [s.description, s.whenToUse ? `when: ${s.whenToUse}` : null, limit].filter(Boolean).join("  —  ");
         return (
           `  ${label}   [${flags}]   keys: ${s.keys.join(", ") || "(none)"}` + (notes ? `\n      ${notes}` : "")
         );
@@ -357,7 +365,8 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       // A non-2xx is a real answer the model needs to see rather than a tool
       // failure: returning it as text lets it read the error body and adapt,
       // where an isError result would just look like the call went wrong.
-      return text(renderRequest(result, { includeHeaders: true }));
+      const skipped = resolved.blocked.map((b) => `Note: skipped set "${b.name}": it is only for ${b.onlyIn.join(", ")}, not this project.`);
+      return text([renderRequest(result, { includeHeaders: true }), ...skipped].join("\n"));
     }
 
     case "hush_run": {
@@ -458,6 +467,9 @@ export async function callTool(name: string, args: any): Promise<unknown> {
           `· using ${resolved.layers.join(", ") || "(none)"} ` +
           `· injected ${Object.keys(secrets).length} secret(s) · ${result.redactions} value(s) masked in output`,
       ];
+      for (const b of resolved.blocked) {
+        parts.push(`Note:  skipped set "${b.name}": it is only for ${b.onlyIn.join(", ")}, not this project. Do not try to use it here.`);
+      }
       if (resolved.missing.length) {
         parts.push(`Note:  this project uses ${resolved.missing.join(", ")}, which your library does not have.`);
       }
@@ -607,6 +619,14 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       const missing = need.filter((v) => !providerOf.has(v));
 
       if (missing.length === need.length) {
+        const limited = resolved.blocked.map((b) => `"${b.name}" (only for ${b.onlyIn.join(", ")})`);
+        if (limited.length) {
+          return text(
+            `"${tool}" needs ${serviceLabel(service)} (${need.join(", ")}). This project cannot use ` +
+              `${limited.join(", ")}: ${limited.length > 1 ? "those sets are" : "that set is"} kept for other folders. ` +
+              `Do not work around that; ask the user which key this project should use.`,
+          );
+        }
         return text(
           `"${tool}" needs ${serviceLabel(service)} (${need.join(", ")}), but none of this project's ` +
             `used sets have ${need.length > 1 ? "them" : "it"} yet.\n\n` +

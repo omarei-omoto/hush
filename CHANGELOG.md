@@ -4,6 +4,8 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.10.0 — 2026-10-01
+
 ### A key can be kept to some projects
 
 `hush env describe "FAL MODIO" --only-in "~/code/modio-*"` makes a set usable

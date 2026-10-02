@@ -26,7 +26,7 @@ import {
 import { createRelayServer } from "../relay-server.ts";
 import { qrToTerminal } from "../qr.ts";
 import { tailnetName, tailnetRelayLines } from "../tailscale.ts";
-import { type Args, bool, str } from "../cli/args.ts";
+import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, info, red, shown, yellow } from "../cli/output.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -54,7 +54,9 @@ function ls(): void {
     return;
   }
   for (const p of peers) {
-    const role = p.kind === "approver" ? "approves for this machine" : "sends its approvals here";
+    const role = p.kind === "approver"
+      ? p.for?.length ? `approves broker requests from ${p.for.join(", ")}` : "approves for this machine"
+      : "sends its approvals here";
     info(`  ${bold(shown(p.name))}  ${dim(role)}  ${dim(p.relay)}  ${dim(p.spk.slice(0, 20) + "…")}`);
   }
 }
@@ -70,6 +72,10 @@ async function pair(a: Args): Promise<void> {
     die((e as Error).message);
   }
   const name = str(a, "name") ?? defaultDeviceName();
+  // On a broker serving several people: whose device this is. Their broker
+  // requests go to it; it answers nothing else.
+  const forLogins = list(a, "for");
+  if (forLogins.some((l) => !/^[^\s@]+@[^\s@]+$/.test(l))) die("--for takes tailnet logins, like you@example.com.");
   const waitSeconds = Math.min(Number(str(a, "timeout") ?? 600) || 600, 3600);
   const device = loadDevice(true)!;
   const secret = randomBytes(32);
@@ -111,10 +117,15 @@ async function pair(a: Args): Promise<void> {
       const peer: Peer = {
         kind: "approver", name: hello.name, relay, toApprover: boxes.toApprover, toRequester: boxes.toRequester,
         x: hello.x, spk: hello.spk, pairedAt: new Date().toISOString(),
+        ...(forLogins.length ? { for: forLogins } : {}),
       };
       savePeer(peer);
       info("");
-      info(`${green("✓")} paired with ${bold(shown(hello.name))} — approvals this machine cannot show will go there`);
+      info(
+        forLogins.length
+          ? `${green("✓")} paired with ${bold(shown(hello.name))} — broker requests from ${forLogins.join(", ")} will go there`
+          : `${green("✓")} paired with ${bold(shown(hello.name))} — approvals this machine cannot show will go there`,
+      );
       info(`  safety number  ${pairingSafetyNumber(peer.spk, encodeSpk(device.signer.spk))}`);
       info(dim("  The other side shows the same number. If it does not, run hush approvals rm and pair again."));
       return;

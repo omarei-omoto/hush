@@ -58,6 +58,14 @@ default; logins, `tag:` names, devices). Every request asks for approval on
 the broker, naming who asked. A browser's request is refused. Each call goes
 into the audit log with the caller's name.
 
+It serves https with the machine's tailnet certificate (`tailscale cert`,
+renewed daily). A request's prompt goes to the asking person's own device when
+one is paired for them (`hush approvals pair --for sam@example.com`), and an
+"Allow 15 min" covers only that caller. It refuses to start when nothing could
+show a prompt. The MCP client's own name is shown as a hint ("says it is
+claude-code"). On Linux, identity comes from tailscaled's socket in
+milliseconds.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

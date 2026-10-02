@@ -17,6 +17,8 @@
  * browser's Origin header is refused outright (DNS rebinding).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createTlsServer } from "node:https";
+import { randomBytes } from "node:crypto";
 import { TOOLS } from "./mcp.ts";
 import { callTool, errText, type Ctx } from "./mcp-tools.ts";
 import { admits, callerName, type TailnetCaller } from "./tailscale.ts";
@@ -33,6 +35,8 @@ export interface BrokerOptions {
   allow: string[];
   /** Who holds a tailnet address. A parameter so tests need no tailnet. */
   whois: (addr: string) => Promise<TailnetCaller | null>;
+  /** The certificate for this machine's tailnet name; plain http without one. */
+  tls?: { cert: string; key: string };
 }
 
 const OFFERED = new Set(["hush_list_sets", "hush_request"]);
@@ -68,16 +72,24 @@ function toolList(sets: string[]): unknown[] {
   ];
 }
 
-function send(res: ServerResponse, status: number, body?: unknown): void {
+function send(res: ServerResponse, status: number, body?: unknown, headers: Record<string, string> = {}): void {
   if (body === undefined) {
-    res.writeHead(status);
+    res.writeHead(status, headers);
     res.end();
     return;
   }
   const text = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
   res.end(text);
 }
+
+/**
+ * Which app a session says it is (MCP's `clientInfo`). Self-reported, so it
+ * is shown as a hint in prompts and the log, never used to decide anything:
+ * Tailscale cannot tell two agents on one machine apart, and a name an agent
+ * chooses for itself cannot either.
+ */
+const MAX_SESSIONS = 1000;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -102,6 +114,7 @@ const plainAddress = (a: string): string => a.replace(/^::ffff:/i, "");
 
 export function createBroker(o: BrokerOptions): Server {
   const offered = new Set(o.sets);
+  const sessions = new Map<string, { node: string; client: string }>();
   const { vault, identity } = o.base;
 
   /** Secrets from the offered sets only; anything else named is refused. */
@@ -123,10 +136,19 @@ export function createBroker(o: BrokerOptions): Server {
   const ok = (id: Rpc["id"], result: unknown) => ({ jsonrpc: "2.0", id, result });
   const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 
-  async function handle(rpc: Rpc, caller: TailnetCaller): Promise<unknown | null> {
+  async function handle(rpc: Rpc, caller: TailnetCaller, session: string | undefined, setSession: (id: string) => void): Promise<unknown | null> {
     const id = rpc.id;
+    const client = session ? sessions.get(session) : undefined;
+    // A session id from another device is ignored, not trusted.
+    const hint = client && client.node === caller.node && client.client ? ` (says it is ${client.client})` : "";
     switch (rpc.method) {
-      case "initialize":
+      case "initialize": {
+        const info = (rpc.params as { clientInfo?: { name?: unknown } } | undefined)?.clientInfo;
+        const name = typeof info?.name === "string" ? info.name.replace(/[^\w .@/-]/g, "").slice(0, 40) : "";
+        const sid = randomBytes(16).toString("hex");
+        if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value!);
+        sessions.set(sid, { node: caller.node, client: name });
+        setSession(sid);
         return ok(id, {
           protocolVersion: rpc.params?.protocolVersion ?? PROTOCOL,
           capabilities: { tools: {} },
@@ -136,6 +158,7 @@ export function createBroker(o: BrokerOptions): Server {
             "call hush_request and write $NAME where a secret belongs, and the call is made from the broker " +
             "with the response redacted. hush_list_sets shows what it offers.",
         });
+      }
       case "notifications/initialized":
       case "notifications/cancelled":
         return null;
@@ -145,12 +168,15 @@ export function createBroker(o: BrokerOptions): Server {
         return ok(id, { tools: toolList(o.sets) });
       case "tools/call": {
         const name = String(rpc.params?.name ?? "");
-        const who = callerName(caller);
+        const who = callerName(caller) + hint;
         audit(o.base.hushDir, { actor: "broker", action: "call", tool: name, caller: who });
         if (name === "hush_list_sets") return ok(id, listSets());
         if (!OFFERED.has(name)) return ok(id, errText(`${name} is not offered by this broker.`));
         try {
-          return ok(id, await callTool(name, rpc.params?.arguments ?? {}, { ...o.base, tools: OFFERED, compose, caller: who }));
+          return ok(id, await callTool(name, rpc.params?.arguments ?? {}, {
+            ...o.base, tools: OFFERED, compose, caller: who,
+            ...(caller.tags.length ? {} : { callerLogin: caller.login }),
+          }));
         } catch (e) {
           return ok(id, errText((e as Error).message));
         }
@@ -160,7 +186,7 @@ export function createBroker(o: BrokerOptions): Server {
     }
   }
 
-  return createServer(async (req, res) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       // A browser on a tailnet machine could be steered here by a hostile page
       // (DNS rebinding). Agents do not send Origin; browsers always do.
@@ -193,11 +219,16 @@ export function createBroker(o: BrokerOptions): Server {
         return send(res, 400, fail(null, -32700, (e as Error).message === "body too large" ? "body too large" : "invalid JSON"));
       }
       if (Array.isArray(rpc) || !rpc || typeof rpc !== "object") return send(res, 400, fail(null, -32600, "one JSON-RPC message per request"));
-      const out = await handle(rpc, caller);
-      if (out === null) return send(res, 202);
-      return send(res, 200, out);
+      const headers: Record<string, string> = {};
+      const sessionHeader = req.headers["mcp-session-id"];
+      const out = await handle(rpc, caller, typeof sessionHeader === "string" ? sessionHeader : undefined, (sid) => {
+        headers["mcp-session-id"] = sid;
+      });
+      if (out === null) return send(res, 202, undefined, headers);
+      return send(res, 200, out, headers);
     } catch (e) {
       return send(res, 500, { error: (e as Error).message });
     }
-  });
+  };
+  return o.tls ? createTlsServer({ cert: o.tls.cert, key: o.tls.key }, handler) : createServer(handler);
 }

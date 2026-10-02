@@ -55,6 +55,8 @@ export interface Ctx {
   tools?: ReadonlySet<string>;
   compose?: (extra: string[]) => Composed;
   caller?: string;
+  /** The caller's tailnet login, when it is a person (a tagged device has none). */
+  callerLogin?: string;
 }
 
 function loadCtx(): Ctx {
@@ -337,8 +339,10 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
             requestCoverageLine(ctx.policy, parsedUrl.host, resolved.layers),
           ],
           // Naming the host, so a grant for one destination cannot authorise
-          // the same sets being sent somewhere else.
-          scope: requestScope(ctx.policy, parsedUrl.host, resolved.layers),
+          // the same sets being sent somewhere else — and on a broker, naming
+          // the caller, so one person's "Allow 15 min" is not everyone's.
+          scope: requestScope(ctx.policy, parsedUrl.host, resolved.layers) + (ctx.caller ? `#from=${ctx.caller}` : ""),
+          ...(ctx.callerLogin ? { approverFor: ctx.callerLogin } : {}),
           ttlSeconds: ctx.policy.approvalTtlSeconds,
           timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
           biometry: ctx.policy.biometry,

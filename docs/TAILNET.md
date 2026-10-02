@@ -12,13 +12,14 @@ hush serve --tailnet --sets stripe-live,openai
 ```
 
 ```
-hush broker  →  http://laptop.tail1234.ts.net:8788/mcp  (this tailnet only)
+hush broker  →  https://laptop.tail1234.ts.net:8788/mcp  (this tailnet only)
   offers:  stripe-live  STRIPE_SECRET_KEY
   allows:  you@example.com
-  every request asks you first; calls go out from this machine, values never leave it
+  every request asks first; calls go out from this machine, values never leave it
+  asks:    on this machine
 
   Add it to an agent on any tailnet machine:
-    claude mcp add --transport http hush-broker http://laptop.tail1234.ts.net:8788/mcp
+    claude mcp add --transport http hush-broker https://laptop.tail1234.ts.net:8788/mcp
 ```
 
 An agent on any of your tailnet machines then has two tools. `hush_list_sets`
@@ -36,15 +37,35 @@ response redacted. Nothing returns a value, and nothing runs a command.
   remembered for a minute per address. A request with a browser's `Origin`
   header is refused.
 - **Approval:** a broker refuses to start unless the vault's policy asks
-  before `request`. Every request then shows the usual prompt on the
-  broker's machine, saying who asked ("From: you@example.com on build-box").
-  On a headless broker, pair it with your laptop over the relay (step 1).
-  `--without-approval` turns this off for the broker and says so.
+  before `request`. It also refuses to start when nothing can show that
+  prompt, because then every request would be refused. Every request shows
+  the usual prompt, saying who asked ("From: you@example.com on build-box (says
+  it is claude-code)"). Where it shows:
+  - **on the device of the person who asked**, if one is paired for them:
+    `hush approvals pair --relay <url> --for sam@example.com` on the broker,
+    accepted on Sam's laptop. A device paired for someone answers only for them.
+  - otherwise **on the broker's own screen**, or, on a headless broker, on
+    the devices paired for nobody in particular (your laptop, over the relay
+    from step 1).
+  - An "Allow 15 min" covers that caller only, never another person making
+    the same request.
+  `--without-approval` turns approval off for the broker and says so.
+- **The app's name:** an agent's MCP client names itself when it connects
+  (`claude-code`). The broker keeps that for the session and shows it in
+  prompts and the log as "says it is …". It is a hint, never a permission:
+  Tailscale cannot tell two agents on one machine apart, and a name an agent
+  picks for itself proves nothing.
 - **Audit:** every call, refusal and approval goes into the vault's
   `audit.log` with the caller's name.
-- It is plain HTTP inside WireGuard. The tailnet encrypts it, and nothing
-  outside the tailnet can connect. `--port` changes 8788; `--vault <name>`
-  serves a vault other than your library.
+- **https:** the broker serves https with this machine's tailnet certificate
+  (`tailscale cert`, renewed daily; key kept in `~/.hush/broker`, readable by
+  you only). It still listens on the tailnet address itself, so the caller
+  check keeps working. If the tailnet has HTTPS certificates turned off, it
+  says so and serves plain http inside WireGuard. `--no-tls` forces http.
+- **Speed:** on Linux, identity comes straight from tailscaled's socket in
+  milliseconds. Elsewhere the `tailscale` CLI answers in a second or so, once
+  a minute per caller. `--port` changes 8788; `--vault <name>` serves a vault
+  other than your library.
 
 ## The problem
 

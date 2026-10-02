@@ -7,7 +7,11 @@ import { existsSync } from "node:fs";
 import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, info, warn, yellow } from "../cli/output.ts";
 import { createBroker } from "../broker.ts";
-import { cachedWhois, tailnetIPv4, tailnetName, whois } from "../tailscale.ts";
+import { cachedWhois, tailnetCert, tailnetIPv4, tailnetName, whois } from "../tailscale.ts";
+import { approvalPromptAvailable } from "../approval.ts";
+import { pairedApprovers } from "../relay.ts";
+import { hushHome } from "../identity.ts";
+import { join } from "node:path";
 import { requireIdentity } from "../identity.ts";
 import { globalVaultName, globalVaultPath } from "../library.ts";
 import { loadPolicy } from "../mcp.ts";
@@ -64,34 +68,77 @@ export async function cmdServe(a: Args): Promise<void> {
     allow = [me.login];
   }
 
+  // A broker that asks before sending, on a machine that cannot ask anyone,
+  // refuses every request. Better to say so now than on the first call.
+  const approvers = pairedApprovers();
+  if (policy.requireApproval.includes("request") && !approvalPromptAvailable()) {
+    die(
+      "This machine cannot show an approval, and no device is paired to answer for it, so every request would be refused.",
+      "Pair your laptop first:  hush approvals pair --relay <url>   (on the laptop: hush relay serve prints the url, then hush approvals accept …)",
+    );
+  }
+
   const port = Number(str(a, "port") ?? 8788);
   if (!Number.isInteger(port) || port < 0 || port > 65535) die("--port is a port number");
+
+  // https with the tailnet name's certificate, unless asked not to or it
+  // cannot be had (HTTPS certificates are a tailnet setting).
+  const dns = tailnetName();
+  const certDir = join(hushHome(), "broker");
+  let tls: { cert: string; key: string } | undefined;
+  let tlsProblem: string | null = null;
+  if (!bool(a, "no-tls")) {
+    if (!dns) tlsProblem = "this machine has no tailnet name";
+    else {
+      const got = tailnetCert(dns, certDir);
+      if ("error" in got) tlsProblem = got.error;
+      else tls = got;
+    }
+  }
 
   const server = createBroker({
     base: { vault, hushDir, policy, identity, root: hushDir, defaultEnv: sets[0] },
     sets,
     allow,
     whois: cachedWhois(),
+    ...(tls ? { tls } : {}),
   });
+  // Certificates last 90 days; `tailscale cert` renews near the end, so ask daily.
+  if (tls && dns) {
+    setInterval(() => {
+      const fresh = tailnetCert(dns, certDir);
+      if (!("error" in fresh)) (server as import("node:https").Server).setSecureContext(fresh);
+    }, 24 * 3600 * 1000).unref();
+  }
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, ip, () => resolve());
   });
   const addr = server.address();
   const actual = typeof addr === "object" && addr ? addr.port : port;
-  const host = tailnetName() ?? ip;
-  const url = `http://${host}:${actual}/mcp`;
+  const host = tls && dns ? dns : ip;
+  const url = `${tls ? "https" : "http"}://${host}:${actual}/mcp`;
 
   info(`${bold("hush broker")}  →  ${cyan(url)}  ${dim("(this tailnet only)")}`);
   info(dim(`  vault:   ${vault.data.name}${vaultPath === globalVaultPath() ? ` (your library, ${globalVaultName()})` : ""}`));
   for (const n of sets) info(dim(`  offers:  ${n}  ${vault.list(n).map((i) => i.key).join(", ")}`));
   info(dim(`  allows:  ${allow.join(", ")}`));
-  info(dim(`  ${policy.requireApproval.includes("request") ? "every request asks you first" : yellow("requests are NOT approved by a person")}; calls go out from this machine, values never leave it`));
+  info(dim(`  ${policy.requireApproval.includes("request") ? "every request asks first" : yellow("requests are NOT approved by a person")}; calls go out from this machine, values never leave it`));
+  if (policy.requireApproval.includes("request")) {
+    const forPeople = approvers.filter((p) => p.for?.length);
+    for (const p of forPeople) info(dim(`  asks:    ${p.for!.join(", ")} on their own device (${p.name})`));
+    const general = approvers.filter((p) => !p.for?.length).map((p) => p.name);
+    info(dim(`  asks:    ${forPeople.length ? "everyone else " : ""}on this machine${general.length ? `, or on ${general.join(", ")} when it cannot show a prompt` : ""}`));
+  }
   info("");
   info("  Add it to an agent on any tailnet machine:");
   info(`    ${cyan(`claude mcp add --transport http hush-broker ${url}`)}`);
   info(dim(`    or any MCP client that takes a streamable-http URL`));
-  info(dim("  Plain http inside WireGuard: the tailnet encrypts it, and only tailnet peers can connect."));
+  if (tls) info(dim("  https with this machine's tailnet certificate; only tailnet peers can connect."));
+  else {
+    info(dim("  Plain http inside WireGuard: the tailnet encrypts it, and only tailnet peers can connect."));
+    if (tlsProblem) info(dim(`  (no https: ${tlsProblem}. Some MCP clients want https: turn on HTTPS certificates under DNS in the Tailscale admin console.)`));
+  }
   info(dim("  Ctrl-C to stop."));
   await new Promise<void>((resolve) => {
     const stop = () => server.close(() => resolve());

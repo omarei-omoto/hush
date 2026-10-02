@@ -3,7 +3,8 @@
  * only to print better instructions: hush never changes a Tailscale setting.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { onPath } from "./which.ts";
 
 /** The CLI, wherever it is: on PATH, or inside the macOS app. */
@@ -99,7 +100,52 @@ export function parseWhois(json: string): TailnetCaller | null {
  * WireGuard: a packet from 100.x.y.z on the tailnet interface was sent by the
  * node holding that address's key. Null for anything that is not a peer.
  */
-export function whois(addr: string): Promise<TailnetCaller | null> {
+export async function whois(addr: string): Promise<TailnetCaller | null> {
+  // Linux, where a broker usually runs: ask the daemon over its socket, in
+  // milliseconds, rather than starting the CLI (a second or more) per call.
+  if (process.platform === "linux" && existsSync(LINUX_SOCKET)) {
+    const fast = await whoisLocalApi(addr, LINUX_SOCKET);
+    if (fast) return fast;
+  }
+  return whoisCli(addr);
+}
+
+/** Where tailscaled listens for its LocalAPI on Linux. */
+export const LINUX_SOCKET = "/var/run/tailscale/tailscaled.sock";
+
+/**
+ * whois through the LocalAPI on a unix socket. The same answer the CLI
+ * prints; null on any failure, so the caller can fall back to the CLI.
+ */
+export function whoisLocalApi(addr: string, socketPath: string, timeoutMs = 3000): Promise<TailnetCaller | null> {
+  return import("node:http").then(
+    ({ request }) =>
+      new Promise((resolve) => {
+        const req = request(
+          {
+            socketPath,
+            path: `/localapi/v0/whois?addr=${encodeURIComponent(addr)}`,
+            // tailscaled checks the Host of a LocalAPI request.
+            headers: { host: "local-tailscaled.sock" },
+            timeout: timeoutMs,
+          },
+          (res) => {
+            let body = "";
+            res.setEncoding("utf8");
+            res.on("data", (c) => {
+              if (body.length < 1 << 20) body += c;
+            });
+            res.on("end", () => resolve(res.statusCode === 200 ? parseWhois(body) : null));
+          },
+        );
+        req.on("timeout", () => req.destroy());
+        req.on("error", () => resolve(null));
+        req.end();
+      }),
+  );
+}
+
+function whoisCli(addr: string): Promise<TailnetCaller | null> {
   const cli = tailscaleCli();
   if (!cli) return Promise.resolve(null);
   return import("node:child_process").then(
@@ -169,3 +215,29 @@ export function admits(allow: readonly string[], c: TailnetCaller): boolean {
 /** How a caller is named in prompts and the audit log. */
 export const callerName = (c: TailnetCaller): string =>
   `${c.tags.length ? c.tags.join(",") : c.login} on ${c.node.split(".")[0]}`;
+
+// ------------------------------------------------------------------ https
+
+/**
+ * A certificate for this machine's tailnet name, from `tailscale cert`
+ * (Let's Encrypt, through Tailscale). Kept in `dir` with the key readable by
+ * this user only. Running it again renews only when the certificate is near
+ * its end, so it is safe to call at every start and once a day.
+ */
+export function tailnetCert(dnsName: string, dir: string): { cert: string; key: string } | { error: string } {
+  const cli = tailscaleCli();
+  if (!cli) return { error: "Tailscale is not installed" };
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const certFile = join(dir, `${dnsName}.crt`);
+    const keyFile = join(dir, `${dnsName}.key`);
+    execFileSync(cli, ["cert", "--cert-file", certFile, "--key-file", keyFile, dnsName], {
+      encoding: "utf8", timeout: 90_000, stdio: ["ignore", "pipe", "pipe"],
+    });
+    chmodSync(keyFile, 0o600);
+    return { cert: readFileSync(certFile, "utf8"), key: readFileSync(keyFile, "utf8") };
+  } catch (e) {
+    const err = e as { stderr?: string; message: string };
+    return { error: (err.stderr || err.message).trim().split("\n")[0] };
+  }
+}

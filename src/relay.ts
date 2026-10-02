@@ -108,6 +108,12 @@ export interface Peer {
   x: string;
   spk: string;
   pairedAt: string;
+  /**
+   * On an approver: the tailnet logins it answers for, when this machine is a
+   * broker serving several people. A broker request from one of them goes to
+   * their own device; one from anyone else goes to approvers with no list.
+   */
+  for?: string[];
 }
 
 export function loadPeers(): Peer[] {
@@ -125,8 +131,24 @@ function isPeer(p: unknown): p is Peer {
   return (
     Boolean(r) && (r.kind === "approver" || r.kind === "requester") && typeof r.name === "string" &&
     typeof r.relay === "string" && BOX_ID.test(r.toApprover) && BOX_ID.test(r.toRequester) &&
-    typeof r.x === "string" && typeof r.spk === "string"
+    typeof r.x === "string" && typeof r.spk === "string" &&
+    (r.for === undefined || (Array.isArray(r.for) && r.for.every((x) => typeof x === "string")))
   );
+}
+
+/**
+ * Who answers a request. With a login (a broker request from that person):
+ * the approvers paired for them, if any. Otherwise, and for everything that
+ * is not a broker request, the approvers paired for nobody in particular — a
+ * device paired for one person never answers for anyone else.
+ */
+export function approversFor(login?: string): Peer[] {
+  const all = pairedApprovers();
+  if (login) {
+    const theirs = all.filter((p) => p.for?.includes(login));
+    if (theirs.length) return theirs;
+  }
+  return all.filter((p) => !p.for?.length);
 }
 
 export function savePeer(peer: Peer): void {
@@ -489,8 +511,9 @@ export interface RelayOutcome {
 export async function relayApprove(
   fields: { action: string; summary: string; detail: string[]; code: string; ttlSeconds: number | null; biometry: boolean },
   timeoutMs: number,
+  forLogin?: string,
 ): Promise<RelayOutcome | null> {
-  const approvers = pairedApprovers();
+  const approvers = approversFor(forLogin);
   const device = loadDevice(false);
   if (!approvers.length || !device) return null;
 

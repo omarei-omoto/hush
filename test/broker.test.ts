@@ -218,3 +218,118 @@ test("the broker's address comes from the node's own status: a tailnet IPv4, not
   assert.equal(parseSelfIPv4(status(["192.168.1.5"])), null, "a LAN address is not the tailnet");
   assert.equal(parseSelfIPv4(status(["100.100.113.66"], "Stopped")), null);
 });
+
+// ------------------------------------------------------------------ https, sessions, routing
+
+import { spawnSync } from "node:child_process";
+import { request as httpsRequest } from "node:https";
+import { createServer as createSocketServer } from "node:http";
+import { approversFor, savePeer } from "../src/relay.ts";
+import { whoisLocalApi } from "../src/tailscale.ts";
+
+/** A throwaway certificate for 127.0.0.1, or null where openssl cannot make one. */
+function selfSigned(): { cert: string; key: string } | null {
+  const d = mkdtempSync(join(dir, "tls-"));
+  const r = spawnSync("openssl", [
+    "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+    "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+    "-keyout", join(d, "k.pem"), "-out", join(d, "c.pem"),
+  ], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  return { cert: readFileSync(join(d, "c.pem"), "utf8"), key: readFileSync(join(d, "k.pem"), "utf8") };
+}
+
+test("with a certificate, the broker speaks https, and the same rules hold", async (t) => {
+  const tls = selfSigned();
+  if (!tls) return t.skip("openssl cannot make a certificate here");
+  const id = generateIdentity();
+  const path = join(mkdtempSync(join(dir, "v-")), "vault.json");
+  const vault = Vault.create(path, "lib", { name: "me", pub: id.pub });
+  vault.set(id, "stripe-live", "STRIPE_SECRET_KEY", SECRET);
+  vault.save();
+  const hushDir = join(path, "..");
+  const server = createBroker({
+    base: { vault: Vault.open(path), hushDir, policy: { ...DEFAULT_POLICY, requireApproval: [] }, identity: { ...id, source: "test" } as never, root: hushDir, defaultEnv: "stripe-live" },
+    sets: ["stripe-live"], allow: ["me@example.com"], whois: async () => ME, tls,
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const reply = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+      const req = httpsRequest({ host: "127.0.0.1", port, path: "/mcp", method: "POST", ca: tls.cert, headers: { "content-type": "application/json" } }, (res) => {
+        let text = "";
+        res.on("data", (c) => (text += c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+    assert.equal(reply.status, 200);
+    assert.match(reply.text, /hush_request/);
+    // Plain http to an https broker gets nothing useful.
+    const plain = await fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(() => null);
+    assert.ok(!plain || plain.status !== 200);
+  } finally {
+    server.close();
+  }
+});
+
+test("the app's own name is kept for its session, as a hint, and only for the device that started it", async () => {
+  const b = await broker();
+  try {
+    const init = await fetch(b.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "claude-code" } } }),
+    });
+    const sid = init.headers.get("mcp-session-id");
+    assert.match(String(sid), /^[0-9a-f]{32}$/);
+    await fetch(b.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "mcp-session-id": String(sid) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "hush_list_sets", arguments: {} } }),
+    });
+    const log = readFileSync(join(b.hushDir, "audit.log"), "utf8");
+    assert.match(log, /me@example\.com on laptop \(says it is claude-code\)/);
+  } finally {
+    b.close();
+  }
+});
+
+test("a device paired for a person answers that person's broker requests, and nobody else's", () => {
+  const box = (n: number) => "A".repeat(42) + String(n);
+  const peer = (name: string, n: number, forLogins?: string[]) => ({
+    kind: "approver" as const, name, relay: "https://relay.example", toApprover: box(n), toRequester: box(n + 1),
+    x: `x${n}`, spk: `spk${n}`, pairedAt: new Date().toISOString(), ...(forLogins ? { for: forLogins } : {}),
+  });
+  savePeer(peer("owner-laptop", 1));
+  savePeer(peer("sam-phone", 3, ["sam@example.com"]));
+  const names = (login?: string) => approversFor(login).map((p) => p.name);
+  assert.deepEqual(names("sam@example.com"), ["sam-phone"], "Sam's request did not go to Sam");
+  assert.deepEqual(names("alex@example.com"), ["owner-laptop"], "someone without a device should fall back to the owner's");
+  assert.deepEqual(names(), ["owner-laptop"], "an ordinary approval reached a device paired for one person");
+});
+
+test("on Linux, whois asks tailscaled over its socket and reads the same answer", async (t) => {
+  if (process.platform === "win32") return t.skip("no unix sockets");
+  const sock = join(mkdtempSync(join("/tmp", "hush-ts-")), "s.sock");
+  const daemon = createSocketServer((req, res) => {
+    if (req.headers.host !== "local-tailscaled.sock" || !req.url?.startsWith("/localapi/v0/whois?addr=100.64.0.7")) {
+      res.writeHead(403);
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ Node: { Name: "box.t.ts.net.", Tags: [] }, UserProfile: { LoginName: "me@example.com" }, CapMap: {} }));
+  });
+  daemon.listen(sock);
+  await once(daemon, "listening");
+  try {
+    assert.deepEqual(await whoisLocalApi("100.64.0.7", sock), { login: "me@example.com", node: "box.t.ts.net", tags: [], caps: {} });
+    assert.equal(await whoisLocalApi("100.64.0.8", sock), null, "a refused lookup must be no answer");
+    assert.equal(await whoisLocalApi("100.64.0.7", sock + ".gone"), null);
+  } finally {
+    daemon.close();
+  }
+});

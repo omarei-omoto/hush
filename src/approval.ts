@@ -27,7 +27,7 @@ import { randomInt } from "node:crypto";
 import { platform } from "node:os";
 import { authenticate, biometryStatus, type BiometryMode, type BiometryResult } from "./biometry.ts";
 import { detectBackend, ttlLabel } from "./dialogs.ts";
-import { pairedApprovers, relayApprove } from "./relay.ts";
+import { approversFor, pairedApprovers, relayApprove } from "./relay.ts";
 
 export type Decision = "once" | "session" | "deny" | "timeout";
 
@@ -70,6 +70,12 @@ export interface ApprovalRequest {
    * so a device that is both an approver and a requester never forwards one on.
    */
   noRelay?: boolean;
+  /**
+   * The tailnet login a broker request came from. When a device is paired
+   * for that person, the request goes there, and not to this machine's
+   * screen: the person whose agent asked is the one who should answer.
+   */
+  approverFor?: string;
 }
 
 export interface ApprovalResult {
@@ -202,6 +208,11 @@ export async function requestApproval(
   const timeoutMs = req.timeoutMs ?? 120_000;
   const mode: BiometryMode = req.biometry ?? "off";
 
+  // A broker request from someone with their own paired device: ask them there.
+  if (req.approverFor && !req.noRelay && approversFor(req.approverFor).some((p) => p.for?.includes(req.approverFor!))) {
+    return viaRelay(hushDir, req, code, timeoutMs, mode === "required");
+  }
+
   if (mode !== "off") {
     // The reason string is the only thing the system sheet shows, so it has to
     // name the real action rather than say "authenticate".
@@ -218,7 +229,7 @@ export async function requestApproval(
     }
     if (mode === "required") {
       // No fingerprint here; a paired approver's fingerprint will do.
-      if (!req.noRelay && pairedApprovers().length) return viaRelay(hushDir, req, code, timeoutMs, true);
+      if (!req.noRelay && approversFor(req.approverFor).length) return viaRelay(hushDir, req, code, timeoutMs, true);
       return {
         decision: "deny",
         code,
@@ -231,7 +242,7 @@ export async function requestApproval(
   }
 
   const backend = currentBackend(deps);
-  if (!backend && !req.noRelay && pairedApprovers().length) return viaRelay(hushDir, req, code, timeoutMs, false);
+  if (!backend && !req.noRelay && approversFor(req.approverFor).length) return viaRelay(hushDir, req, code, timeoutMs, false);
   if (!backend) {
     // Nothing can put this request in front of a human: no dialog program, and
     // no fingerprint helper was available a moment ago. The old fallback wrote
@@ -292,6 +303,7 @@ async function viaRelay(
       biometry,
     },
     timeoutMs,
+    req.approverFor,
   );
   if (!outcome) return { decision: "deny", code, cached: false, via: "none", note: "no paired approver" };
   if (outcome.decision === "session") granted.set(grantKey(hushDir, req.scope), Date.now() + req.ttlSeconds * 1000);

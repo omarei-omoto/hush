@@ -188,11 +188,37 @@ export interface ApprovalDeps {
   resolveDialogProgram?: (cmd: "osascript" | "zenity" | "kdialog" | "powershell") => string | null;
 }
 
+/**
+ * One line of a prompt, exactly as it will be read. Parts of a request come
+ * from whoever asked — an agent's arguments, a broker caller's command and
+ * folder — and a line break in them could forge lines below the summary
+ * ("Sends: (nothing)") or push the real ones out of view; a text-direction
+ * override could make "evil.sh" read as something else. So every line is
+ * flattened here, where all requests come in: breaks become a visible ⏎,
+ * other control and direction characters go, and length is bounded.
+ */
+export function promptLine(s: string, max = 300): string {
+  const flat = String(s)
+    .replace(/\r\n|[\r\n\u2028\u2029\u0085]/g, " ⏎ ")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, "")
+    .replace(/\t/g, " ");
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** At most this many detail lines; a request is not allowed to bury its own last lines. */
+const MAX_DETAIL_LINES = 12;
+
 export async function requestApproval(
   hushDir: string,
-  req: ApprovalRequest,
+  rawReq: ApprovalRequest,
   deps: ApprovalDeps = { authenticate },
 ): Promise<ApprovalResult> {
+  const detail = (rawReq.detail ?? []).map((l) => promptLine(l));
+  const req: ApprovalRequest = {
+    ...rawReq,
+    summary: promptLine(rawReq.summary),
+    detail: detail.length > MAX_DETAIL_LINES ? [...detail.slice(0, MAX_DETAIL_LINES - 1), `… and ${detail.length - MAX_DETAIL_LINES + 1} more`] : detail,
+  };
   const code = req.code ?? newCode();
 
   // One place a grant can live: this process's map. Nothing is read from the

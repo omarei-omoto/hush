@@ -19,7 +19,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { randomBytes } from "node:crypto";
-import { TOOLS } from "./mcp.ts";
+import { TOOLS, type Policy } from "./mcp.ts";
 import { callTool, errText, type Ctx } from "./mcp-tools.ts";
 import { admits, callerName, type TailnetCaller } from "./tailscale.ts";
 import { audit, ValidationError } from "./vault.ts";
@@ -38,6 +38,8 @@ export interface LeaseDevice {
   pub: string;
   login: string;
   node: string;
+  /** The device's stable ID, when Tailscale gave one: what the enrollment is bound to. */
+  nodeId?: string;
   name: string;
   at: string;
 }
@@ -70,6 +72,37 @@ export interface BrokerOptions {
   whois: (addr: string) => Promise<TailnetCaller | null>;
   /** The certificate for this machine's tailnet name; plain http without one. */
   tls?: { cert: string; key: string };
+  /**
+   * This machine's own tailnet addresses. A connection from one of them was
+   * made on this machine — by any account on it — and carries no tailnet
+   * identity of its own, so it is refused (see the handler).
+   */
+  selfAddresses?: string[];
+}
+
+/**
+ * The policy a broker runs with, or why it must not start. A broker asks a
+ * person before a credential is sent; turning that off (`--without-approval`)
+ * is allowed only with `allowHosts` set, because with neither, any allowed
+ * caller can name a server of their own and read the key off the request.
+ */
+export function brokerPolicy(loaded: Policy, withoutApproval: boolean): { policy: Policy } | { error: string; hint: string } {
+  if (!withoutApproval) {
+    if (!loaded.requireApproval.includes("request")) {
+      return {
+        error: "This vault's policy does not ask before hush_request sends a credential, and a broker should.",
+        hint: "Turn it on (hush secure approval), or pass --without-approval with allowHosts set.",
+      };
+    }
+    return { policy: loaded };
+  }
+  if (!loaded.allowHosts.length) {
+    return {
+      error: "--without-approval needs allowHosts: with neither, an allowed caller can send a key to a server of their own and read it.",
+      hint: 'List the APIs the keys are for in the vault\'s policy.json, e.g. "allowHosts": ["api.stripe.com"].',
+    };
+  }
+  return { policy: { ...loaded, requireApproval: loaded.requireApproval.filter((x) => x !== "request") } };
 }
 
 const OFFERED = new Set(["hush_list_sets", "hush_request"]);
@@ -305,7 +338,7 @@ export function createBroker(o: BrokerOptions): Server {
       return { status: 403, body: { error: ap.note ?? (ap.decision === "timeout" ? "nobody answered the approval" : "enrollment was denied"), code: ap.code } };
     }
     const devices = loadDevices(o.base.hushDir).filter((d) => d.fp !== key.fp);
-    devices.push({ fp: key.fp, pub: key.pk, login: caller.login, node: caller.node, name, at: new Date().toISOString() });
+    devices.push({ fp: key.fp, pub: key.pk, login: caller.login, node: caller.node, ...(caller.id ? { nodeId: caller.id } : {}), name, at: new Date().toISOString() });
     saveDevices(o.base.hushDir, devices);
     audit(o.base.hushDir, { actor: "broker", action: "lease-enroll", fp: key.fp, caller: who });
     return { status: 200, body: { enrolled: true, fingerprint: key.fp, code: ap.code } };
@@ -316,7 +349,10 @@ export function createBroker(o: BrokerOptions): Server {
     const key = keyFrom(body);
     if (!key) return { status: 400, body: { error: "pub must be this machine's hush key (hush id)" } };
     const who = callerName(caller);
-    const device = loadDevices(o.base.hushDir).find((d) => d.fp === key.fp && d.node === caller.node && d.login === caller.login);
+    // Bound to the device's stable ID where there is one: a later device that
+    // is given the same name is not the device that was enrolled.
+    const sameDevice = (d: LeaseDevice) => (d.nodeId ? d.nodeId === caller.id : d.node === caller.node);
+    const device = loadDevices(o.base.hushDir).find((d) => d.fp === key.fp && sameDevice(d) && d.login === caller.login);
     if (!device) return { status: 403, body: { error: "this machine is not enrolled for leases here", enroll: true } };
 
     const command = typeof body.command === "string" ? body.command : "";
@@ -376,6 +412,14 @@ export function createBroker(o: BrokerOptions): Server {
       }
 
       const addr = plainAddress(req.socket.remoteAddress ?? "");
+      // A connection from this machine's own tailnet address was made here,
+      // by any account on this machine, and Tailscale would name it as the
+      // owner. The owner uses hush directly on this machine; the broker is
+      // for other machines.
+      if (addr && o.selfAddresses?.includes(addr)) {
+        audit(o.base.hushDir, { actor: "broker", action: "refused", reason: "same machine", from: addr });
+        return send(res, 403, { error: "the broker does not answer this machine itself; use hush directly here" });
+      }
       const caller = addr ? await o.whois(addr) : null;
       if (!caller) {
         audit(o.base.hushDir, { actor: "broker", action: "refused", reason: "not a tailnet peer", from: addr });

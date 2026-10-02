@@ -149,6 +149,22 @@ team — and what to turn on for each, see [docs/SAFETY.md](./docs/SAFETY.md).
 What has actually been tried against these surfaces, and with what result, is
 in [docs/RED-TEAM.md](./docs/RED-TEAM.md).
 
+### The tailnet broker (beta)
+
+`hush serve --tailnet` answers other machines on your tailnet
+([docs/TAILNET.md](docs/TAILNET.md)). A caller is whoever Tailscale says holds
+the WireGuard key its connection came from, checked against `--allow` and the
+tailnet policy's grants; nothing the caller sends is taken as identity, and a
+connection from the broker's own machine is refused, because it would carry
+the owner's identity whichever account made it. `hush_request` keeps the key on
+the broker, and every request asks the owner unless `--without-approval` is
+given, which needs `allowHosts`. A lease is different: it hands the values of
+some sets to one enrolled machine, sealed to its key, after an approval that
+shows the command. hush on that machine runs only that command, but a machine
+that is not honest can use the values as it likes; a lease is "this machine
+gets these values". The broker holds every key it offers, so it is the machine
+to give a hardware identity.
+
 ### What it does not protect
 
 **A software identity is usable by anything running as you.** This is the big

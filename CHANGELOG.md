@@ -114,6 +114,21 @@ can do more than the policy file. An API access token also works, with a note
 that it is broader. `hush tailnet grants` and `hush tailnet revoke` manage the
 grants it wrote.
 
+### Security fixes from a pass over this release
+
+Found and fixed before release (docs/AUDIT.md, thirteenth pass), each with a
+regression test:
+- The broker refuses connections from its own machine. They arrive from its
+  own tailnet address, which Tailscale names as the owner, so any account on
+  that machine was treated as the owner.
+- Approval prompts flatten every line: a line break in a request's command,
+  arguments or folder shows as ⏎ and can no longer forge or bury the lines you
+  read. Control and text-direction characters are removed.
+- `hush serve --tailnet --without-approval` is refused unless `allowHosts` is
+  set; without either, an allowed caller could send a key to their own server.
+- Lease enrollments are bound to the device's stable ID, not its name.
+- `hush setup` quotes its commands for a shell.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

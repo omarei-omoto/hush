@@ -358,6 +358,34 @@ property but harder to see:
 Two mutations were checked individually and are genuinely equivalent; they are
 listed below rather than chased with contorted tests.
 
+### Thirteenth pass — the beta branch: the broker, leases, scans and setup
+
+A pass over everything new on the beta branch before its first release,
+following the shape of Cloudflare's security-audit skill: map the trust
+boundaries, list candidates, and keep only those with a lower-trust actor, a
+control it gets past and a result shown locally. Fifteen candidates; three
+confirmed, one closed by design, the rest rejected against SECURITY.md. Each
+confirmed one has a regression test in `test/audit-beta.test.ts`.
+
+| Severity | Issue | Fix |
+|---|---|---|
+| Medium | The broker named callers by their source address, and a connection made *on the broker's own machine* to its tailnet IP arrives from that IP — which Tailscale names as the owner. Any account on that machine was the owner to the broker | Connections from the machine's own tailnet addresses are refused; the owner uses hush directly there |
+| Medium | Approval dialogs showed request text as given. A lease caller's arguments and folder could carry line breaks that forged lines ("Sends: (nothing)") and pushed the real ones 25 lines down. The older local `hush_run` path had the same exposure | Every summary and detail line is flattened where approvals come in: breaks become a visible ⏎, control and text-direction characters go, and length and line count are bounded |
+| Medium | `--without-approval` with the default empty `allowHosts` let any allowed caller name a server of their own in `hush_request` and read the key off the request — while the banner said values never leave the broker | `--without-approval` is refused unless `allowHosts` is set; the banner says where keys may go |
+| Closed | Lease enrollments were bound to the device's *name*, which Tailscale can give to another device once the first is gone | Bound to the device's stable ID |
+
+Rejected, each against a line already in SECURITY.md: using `hush scan
+--transcripts` as a guess oracle, or an agent answering a terminal prompt
+through a pseudo-terminal (code running as you can already use a software
+key); a broker injecting `NODE_OPTIONS` into a teammate's leased process (a
+bad-faith broker is a bad-faith admin, out of scope like a bad-faith member);
+slow requests (Node's own server timeouts bound them); and form injection in
+the OAuth exchange (self-inflicted). Three claims in the docs were stronger
+than the code, and were corrected: that an agent cannot answer setup's
+confirmations at all, that a lease is limited to its command, and the
+setup checklist's commands, which used JSON quoting where a shell expects
+its own.
+
 ### Mutants that survive on purpose
 
 Four mutations are known to be behaviourally identical, each checked

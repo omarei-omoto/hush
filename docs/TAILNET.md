@@ -15,7 +15,8 @@ hush serve --tailnet --sets stripe-live,openai
 hush broker  →  https://laptop.tail1234.ts.net:8788/mcp  (this tailnet only)
   offers:  stripe-live  STRIPE_SECRET_KEY
   allows:  you@example.com
-  every request asks first; calls go out from this machine, values never leave it
+  every request asks first, naming where the key goes
+  sends:   keys to any https host you approve; leases hand values to an enrolled machine, after asking
   asks:    on this machine
 
   Add it to an agent on any tailnet machine:
@@ -35,7 +36,13 @@ response redacted. Nothing returns a value, and nothing runs a command.
   connection's source address goes to the local Tailscale daemon (`whois`),
   and identity is never read from anything the caller sends. Answers are
   remembered for a minute per address. A request with a browser's `Origin`
-  header is refused.
+  header is refused. So is a connection from the broker's own machine: it
+  arrives from the broker's own tailnet address, which Tailscale names as the
+  owner, whichever account on that machine made it. On the broker's machine,
+  use hush directly.
+- Prefer logins, groups and tags in `--allow` over device names. A name can
+  be given to another device once the first is gone; lease enrollments are
+  bound to the device's stable ID for that reason.
 - **Approval:** a broker refuses to start unless the vault's policy asks
   before `request`. It also refuses to start when nothing can show that
   prompt, because then every request would be refused. Every request shows
@@ -49,7 +56,12 @@ response redacted. Nothing returns a value, and nothing runs a command.
     from step 1).
   - An "Allow 15 min" covers that caller only, never another person making
     the same request.
-  `--without-approval` turns approval off for the broker and says so.
+  `--without-approval` turns approval off for the broker, and is refused
+  unless the vault's policy sets `allowHosts`: without either, an allowed
+  caller could send a key to a server of their own and read it.
+- Approval prompts show each line of a request flattened: a line break in a
+  caller's command or folder shows as ⏎, so a request cannot forge the lines
+  below it.
 - **The app's name:** an agent's MCP client names itself when it connects
   (`claude-code`). The broker keeps that for the session and shows it in
   prompts and the log as "says it is …". It is a hint, never a permission:
@@ -145,8 +157,13 @@ hush run --from https://broker.tail1234.ts.net:8788 -- ./deploy.sh --prod
 - **Every lease asks**, showing the exact command, the sets and the machine
   ("Lease to sam@example.com on vps: ./deploy.sh --prod"). The command policy
   applies: a shell, an interpreter or an env dumper is refused.
-- The lease names the command and arguments, and expires in a minute. The
-  client refuses one that does not match what it asked for. The values live
+- The lease names the command and arguments, and expires in a minute. hush on
+  the receiving machine refuses one that does not match what it asked for,
+  and runs only that command. That binds an honest client. It does not bind
+  a compromised one: the values reach the enrolled machine, and whatever
+  controls that machine's hush key can use them as it likes, just as the
+  command deny list is a speed bump rather than a wall. Approve a lease as
+  "this machine gets these values", and enroll only machines you trust. The values live
   in that process and the child's environment, and the child's output is
   redacted. Nothing is written to disk.
 - **What it cannot do** is take a value back. A lease of a long-lived key is

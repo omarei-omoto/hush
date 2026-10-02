@@ -51,7 +51,7 @@ export interface SetupOption {
 
 /** `hush a b && hush c`, from argv lists. */
 export const commandOf = (argv: string[][]): string =>
-  argv.map((a) => ["hush", ...a.map((x) => (/^[\w./@:=-]+$/.test(x) ? x : JSON.stringify(x)))].join(" ")).join(" && ");
+  argv.map((a) => ["hush", ...a.map((x) => quote(x))].join(" ")).join(" && ");
 
 export interface SetupState {
   root: string;
@@ -88,7 +88,12 @@ export function setSkip(root: string, id: string, skip: boolean): void {
 
 // ------------------------------------------------------------------ the steps
 
-const quote = (s: string): string => (/^[\w./@:-]+$/.test(s) ? s : JSON.stringify(s));
+/**
+ * Quoted for a POSIX shell, because people and agents paste these commands
+ * into one: single quotes, where nothing is expanded. JSON's double quotes
+ * would let a "$(…)" in a folder name run as a command.
+ */
+const quote = (s: string): string => (/^[\w./@:=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 /** A name for a folder's keys: "My App" from my-app. */
 function setLabelFor(root: string): string {

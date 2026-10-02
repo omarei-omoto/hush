@@ -45,12 +45,12 @@ test("a first run, step by step, exactly as an agent would follow it: each comma
     assert.equal(j.next, "key");
     assert.equal(m.step("key").kind, "auto");
     assert.equal(m.step("project").kind, "choice", "where the keys go is the person's choice");
-    assert.match(m.step("project").command!, /^hush import \.env --as "My App" --project$/);
+    assert.match(m.step("project").command!, /^hush import \.env --as 'My App' --project$/);
     assert.ok(!JSON.stringify(j).includes("sk_live_setup"), "the checklist leaked a value from .env");
 
     for (const id of ["key", "library", "project"]) {
       const cmd = m.step(id).command!.replace(/^hush /, "");
-      const args = cmd.match(/"[^"]*"|\S+/g)!.map((x) => x.replace(/^"|"$/g, ""));
+      const args = cmd.match(/'[^']*'|\S+/g)!.map((x) => x.replace(/^'|'$/g, ""));
       const r = m.run(args);
       assert.equal(r.code, 0, `${id}: ${r.out}`);
       assert.equal(m.step(id).status, "done", `${id} did not become done`);

@@ -63,9 +63,14 @@ safe does not depend on the agent following those rules:
   recommended default. The agent asks you, then runs the command for your answer.
 - **person** steps need you: deleting a `.env`, rewriting an agent's config,
   typing in a new key. Their commands ask you directly, on your terminal or,
-  when an agent ran them, in a hush dialog on your screen. The agent cannot
-  click that dialog, and adding `--yes` does not answer it. `--yes` only
-  stands in where no dialog can be shown at all, such as headless CI.
+  when an agent ran them without one, in a hush dialog on your screen. Adding
+  `--yes` does not answer that dialog. `--yes` only stands in where no dialog
+  can be shown at all, such as headless CI.
+- These confirmations are a guard against mistakes, not a wall against an
+  agent that means harm. Something running as you can answer a terminal
+  prompt it starts itself, and could delete the file directly anyway. What
+  protects a key from that is the [security ladder](the-security-ladder.md):
+  approvals that use a dialog or your fingerprint, and a hardware key.
 - New keys are typed into hush's hidden prompt or secure input box, never into
   the chat.
 

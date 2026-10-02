@@ -6,8 +6,8 @@ import { dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, info, warn, yellow } from "../cli/output.ts";
-import { createBroker, HUSH_CAP } from "../broker.ts";
-import { cachedWhois, tailnetCert, tailnetIPv4, tailnetName, whois } from "../tailscale.ts";
+import { brokerPolicy, createBroker, HUSH_CAP } from "../broker.ts";
+import { cachedWhois, tailnetAddresses, tailnetCert, tailnetIPv4, tailnetName, whois } from "../tailscale.ts";
 import { approvalPromptAvailable } from "../approval.ts";
 import { pairedApprovers } from "../relay.ts";
 import { hushHome } from "../identity.ts";
@@ -49,16 +49,11 @@ export async function cmdServe(a: Args): Promise<void> {
   // A network-facing broker asks a person before a credential is sent: an
   // allowed device is not an allowed request. Turning that off is a flag
   // that says so, and it does exactly that — for this broker only.
-  const loaded = loadPolicy(hushDir);
   const without = bool(a, "without-approval");
-  if (!without && !loaded.requireApproval.includes("request")) {
-    die(
-      "This vault's policy does not ask before hush_request sends a credential, and a broker should.",
-      "Turn it on (hush secure approval), or pass --without-approval if you mean it.",
-    );
-  }
-  const policy = without ? { ...loaded, requireApproval: loaded.requireApproval.filter((x) => x !== "request") } : loaded;
-  if (without) warn("--without-approval: allowed callers can send these credentials without asking you.");
+  const decided = brokerPolicy(loadPolicy(hushDir), without);
+  if ("error" in decided) die(decided.error, decided.hint);
+  const policy = decided.policy;
+  if (without) warn(`--without-approval: allowed callers can use these keys with ${policy.allowHosts.join(", ")} without asking you.`);
 
   // Whom to admit. Default: you, as Tailscale knows you on this machine.
   let allow = list(a, "allow");
@@ -101,6 +96,7 @@ export async function cmdServe(a: Args): Promise<void> {
     sets,
     allow,
     whois: cachedWhois(),
+    selfAddresses: tailnetAddresses(),
     ...(tls ? { tls } : {}),
   });
   // Certificates last 90 days; `tailscale cert` renews near the end, so ask daily.
@@ -123,7 +119,8 @@ export async function cmdServe(a: Args): Promise<void> {
   info(dim(`  vault:   ${vault.data.name}${vaultPath === globalVaultPath() ? ` (your library, ${globalVaultName()})` : ""}`));
   for (const n of sets) info(dim(`  offers:  ${n}  ${vault.list(n).map((i) => i.key).join(", ")}`));
   info(dim(`  allows:  ${allow.join(", ")}, and anyone your tailnet policy grants ${HUSH_CAP} (only the sets it names)`));
-  info(dim(`  ${policy.requireApproval.includes("request") ? "every request asks first" : yellow("requests are NOT approved by a person")}; calls go out from this machine, values never leave it`));
+  info(dim(`  ${policy.requireApproval.includes("request") ? "every request asks first, naming where the key goes" : yellow("requests are NOT approved by a person")}`));
+  info(dim(`  sends:   ${policy.allowHosts.length ? `keys only to ${policy.allowHosts.join(", ")}` : "keys to any https host you approve"}; leases hand values to an enrolled machine, after asking`));
   if (policy.requireApproval.includes("request")) {
     const forPeople = approvers.filter((p) => p.for?.length);
     for (const p of forPeople) info(dim(`  asks:    ${p.for!.join(", ")} on their own device (${p.name})`));

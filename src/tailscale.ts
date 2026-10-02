@@ -76,20 +76,26 @@ export interface TailnetCaller {
   tags: string[];
   /** App capabilities the tailnet policy grants this peer, by capability name. */
   caps: Record<string, unknown[]>;
+  /**
+   * The device's stable ID. A name can be given to another device once the
+   * first is gone; this cannot, so anything bound to "this device" uses it.
+   */
+  id?: string;
 }
 
 /** `tailscale whois --json <addr>` → who it is. Null when the address is no tailnet peer. */
 export function parseWhois(json: string): TailnetCaller | null {
   try {
     const j = JSON.parse(json) as {
-      Node?: { Name?: string; Tags?: string[] };
+      Node?: { Name?: string; Tags?: string[]; StableID?: string };
       UserProfile?: { LoginName?: string };
       CapMap?: Record<string, unknown[]>;
     };
     const node = (j.Node?.Name ?? "").replace(/\.$/, "");
     const login = j.UserProfile?.LoginName ?? "";
     if (!node || !login) return null;
-    return { login, node, tags: Array.isArray(j.Node?.Tags) ? j.Node!.Tags!.map(String) : [], caps: j.CapMap ?? {} };
+    const id = typeof j.Node?.StableID === "string" && j.Node.StableID ? j.Node.StableID : undefined;
+    return { login, node, tags: Array.isArray(j.Node?.Tags) ? j.Node!.Tags!.map(String) : [], caps: j.CapMap ?? {}, ...(id ? { id } : {}) };
   } catch {
     return null;
   }
@@ -156,6 +162,18 @@ function whoisCli(addr: string): Promise<TailnetCaller | null> {
         });
       }),
   );
+}
+
+/** Every address this machine has on the tailnet, IPv4 and IPv6. */
+export function tailnetAddresses(): string[] {
+  const out = statusJson();
+  if (!out) return [];
+  try {
+    const j = JSON.parse(out) as { Self?: { TailscaleIPs?: string[] } };
+    return (j.Self?.TailscaleIPs ?? []).filter((x) => typeof x === "string");
+  } catch {
+    return [];
+  }
 }
 
 /** This machine's tailnet IPv4 address, or null — from the same status call as its name. */

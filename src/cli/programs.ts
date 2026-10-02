@@ -90,3 +90,30 @@ export function selfCommand(args: string[]): { command: string; args: string[] }
   } catch { /* fall through to the absolute path */ }
   return { command: "node", args: [cliPath, ...args] };
 }
+
+/**
+ * This hush, by absolute path, never the bare name. For a config that a GUI
+ * app reads — Claude Desktop starts MCP servers with a minimal PATH that has
+ * no nvm or Homebrew directory in it, so `hush` there is "command not found".
+ * A user-wide file is one machine's anyway; selfCommand's portable bare name
+ * is for files that get committed.
+ */
+export function absoluteSelfCommand(args: string[]): { command: string; args: string[] } {
+  if (standalone()) return { command: process.execPath, args };
+  const here = fileURLToPath(import.meta.url);
+  return { command: stableNode(), args: [join(dirname(here), "..", `cli${extname(here)}`), ...args] };
+}
+
+/**
+ * process.execPath is the resolved binary — under Homebrew that is
+ * /opt/homebrew/Cellar/node/<version>/bin/node, which the next `brew upgrade`
+ * deletes. The `node` on PATH (/opt/homebrew/bin/node) is a link that follows
+ * upgrades, so it is preferred whenever it is the same program.
+ */
+function stableNode(): string {
+  const candidate = onPath("node");
+  try {
+    if (candidate && candidate.startsWith("/") && realpathSync(candidate) === realpathSync(process.execPath)) return candidate;
+  } catch { /* fall back to the binary itself */ }
+  return process.execPath;
+}

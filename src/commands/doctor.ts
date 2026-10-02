@@ -17,6 +17,7 @@ import { biometryStatus } from "../biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin } from "../age.ts";
 import { type Args } from "../cli/args.ts";
 import { driverInstalled } from "./merge.ts";
+import { agentCredentialCount } from "./scan-agents.ts";
 import { keyAges } from "../freshness.ts";
 import { bold, cyan, dim, green, info, red } from "../cli/output.ts";
 import { readIfExists } from "../cli/programs.ts";
@@ -100,6 +101,13 @@ export async function cmdDoctor(_a: Args): Promise<void> {
     [g.skill.project(root), g.skill.global?.(process.env)].filter((p): p is string => !!p && existsSync(p)),
   );
   check(skills.length > 0, "agent skill", skills.length ? skills.join(", ") : "run `hush install-skill`");
+
+  const plain = agentCredentialCount(root);
+  check(
+    plain.count === 0,
+    "agent configs",
+    plain.count ? `${plain.count} plaintext key(s) in ${plain.files} file(s) — hush scan --agents` : "no plaintext keys",
+  );
 
   // What the agent is actually allowed to do, rather than what it could be.
   const policy = loadPolicy(loc.hushDir);

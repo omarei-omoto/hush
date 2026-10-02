@@ -4,6 +4,33 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### Keys in your agents' own config files
+
+`hush scan --agents` reads the files coding agents keep MCP servers in
+(Claude Code, Claude Desktop, Cursor, Windsurf, Gemini CLI, VS Code, Cline,
+Zed, Codex, Continue) and lists every plaintext credential: which agent, which
+server, which variable, and a masked preview, never the value. `--fix` moves
+each one that sits in a command-started server's `env` into a library set,
+reads it back, and only then rewrites the server to start through
+`hush run --use mcp-<server>`, keeping every other setting and the file's own
+indentation. Keys it cannot move (a header, a URL, an app's own setting) are
+listed with what to do instead. `--json` for scripts.
+
+### Fixed
+
+- `hush ui` opened from the home folder no longer sits blank: the code scan
+  behind "What your code reads" walked the whole folder. Every scan now has a
+  budget and says when it stopped early; the page skips the home folder, and
+  the Touch ID helper is built before the link opens rather than on the first
+  request. The page now loads in about half a second.
+
+### Release channels
+
+A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag
+(`npm i -g @omarei/hush@beta`) and a GitHub prerelease. The stable channel —
+`npm i -g @omarei/hush`, Homebrew, install.sh and the MCP registry — never
+serves a beta.
+
 ## 0.10.0 — 2026-10-01
 
 ### A key can be kept to some projects

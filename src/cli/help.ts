@@ -100,6 +100,7 @@ ${bold("other")}
   hush export [--out .env]       write plaintext out (last resort)
   hush get <KEY>                 reveal one value (asks first)
   hush scan [dir]                what does this codebase need, and is it in the vault?
+  hush scan --agents [--fix]     plaintext keys in your agents' configs; --fix moves them into hush
   hush root                      the project root hush would act on
 
 ${bold("flags")}

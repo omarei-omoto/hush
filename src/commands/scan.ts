@@ -8,8 +8,10 @@ import { type Args, bool } from "../cli/args.ts";
 import { ctxLoose } from "../cli/context.ts";
 import { collectExtraSets } from "../cli/sets.ts";
 import { bold, cyan, dim, green, info, out, red } from "../cli/output.ts";
+import { cmdScanAgents } from "./scan-agents.ts";
 
 export async function cmdScan(a: Args): Promise<void> {
+  if (bool(a, "agents")) return cmdScanAgents(a);
   const loose = ctxLoose(a);
   const target = a._[0] ? resolvePath(a._[0]) : loose.root;
   const { usages, truncated } = scanTree(target);

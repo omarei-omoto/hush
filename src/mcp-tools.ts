@@ -7,7 +7,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
-import { composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt } from "./library.ts";
+import { type Composed, composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import {
   checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
@@ -40,13 +40,21 @@ export const errText = (s: string) => ({ content: [{ type: "text", text: without
 
 // ------------------------------------------------------------------ server
 
-interface Ctx {
+export interface Ctx {
   vault: Vault;
   hushDir: string;
   defaultEnv: string;
   policy: Policy;
   identity: ReturnType<typeof requireIdentity>;
   root: string;
+  /**
+   * Set only by the tailnet broker (broker.ts). Which tools may be called at
+   * all; which sets a call may draw from, in place of this project's own; and
+   * who asked, for the approval prompt and the audit log.
+   */
+  tools?: ReadonlySet<string>;
+  compose?: (extra: string[]) => Composed;
+  caller?: string;
 }
 
 function loadCtx(): Ctx {
@@ -144,8 +152,9 @@ function listSets(ctx: Ctx): ListedSet[] {
   return [...project, ...library].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-export async function callTool(name: string, args: any): Promise<unknown> {
-  const ctx = loadCtx();
+export async function callTool(name: string, args: any, injected?: Ctx): Promise<unknown> {
+  const ctx = injected ?? loadCtx();
+  if (ctx.tools && !ctx.tools.has(name)) return errText(`${name} is not offered here.`);
 
   switch (name) {
     case "hush_list_secrets": {
@@ -273,7 +282,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       }
 
       const extraSets: string[] = Array.isArray(args.sets) ? args.sets.map(String) : [];
-      const resolved = composeSets(ctx.vault, ctx.identity, ctx.hushDir, extraSets);
+      const resolved = ctx.compose ? ctx.compose(extraSets) : composeSets(ctx.vault, ctx.identity, ctx.hushDir, extraSets);
       checkScopes(ctx.policy, resolved.layers);
       // The host takes the place of checkCommand's command: hush is the client
       // here, so the destination is the thing the caller actually chooses, and
@@ -324,7 +333,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
           detail: [
             `Sends:  ${requestSecretNames(input, secrets).join(", ") || "(no secret)"}`,
             `Using sets:  ${resolved.layers.join(", ") || "(none)"}`,
-            `Directory:  ${ctx.root}`,
+            ctx.caller ? `From:  ${ctx.caller}` : `Directory:  ${ctx.root}`,
             requestCoverageLine(ctx.policy, parsedUrl.host, resolved.layers),
           ],
           // Naming the host, so a grant for one destination cannot authorise
@@ -334,7 +343,10 @@ export async function callTool(name: string, args: any): Promise<unknown> {
           timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
           biometry: ctx.policy.biometry,
         });
-        audit(ctx.hushDir, { actor: "mcp", action: "approval", on: "request", decision: ap.decision, via: ap.via, code: ap.code });
+        audit(ctx.hushDir, {
+          actor: "mcp", action: "approval", on: "request", decision: ap.decision, via: ap.via, code: ap.code,
+          ...(ctx.caller ? { caller: ctx.caller } : {}),
+        });
         if (ap.decision === "deny") {
           return errText(ap.note ?? `The user denied this (code ${ap.code}, via ${ap.via}).`);
         }
@@ -361,6 +373,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
         layers: resolved.layers,
         sent: result.used,
         redactions: result.redactions,
+        ...(ctx.caller ? { caller: ctx.caller } : {}),
       });
 
       // A non-2xx is a real answer the model needs to see rather than a tool

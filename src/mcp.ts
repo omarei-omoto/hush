@@ -165,7 +165,7 @@ const fail = (id: Req["id"], code: number, message: string) =>
 
 // ------------------------------------------------------------------ tools
 
-const TOOLS = [
+export const TOOLS = [
   {
     name: "hush_list_secrets",
     description:

@@ -46,6 +46,18 @@ server-side agent then reach your laptop with no SSH tunnel. hush only reads
 from Tailscale, and never changes a Tailscale setting. [docs/TAILNET.md](docs/TAILNET.md)
 is the design for going further: a hush broker on the tailnet.
 
+### A hush broker on your tailnet (beta)
+
+`hush serve --tailnet --sets <set>,…` lets agents on your other tailnet
+machines use credentials that stay on this one. It offers two MCP tools over
+HTTP on the tailnet address: `hush_list_sets` (names only) and `hush_request`,
+which makes the API call from the broker and returns the response redacted.
+Callers are identified by the local Tailscale daemon from their WireGuard
+address, never by anything they send, and checked against `--allow` (you by
+default; logins, `tag:` names, devices). Every request asks for approval on
+the broker, naming who asked. A browser's request is refused. Each call goes
+into the audit log with the caller's name.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

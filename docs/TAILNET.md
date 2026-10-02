@@ -1,7 +1,50 @@
 # hush on a tailnet: design
 
-Status: **design, step 1 shipped on the beta branch.** Nothing below step 1 exists
-yet. This is the plan and the reasoning, to be argued with before it is built.
+Status: **steps 1 and 2 are on the beta branch.** Later steps are a plan, to be
+argued with before they are built.
+
+## Using it (step 2, beta)
+
+On the machine that keeps the keys, with Tailscale running:
+
+```bash
+hush serve --tailnet --sets stripe-live,openai
+```
+
+```
+hush broker  →  http://laptop.tail1234.ts.net:8788/mcp  (this tailnet only)
+  offers:  stripe-live  STRIPE_SECRET_KEY
+  allows:  you@example.com
+  every request asks you first; calls go out from this machine, values never leave it
+
+  Add it to an agent on any tailnet machine:
+    claude mcp add --transport http hush-broker http://laptop.tail1234.ts.net:8788/mcp
+```
+
+An agent on any of your tailnet machines then has two tools. `hush_list_sets`
+shows the offered sets and their key names. `hush_request` makes an API call
+*from the broker*, with `$STRIPE_SECRET_KEY` substituted there and the
+response redacted. Nothing returns a value, and nothing runs a command.
+
+- **Which sets** are offered is a list you give (`--sets`). There is no default.
+- **Who** may call: you by default, as Tailscale knows you. `--allow` takes
+  logins, `tag:` names and device names, repeatably (`--allow tag:ci`). A
+  tagged device is matched by its tags only, never by a login.
+- **How it knows:** the broker listens on the tailnet address only. Each
+  connection's source address goes to the local Tailscale daemon (`whois`),
+  and identity is never read from anything the caller sends. Answers are
+  remembered for a minute per address. A request with a browser's `Origin`
+  header is refused.
+- **Approval:** a broker refuses to start unless the vault's policy asks
+  before `request`. Every request then shows the usual prompt on the
+  broker's machine, saying who asked ("From: you@example.com on build-box").
+  On a headless broker, pair it with your laptop over the relay (step 1).
+  `--without-approval` turns this off for the broker and says so.
+- **Audit:** every call, refusal and approval goes into the vault's
+  `audit.log` with the caller's name.
+- It is plain HTTP inside WireGuard. The tailnet encrypts it, and nothing
+  outside the tailnet can connect. `--port` changes 8788; `--vault <name>`
+  serves a vault other than your library.
 
 ## The problem
 
@@ -87,10 +130,14 @@ This needs a proper review before anyone puts production keys behind it.
    Approvals from server-side agents reach the laptop with no SSH tunnel.
    Checked live: the relay answered through `tailscale serve` with a valid
    certificate.
-2. **`hush serve --tailnet`, request-only.** MCP over HTTPS behind `tailscale
-   serve`. Callers are identified with whois, and an allow-list of users and
-   tags lives in the broker's policy. Tools: list and describe sets, and
-   `hush_request`. No value ever leaves the broker.
+2. **`hush serve --tailnet`, request-only.** *Done (beta).* MCP over HTTP on
+   the tailnet address, with callers identified by whois and checked against
+   `--allow`. Tools: `hush_list_sets` and `hush_request`. No value leaves the
+   broker. Checked live: a call over the tailnet reached the stand-in API with
+   the real key and came back redacted. It binds the tailnet address directly
+   rather than sitting behind `tailscale serve`: behind it, every connection
+   comes from 127.0.0.1, and identity would have to come from headers that any
+   local process could forge.
 3. **Leases.** `hush run --from <broker>`, approval-gated and logged.
 4. **Teams.** Sets granted through tailnet app capabilities. The broker's
    own audit log is append-only and readable by admins.

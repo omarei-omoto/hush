@@ -66,6 +66,15 @@ show a prompt. The MCP client's own name is shown as a hint ("says it is
 claude-code"). On Linux, identity comes from tailscaled's socket in
 milliseconds.
 
+Teammates can be granted sets in the tailnet policy file
+(`github.com/omarei-omoto/cap/hush`, `{"sets": ["staging"]}`). A grant only
+narrows what the broker offers, and never turns approval off. For tools that
+must hold the key themselves there are leases: `hush lease enroll <broker>`
+once, then `hush run --from <broker> -- <command>`. The values arrive sealed to
+the enrolled machine's hush key, for that one command, after an approval that
+shows it, and expire in a minute if unused. The command policy applies, and the
+child's output is redacted.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

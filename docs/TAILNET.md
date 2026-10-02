@@ -1,7 +1,7 @@
 # hush on a tailnet: design
 
-Status: **steps 1 and 2 are on the beta branch.** Later steps are a plan, to be
-argued with before they are built.
+Status: **steps 1 to 4 are on the beta branch.** Step 5 is a plan, to be argued
+with before it is built.
 
 ## Using it (step 2, beta)
 
@@ -66,6 +66,55 @@ response redacted. Nothing returns a value, and nothing runs a command.
   milliseconds. Elsewhere the `tailscale` CLI answers in a second or so, once
   a minute per caller. `--port` changes 8788; `--vault <name>` serves a vault
   other than your library.
+
+### Teammates, from your tailnet policy (step 4)
+
+`--allow` is the simple case. For a team, grant hush in the tailnet policy
+file instead, and the broker reads the grant from each caller's identity:
+
+```json
+"grants": [
+  { "src": ["group:eng"], "dst": ["tag:hush"],
+    "app": { "github.com/omarei-omoto/cap/hush": [{ "sets": ["staging"] }] } },
+  { "src": ["group:ops"], "dst": ["tag:hush"],
+    "app": { "github.com/omarei-omoto/cap/hush": [{ "sets": ["*"] }] } }
+]
+```
+
+A grant admits its holders and names the sets they may use. It can only
+narrow: it picks from the sets the broker was started with (`"*"` means all of
+them), and nothing in it turns approval off. Someone on `--allow` gets
+everything offered; everyone else gets what their grants name, or nothing.
+Malformed grant entries are ignored, not guessed at.
+
+### Leases: tools that must hold the key (step 3)
+
+`hush_request` keeps the key on the broker, which covers API calls. Some
+tools need the key themselves (`psql`, `vercel`, a deploy script). A lease
+hands one machine the values for one command:
+
+```bash
+hush lease enroll https://broker.tail1234.ts.net:8788      # once per machine; approved on the broker
+hush run --from https://broker.tail1234.ts.net:8788 -- ./deploy.sh --prod
+```
+
+- The values arrive **sealed to the machine's hush key**: a data key wrapped
+  for it, the payload sealed under it with the lease id bound in. An agent
+  that calls the endpoint itself gets ciphertext.
+- That key must be **enrolled by a person first**, and is tied to the tailnet
+  user and device that enrolled it. The same key offered from another device
+  is refused.
+- **Every lease asks**, showing the exact command, the sets and the machine
+  ("Lease to sam@example.com on vps: ./deploy.sh --prod"). The command policy
+  applies: a shell, an interpreter or an env dumper is refused.
+- The lease names the command and arguments, and expires in a minute. The
+  client refuses one that does not match what it asked for. The values live
+  in that process and the child's environment, and the child's output is
+  redacted. Nothing is written to disk.
+- **What it cannot do** is take a value back. A lease of a long-lived key is
+  "given once, logged". Real expiry needs keys minted per use (step 5).
+- For now the machine needs a software hush key (`hush id`'s default).
+  Hardware-only keys cannot take leases yet.
 
 ## The problem
 
@@ -159,9 +208,10 @@ This needs a proper review before anyone puts production keys behind it.
    rather than sitting behind `tailscale serve`: behind it, every connection
    comes from 127.0.0.1, and identity would have to come from headers that any
    local process could forge.
-3. **Leases.** `hush run --from <broker>`, approval-gated and logged.
-4. **Teams.** Sets granted through tailnet app capabilities. The broker's
-   own audit log is append-only and readable by admins.
+3. **Leases.** *Done (beta).* `hush lease enroll`, then `hush run --from
+   <broker>`: sealed to an enrolled key, approval-gated, logged.
+4. **Teams.** *Done (beta).* Sets granted through tailnet app capabilities.
+   The audit log names each caller.
 5. **Minting**, and **approving from a phone**, built on the same broker.
 
 ## Open questions

@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, info, warn, yellow } from "../cli/output.ts";
-import { createBroker } from "../broker.ts";
+import { createBroker, HUSH_CAP } from "../broker.ts";
 import { cachedWhois, tailnetCert, tailnetIPv4, tailnetName, whois } from "../tailscale.ts";
 import { approvalPromptAvailable } from "../approval.ts";
 import { pairedApprovers } from "../relay.ts";
@@ -122,7 +122,7 @@ export async function cmdServe(a: Args): Promise<void> {
   info(`${bold("hush broker")}  →  ${cyan(url)}  ${dim("(this tailnet only)")}`);
   info(dim(`  vault:   ${vault.data.name}${vaultPath === globalVaultPath() ? ` (your library, ${globalVaultName()})` : ""}`));
   for (const n of sets) info(dim(`  offers:  ${n}  ${vault.list(n).map((i) => i.key).join(", ")}`));
-  info(dim(`  allows:  ${allow.join(", ")}`));
+  info(dim(`  allows:  ${allow.join(", ")}, and anyone your tailnet policy grants ${HUSH_CAP} (only the sets it names)`));
   info(dim(`  ${policy.requireApproval.includes("request") ? "every request asks first" : yellow("requests are NOT approved by a person")}; calls go out from this machine, values never leave it`));
   if (policy.requireApproval.includes("request")) {
     const forPeople = approvers.filter((p) => p.for?.length);
@@ -134,6 +134,9 @@ export async function cmdServe(a: Args): Promise<void> {
   info("  Add it to an agent on any tailnet machine:");
   info(`    ${cyan(`claude mcp add --transport http hush-broker ${url}`)}`);
   info(dim(`    or any MCP client that takes a streamable-http URL`));
+  info("  Or let a machine take leases, for tools that must hold the key themselves:");
+  info(`    ${cyan(`hush lease enroll ${url.replace(/\/mcp$/, "")}`)}   ${dim("once, approved here")}`);
+  info(`    ${cyan(`hush run --from ${url.replace(/\/mcp$/, "")} -- <command>`)}   ${dim("each time, approved here")}`);
   if (tls) info(dim("  https with this machine's tailnet certificate; only tailnet peers can connect."));
   else {
     info(dim("  Plain http inside WireGuard: the tailnet encrypts it, and only tailnet peers can connect."));

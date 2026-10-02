@@ -12,11 +12,12 @@ import { materialize, describeMaterialize, parseMaterializeSpec } from "../mater
 import { loadSchema, validate, unsensitiveForOutput, describeProblems } from "../schema.ts";
 import { composeSets } from "../library.ts";
 import { requestApproval } from "../approval.ts";
-import { type Args, bool, repeat } from "../cli/args.ts";
+import { type Args, bool, repeat, str } from "../cli/args.ts";
 import { ctxLoose, dieNotSetUp, dieOnApproval, interactiveSetup, isSetUp, policyFor, runSetupDialogue } from "../cli/context.ts";
 import { die, dim, info, red, warn } from "../cli/output.ts";
 import { collectExtraSets } from "../cli/sets.ts";
 import { findUpward, onPath, packageManagerFor } from "../cli/programs.ts";
+import { leaseRun } from "./lease.ts";
 
 /**
  * Shared by `hush run`, `hush dev` and pass-through, so all three inherit one
@@ -220,6 +221,8 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
 
 export async function cmdRun(a: Args): Promise<void> {
   const argv = a.rest.length ? a.rest : a._;
+  // From a tailnet broker instead of a vault here (commands/lease.ts).
+  if (str(a, "from")) return leaseRun(a, argv);
   return runCommand(a, argv);
 }
 

@@ -25,6 +25,39 @@ import { admits, callerName, type TailnetCaller } from "./tailscale.ts";
 import { audit, ValidationError } from "./vault.ts";
 import { VERSION } from "./version.ts";
 import type { Composed } from "./library.ts";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseMemberKey } from "./vault-core.ts";
+import { requestApproval } from "./approval.ts";
+import { checkCommand, runScope } from "./policy.ts";
+import { sealLease } from "./lease.ts";
+
+/** A machine allowed to take leases: its hush key, and who enrolled it. */
+export interface LeaseDevice {
+  fp: string;
+  pub: string;
+  login: string;
+  node: string;
+  name: string;
+  at: string;
+}
+
+const devicesFile = (hushDir: string): string => join(hushDir, "broker-devices.json");
+
+export function loadDevices(hushDir: string): LeaseDevice[] {
+  try {
+    const list = existsSync(devicesFile(hushDir)) ? JSON.parse(readFileSync(devicesFile(hushDir), "utf8")) : [];
+    return Array.isArray(list) ? list.filter((d) => d && typeof d.fp === "string" && typeof d.node === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveDevices(hushDir: string, devices: LeaseDevice[]): void {
+  const tmp = `${devicesFile(hushDir)}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(devices, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, devicesFile(hushDir));
+}
 
 export interface BrokerOptions {
   /** The vault, identity, policy and folder the tools run against. */
@@ -40,6 +73,35 @@ export interface BrokerOptions {
 }
 
 const OFFERED = new Set(["hush_list_sets", "hush_request"]);
+
+/**
+ * The app capability a tailnet policy grants to give someone sets on a hush
+ * broker:
+ *
+ *   "grants": [{ "src": ["group:eng"], "dst": ["tag:hush"],
+ *                "app": { "github.com/omarei-omoto/cap/hush": [{ "sets": ["staging"] }] } }]
+ *
+ * Tailscale hands it to the broker with the caller's identity (whois CapMap).
+ * A grant can only narrow: it picks from the sets the broker was started
+ * with (`"*"` for all of them), and nothing in it turns approval off.
+ */
+export const HUSH_CAP = "github.com/omarei-omoto/cap/hush";
+
+/** The sets a caller's tailnet grants name, malformed entries ignored. */
+export function grantedSets(caps: Record<string, unknown[]>, offered: readonly string[]): string[] | null {
+  const grants = caps[HUSH_CAP];
+  if (!Array.isArray(grants) || !grants.length) return null;
+  const out = new Set<string>();
+  for (const g of grants) {
+    const sets = (g as { sets?: unknown })?.sets;
+    if (!Array.isArray(sets)) continue;
+    for (const s of sets) {
+      if (s === "*") offered.forEach((o) => out.add(o));
+      else if (typeof s === "string" && offered.includes(s)) out.add(s);
+    }
+  }
+  return [...out];
+}
 const MAX_BODY = 1024 * 1024;
 const PROTOCOL = "2025-06-18";
 
@@ -112,31 +174,41 @@ function readBody(req: IncomingMessage): Promise<string> {
 /** IPv4 addresses arrive as `::ffff:100.x.y.z` on a dual-stack socket. */
 const plainAddress = (a: string): string => a.replace(/^::ffff:/i, "");
 
+/**
+ * What a caller may use: every offered set when the allow-list admits them,
+ * plus whatever their tailnet grants name. Null when neither lets them in.
+ */
+export function permittedSets(o: Pick<BrokerOptions, "allow" | "sets">, c: TailnetCaller): string[] | null {
+  const byAllow = admits(o.allow, c) ? o.sets : [];
+  const byGrant = grantedSets(c.caps, o.sets) ?? [];
+  if (!byAllow.length && !byGrant.length) return null;
+  return o.sets.filter((s) => byAllow.includes(s) || byGrant.includes(s));
+}
+
 export function createBroker(o: BrokerOptions): Server {
-  const offered = new Set(o.sets);
   const sessions = new Map<string, { node: string; client: string }>();
   const { vault, identity } = o.base;
 
-  /** Secrets from the offered sets only; anything else named is refused. */
-  const compose = (extra: string[]): Composed => {
-    const names = extra.length ? extra : o.sets;
-    const refused = names.filter((n) => !offered.has(n));
-    if (refused.length) throw new ValidationError(`Not offered by this broker: ${refused.join(", ")}. It offers ${o.sets.join(", ")}.`);
+  /** Secrets from the sets this caller may use; anything else named is refused. */
+  const composeFor = (permitted: string[]) => (extra: string[]): Composed => {
+    const names = extra.length ? extra : permitted;
+    const refused = names.filter((n) => !permitted.includes(n));
+    if (refused.length) throw new ValidationError(`Not offered to you by this broker: ${refused.join(", ")}. You may use ${permitted.join(", ")}.`);
     const secrets: Record<string, string> = {};
     for (const n of names) for (const item of vault.list(n)) secrets[item.key] = vault.get(identity, n, item.key);
     return { secrets, layers: names, missing: [], unreadable: [], blocked: [] };
   };
 
-  const listSets = () => {
-    const lines = o.sets.map((n) => `  ${n}: ${vault.list(n).map((i) => i.key).join(", ") || "(empty)"}`);
-    return { content: [{ type: "text", text: `This broker offers ${o.sets.length} set(s):\n${lines.join("\n")}\n\nUse them with hush_request.` }] };
+  const listSets = (permitted: string[]) => {
+    const lines = permitted.map((n) => `  ${n}: ${vault.list(n).map((i) => i.key).join(", ") || "(empty)"}`);
+    return { content: [{ type: "text", text: `This broker offers you ${permitted.length} set(s):\n${lines.join("\n")}\n\nUse them with hush_request.` }] };
   };
 
   type Rpc = { jsonrpc?: string; id?: string | number | null; method?: string; params?: { name?: string; arguments?: unknown; protocolVersion?: string } };
   const ok = (id: Rpc["id"], result: unknown) => ({ jsonrpc: "2.0", id, result });
   const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 
-  async function handle(rpc: Rpc, caller: TailnetCaller, session: string | undefined, setSession: (id: string) => void): Promise<unknown | null> {
+  async function handle(rpc: Rpc, caller: TailnetCaller, permitted: string[], session: string | undefined, setSession: (id: string) => void): Promise<unknown | null> {
     const id = rpc.id;
     const client = session ? sessions.get(session) : undefined;
     // A session id from another device is ignored, not trusted.
@@ -165,16 +237,16 @@ export function createBroker(o: BrokerOptions): Server {
       case "ping":
         return ok(id, {});
       case "tools/list":
-        return ok(id, { tools: toolList(o.sets) });
+        return ok(id, { tools: toolList(permitted) });
       case "tools/call": {
         const name = String(rpc.params?.name ?? "");
         const who = callerName(caller) + hint;
         audit(o.base.hushDir, { actor: "broker", action: "call", tool: name, caller: who });
-        if (name === "hush_list_sets") return ok(id, listSets());
+        if (name === "hush_list_sets") return ok(id, listSets(permitted));
         if (!OFFERED.has(name)) return ok(id, errText(`${name} is not offered by this broker.`));
         try {
           return ok(id, await callTool(name, rpc.params?.arguments ?? {}, {
-            ...o.base, tools: OFFERED, compose, caller: who,
+            ...o.base, tools: OFFERED, compose: composeFor(permitted), caller: who,
             ...(caller.tags.length ? {} : { callerLogin: caller.login }),
           }));
         } catch (e) {
@@ -186,16 +258,121 @@ export function createBroker(o: BrokerOptions): Server {
     }
   }
 
+  const policy = o.base.policy;
+  const timeoutMs = Math.max(1, policy.approvalTimeoutSeconds) * 1000;
+  const personOf = (c: TailnetCaller) => (c.tags.length ? {} : { approverFor: c.login });
+
+  /** A hush public key from a request body, X25519 only for now. */
+  const keyFrom = (body: Record<string, unknown>) => {
+    if (typeof body.pub !== "string") return null;
+    try {
+      const k = parseMemberKey(body.pub);
+      return k.type === "x25519" && k.pub ? k : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Enroll this machine's hush key for leases. A person approves it once, and
+   * the key is tied to the tailnet user and device that enrolled it: a key
+   * offered later from anywhere else is not this enrollment.
+   */
+  async function enroll(body: Record<string, unknown>, caller: TailnetCaller): Promise<{ status: number; body: unknown }> {
+    const key = keyFrom(body);
+    if (!key) return { status: 400, body: { error: "pub must be this machine's hush key (hush id); hardware keys cannot take leases yet" } };
+    const who = callerName(caller);
+    const name = typeof body.name === "string" ? body.name.replace(/[^\w .@-]/g, "").slice(0, 40) : caller.node.split(".")[0];
+    // Enrolling is a trust decision, gated like adding a key: on by default,
+    // off only where the vault's policy turned "add" approvals off.
+    const ap = !policy.requireApproval.includes("add")
+      ? { decision: "once" as const, via: "none" as const, code: "-", note: undefined }
+      : await requestApproval(o.base.hushDir, {
+      action: "add",
+      summary: `Let ${who} take leases from this broker`,
+      detail: [`Machine:  ${caller.node}`, `Its hush key:  ${key.fp}`, "A lease hands it the values of sets you allow, for one command each time, after asking you."],
+      scope: `lease-enroll:${key.fp}#from=${who}`,
+      ttlSeconds: policy.approvalTtlSeconds,
+      timeoutMs,
+      biometry: policy.biometry,
+      sessionGrant: false,
+      ...personOf(caller),
+    });
+    if (ap.via !== "none" || ap.decision !== "once") {
+      audit(o.base.hushDir, { actor: "broker", action: "approval", on: "lease-enroll", decision: ap.decision, via: ap.via, code: ap.code, caller: who });
+    }
+    if (ap.decision === "deny" || ap.decision === "timeout") {
+      return { status: 403, body: { error: ap.note ?? (ap.decision === "timeout" ? "nobody answered the approval" : "enrollment was denied"), code: ap.code } };
+    }
+    const devices = loadDevices(o.base.hushDir).filter((d) => d.fp !== key.fp);
+    devices.push({ fp: key.fp, pub: key.pk, login: caller.login, node: caller.node, name, at: new Date().toISOString() });
+    saveDevices(o.base.hushDir, devices);
+    audit(o.base.hushDir, { actor: "broker", action: "lease-enroll", fp: key.fp, caller: who });
+    return { status: 200, body: { enrolled: true, fingerprint: key.fp, code: ap.code } };
+  }
+
+  /** One lease: an enrolled key, a permitted set, an allowed command, a person's yes. */
+  async function lease(body: Record<string, unknown>, caller: TailnetCaller, permitted: string[]): Promise<{ status: number; body: unknown }> {
+    const key = keyFrom(body);
+    if (!key) return { status: 400, body: { error: "pub must be this machine's hush key (hush id)" } };
+    const who = callerName(caller);
+    const device = loadDevices(o.base.hushDir).find((d) => d.fp === key.fp && d.node === caller.node && d.login === caller.login);
+    if (!device) return { status: 403, body: { error: "this machine is not enrolled for leases here", enroll: true } };
+
+    const command = typeof body.command === "string" ? body.command : "";
+    const args = Array.isArray(body.args) ? body.args.map(String) : [];
+    if (!command) return { status: 400, body: { error: "which command?" } };
+    const asked = Array.isArray(body.sets) ? body.sets.map(String) : [];
+    let resolved: Composed;
+    try {
+      // The same policy as a local run: shells, interpreters and env dumpers
+      // are refused, because they can print or send every injected value.
+      checkCommand(policy, command);
+      resolved = composeFor(permitted)(asked);
+    } catch (e) {
+      return { status: 403, body: { error: (e as Error).message } };
+    }
+    const secrets = { ...resolved.secrets };
+    for (const k of policy.denyKeys) delete secrets[k];
+
+    if (policy.requireApproval.includes("run")) {
+      const ap = await requestApproval(o.base.hushDir, {
+        action: "run",
+        summary: `Lease to ${who}:  ${[command, ...args].join(" ")}`,
+        detail: [
+          `Using sets:  ${resolved.layers.join(", ")}`,
+          `Sends:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
+          `To:  ${caller.node}${typeof body.cwd === "string" ? `  ${String(body.cwd).slice(0, 200)}` : ""}`,
+          "The values leave this machine for that one command.",
+        ],
+        scope: runScope(policy, command, resolved.layers) + `#lease#from=${who}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs,
+        biometry: policy.biometry,
+        ...personOf(caller),
+      });
+      audit(o.base.hushDir, { actor: "broker", action: "approval", on: "lease", decision: ap.decision, via: ap.via, code: ap.code, caller: who });
+      if (ap.decision === "deny" || ap.decision === "timeout") {
+        return { status: 403, body: { error: ap.note ?? (ap.decision === "timeout" ? "nobody answered the approval" : "the lease was denied"), code: ap.code } };
+      }
+    }
+
+    const sealed = sealLease({ command, args, sets: resolved.layers, secrets }, Buffer.from(key.pub!));
+    audit(o.base.hushDir, { actor: "broker", action: "lease", id: sealed.id, command, sets: resolved.layers, sent: Object.keys(secrets), caller: who });
+    return { status: 200, body: sealed };
+  }
+
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       // A browser on a tailnet machine could be steered here by a hostile page
       // (DNS rebinding). Agents do not send Origin; browsers always do.
       if (req.headers.origin) return send(res, 403, { error: "the broker does not answer browsers" });
       const url = new URL(req.url ?? "/", "http://broker");
-      if (url.pathname !== "/mcp") return send(res, 404, { error: "not found" });
+      const route = url.pathname;
+      if (route !== "/mcp" && route !== "/lease" && route !== "/lease/enroll") return send(res, 404, { error: "not found" });
       if (req.method !== "POST") {
         res.setHeader("allow", "POST");
-        return send(res, 405, { error: "POST JSON-RPC to /mcp" });
+        return send(res, 405, { error: `POST JSON to ${route}` });
       }
 
       const addr = plainAddress(req.socket.remoteAddress ?? "");
@@ -204,12 +381,25 @@ export function createBroker(o: BrokerOptions): Server {
         audit(o.base.hushDir, { actor: "broker", action: "refused", reason: "not a tailnet peer", from: addr });
         return send(res, 403, { error: "not a tailnet peer" });
       }
-      if (!admits(o.allow, caller)) {
+      const permitted = permittedSets(o, caller);
+      if (!permitted) {
         audit(o.base.hushDir, { actor: "broker", action: "refused", reason: "not allowed", caller: callerName(caller) });
         return send(res, 403, { error: `${callerName(caller)} is not allowed to use this broker` });
       }
       if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) {
         return send(res, 415, { error: "send application/json" });
+      }
+
+      if (route !== "/mcp") {
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse(await readBody(req));
+        } catch {
+          return send(res, 400, { error: "invalid JSON" });
+        }
+        if (!body || typeof body !== "object" || Array.isArray(body)) return send(res, 400, { error: "send a JSON object" });
+        const r = route === "/lease/enroll" ? await enroll(body, caller) : await lease(body, caller, permitted);
+        return send(res, r.status, r.body);
       }
 
       let rpc: Rpc;
@@ -221,7 +411,7 @@ export function createBroker(o: BrokerOptions): Server {
       if (Array.isArray(rpc) || !rpc || typeof rpc !== "object") return send(res, 400, fail(null, -32600, "one JSON-RPC message per request"));
       const headers: Record<string, string> = {};
       const sessionHeader = req.headers["mcp-session-id"];
-      const out = await handle(rpc, caller, typeof sessionHeader === "string" ? sessionHeader : undefined, (sid) => {
+      const out = await handle(rpc, caller, permitted, typeof sessionHeader === "string" ? sessionHeader : undefined, (sid) => {
         headers["mcp-session-id"] = sid;
       });
       if (out === null) return send(res, 202, undefined, headers);

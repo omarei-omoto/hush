@@ -162,7 +162,7 @@ test("a set the broker does not offer, and every other tool, are refused", async
     seenByUpstream.length = 0;
     const r = await b.call("hush_request", { url: upstreamUrl, headers: { Authorization: "Bearer $OTHER_KEY" }, sets: ["private"] });
     assert.equal(r.isError, true);
-    assert.match(r.text, /Not offered by this broker: private/);
+    assert.match(r.text, /Not offered to you by this broker: private/);
     assert.equal(seenByUpstream.length, 0);
     for (const name of ["hush_run", "hush_add_secret", "hush_describe_secret", "hush_list_secrets"]) {
       const t = await b.call(name, { command: "env", key: "X" });
@@ -331,5 +331,41 @@ test("on Linux, whois asks tailscaled over its socket and reads the same answer"
     assert.equal(await whoisLocalApi("100.64.0.7", sock + ".gone"), null);
   } finally {
     daemon.close();
+  }
+});
+
+// ------------------------------------------------------------------ tailnet grants
+
+import { HUSH_CAP, grantedSets, permittedSets } from "../src/broker.ts";
+
+test("tailnet grants: they admit a teammate to the sets they name, and can only narrow", () => {
+  const offered = ["staging", "prod"];
+  const sam: TailnetCaller = { login: "sam@example.com", node: "sam-laptop.t.ts.net", tags: [], caps: { [HUSH_CAP]: [{ sets: ["staging"] }] } };
+  assert.deepEqual(permittedSets({ allow: ["me@example.com"], sets: offered }, sam), ["staging"]);
+  // The owner, by the allow-list: everything offered.
+  assert.deepEqual(permittedSets({ allow: ["me@example.com"], sets: offered }, ME), offered);
+  // No allow-list entry and no grant: not in.
+  assert.equal(permittedSets({ allow: ["me@example.com"], sets: offered }, { ...sam, caps: {} }), null);
+  // A grant cannot reach a set the broker was not started with; "*" means all offered.
+  assert.deepEqual(grantedSets({ [HUSH_CAP]: [{ sets: ["secrets-elsewhere", "staging"] }] }, offered), ["staging"]);
+  assert.deepEqual(grantedSets({ [HUSH_CAP]: [{ sets: ["*"] }] }, offered), offered);
+  // Malformed grants are ignored, not trusted.
+  assert.deepEqual(grantedSets({ [HUSH_CAP]: [{ sets: "staging" }, null, 7] as unknown[] }, offered), []);
+  assert.equal(grantedSets({ "example.com/cap/other": [{ sets: ["*"] }] }, offered), null);
+});
+
+test("a teammate admitted by a grant sees and uses only their sets over MCP", async () => {
+  const sam: TailnetCaller = { login: "sam@example.com", node: "sam-laptop.t.ts.net", tags: [], caps: { [HUSH_CAP]: [{ sets: ["stripe-live"] }] } };
+  const b = await broker({ who: sam });
+  try {
+    const list = await b.call("hush_list_sets");
+    assert.match(list.text, /stripe-live: STRIPE_SECRET_KEY/);
+    seenByUpstream.length = 0;
+    const r = await b.call("hush_request", { url: upstreamUrl, headers: { Authorization: "Bearer $STRIPE_SECRET_KEY" } });
+    assert.equal(r.isError, false, r.text);
+    assert.deepEqual(seenByUpstream, [`Bearer ${SECRET}`]);
+    assert.match(readFileSync(join(b.hushDir, "audit.log"), "utf8"), /sam@example\.com on sam-laptop/);
+  } finally {
+    b.close();
   }
 });

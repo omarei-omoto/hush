@@ -52,5 +52,6 @@ hush approvals listen                                 # on your laptop: the dial
 The request travels sealed to your laptop and the answer comes back signed; the
 relay in between can read neither and forge neither. No relay? `hush relay serve`
 on the laptop and `ssh -R 8787:localhost:8787 server` carries it over your SSH
-session, with nobody else involved. [docs/RELAY.md](../RELAY.md) is the
-protocol.
+session, with nobody else involved. On a tailnet, `tailscale serve` gives it an
+https address your other machines can reach instead. [docs/RELAY.md](../RELAY.md)
+has both setups, and is the protocol.

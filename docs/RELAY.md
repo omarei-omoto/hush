@@ -19,6 +19,24 @@ hush approvals accept hushpair1:…@http://localhost:8787
 hush approvals listen
 ```
 
+Or over a tailnet, with no SSH session to keep open. `tailscale serve` gives
+the laptop's relay an https address that only your tailnet can reach, with a
+real certificate:
+
+```bash
+# on the laptop
+hush relay serve                                        # prints these lines for you when Tailscale is running
+tailscale serve --bg --https=8443 http://127.0.0.1:8787
+
+# on any machine on the tailnet
+hush approvals pair --relay https://laptop.tailnet-name.ts.net:8443
+```
+
+The relay still cannot read or forge anything: the tailnet only replaces the
+SSH tunnel. The requester's machine has to resolve `*.ts.net` names, which
+means "Use Tailscale DNS" is on there (`tailscale set --accept-dns=true`).
+`tailscale serve --https=8443 off` removes the address again.
+
 Both sides print the same safety number when pairing finishes. From then on,
 any approval the server cannot show itself goes to the laptop. `hush approvals
 ls` shows what is paired; `hush approvals rm <name>` undoes it.

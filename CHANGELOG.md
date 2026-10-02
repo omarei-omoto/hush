@@ -37,6 +37,15 @@ minute.
   the Touch ID helper is built before the link opens rather than on the first
   request. The page now loads in about half a second.
 
+### Approvals over a tailnet
+
+When Tailscale is running, `hush relay serve` also prints the `tailscale serve`
+line that gives the relay an https address only your tailnet can reach, and the
+`hush approvals pair` line to run on any tailnet machine. Approvals from a
+server-side agent then reach your laptop with no SSH tunnel. hush only reads
+from Tailscale, and never changes a Tailscale setting. [docs/TAILNET.md](docs/TAILNET.md)
+is the design for going further: a hush broker on the tailnet.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

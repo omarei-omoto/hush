@@ -25,6 +25,7 @@ import {
 } from "../relay.ts";
 import { createRelayServer } from "../relay-server.ts";
 import { qrToTerminal } from "../qr.ts";
+import { tailnetName, tailnetRelayLines } from "../tailscale.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, info, red, shown, yellow } from "../cli/output.ts";
 
@@ -228,6 +229,17 @@ export async function cmdRelay(a: Args): Promise<void> {
   if (host === "127.0.0.1" || host === "localhost") {
     info(dim(`  To reach it from a server:  ssh -R ${actual}:localhost:${actual} <server>`));
     info(dim(`  then there:                 hush approvals pair --relay http://localhost:${actual}`));
+    // Tailscale gives the same relay an https address only your tailnet can
+    // reach — no SSH session to keep open. Printed, never run: changing
+    // someone's Tailscale config is theirs to do.
+    const ts = tailnetName();
+    if (ts) {
+      const lines = tailnetRelayLines(ts, actual);
+      info("");
+      info(dim("  Or over your tailnet (Tailscale is running here):"));
+      info(dim(`    here:                     ${lines.serve}`));
+      info(dim(`    on any tailnet machine:   ${lines.pair}`));
+    }
   } else {
     info(yellow("  Listening beyond this machine: put it behind https (hush refuses a plain-http relay that is not localhost)."));
   }

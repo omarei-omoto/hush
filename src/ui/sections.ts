@@ -16,7 +16,7 @@ function needsCard(){
     h("div",null,h("h3",{text:"What your code reads"}),
       h("p",{class:"lead",text:plural(needs.length,"variable")+" found in the code — "+(missing.length
         ?missing.length+" not provided yet. A run would start without "+(missing.length===1?"it":"them")+"."
-        :"every one is provided.")})),
+        :"every one is provided.")+(S.needsPartial?" This folder is too big to read in full, so the list is partial: open hush ui inside the project for all of it.":"")})),
     h("div",{class:"tally"},
       h("span",{class:"badge ok"},icon("check"),(needs.length-missing.length)+" provided"),
       missing.length?h("span",{class:"badge warn"},icon("alert"),missing.length+" missing"):null));

@@ -19,7 +19,7 @@ import {
 } from "./request.ts";
 import { loadSchema, validate, unsensitiveForOutput, describeProblems } from "./schema.ts";
 import { requireIdentity } from "./identity.ts";
-import { scanRepo, reconcile } from "./scan.ts";
+import { scanTree, reconcile } from "./scan.ts";
 import { runWithSecrets } from "./run.ts";
 import { preview } from "./redact.ts";
 import { loadPolicy, type Policy } from "./mcp.ts";
@@ -214,7 +214,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
       const env = args?.env || ctx.defaultEnv;
       checkEnv(ctx.policy, env);
       const root = confinedScanRoot(args?.path, ctx.root);
-      const usages = scanRepo(root);
+      const { usages, truncated } = scanTree(root);
       const r = reconcile(usages, ctx.vault.list(env).map((i) => i.key));
       audit(ctx.hushDir, { actor: "mcp", action: "check", env, missing: r.missing.length });
       const lines = [
@@ -222,6 +222,7 @@ export async function callTool(name: string, args: any): Promise<unknown> {
         `  referenced by code: ${r.needed.length}`,
         `  satisfied by vault: ${r.satisfied.length}`,
         `  MISSING:            ${r.missing.length}`,
+        ...(truncated ? ["  (stopped early: the folder is too big to read in full — pass path: the project folder)"] : []),
       ];
       if (r.missing.length) {
         lines.push("", "Missing:");

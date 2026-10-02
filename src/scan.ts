@@ -62,8 +62,30 @@ export interface Usage {
   declared: boolean;
 }
 
-function walk(dir: string, root: string, out: string[], depth = 0): void {
-  if (depth > 12) return;
+/**
+ * How much of a tree one scan may look at. A scan runs where someone happens
+ * to be standing, and that is not always a project: `hush ui` opened from the
+ * home folder walked all of ~/Library and the page stayed blank for minutes.
+ * Past either limit the walk stops and says so, rather than finishing late.
+ */
+export interface ScanLimits {
+  /** Directory entries looked at, files and folders together. */
+  maxEntries: number;
+  /** Wall-clock budget for the walk and the reads, in milliseconds. */
+  deadlineMs: number;
+}
+
+export const SCAN_LIMITS: ScanLimits = { maxEntries: 60_000, deadlineMs: 5_000 };
+
+interface WalkState {
+  seen: number;
+  max: number;
+  until: number;
+  truncated: boolean;
+}
+
+function walk(dir: string, root: string, out: string[], st: WalkState, depth = 0): void {
+  if (depth > 12 || st.truncated) return;
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -71,13 +93,20 @@ function walk(dir: string, root: string, out: string[], depth = 0): void {
     return;
   }
   for (const e of entries) {
+    // The clock is read every 256 entries, not every one: cheap, and still
+    // well inside the budget's resolution.
+    if (++st.seen > st.max || ((st.seen & 255) === 0 && Date.now() > st.until)) {
+      st.truncated = true;
+      return;
+    }
     if (e.name.startsWith(".") && !e.name.startsWith(".env")) {
       if (e.name !== ".github") continue;
     }
     if (SKIP_DIRS.has(e.name)) continue;
     const full = join(dir, e.name);
     if (e.isDirectory()) {
-      walk(full, root, out, depth + 1);
+      walk(full, root, out, st, depth + 1);
+      if (st.truncated) return;
     } else if (e.isFile()) {
       if (SCAN_EXT.has(extname(e.name)) || e.name.startsWith(".env") || e.name === "Dockerfile") {
         try {
@@ -125,9 +154,21 @@ export function parseEnvFile(
   return out;
 }
 
-export function scanRepo(root: string): Usage[] {
+export interface ScanResult {
+  usages: Usage[];
+  /** The walk hit a limit, so `usages` covers only part of the tree. */
+  truncated: boolean;
+}
+
+export function scanRepo(root: string, limits: ScanLimits = SCAN_LIMITS): Usage[] {
+  return scanTree(root, limits).usages;
+}
+
+/** scanRepo, saying whether the whole tree was covered. */
+export function scanTree(root: string, limits: ScanLimits = SCAN_LIMITS): ScanResult {
+  const st: WalkState = { seen: 0, max: limits.maxEntries, until: Date.now() + limits.deadlineMs, truncated: false };
   const files: string[] = [];
-  walk(root, root, files);
+  walk(root, root, files, st);
 
   const found = new Map<string, Usage>();
   const note = (name: string, site: string, declared: boolean) => {
@@ -141,7 +182,12 @@ export function scanRepo(root: string): Usage[] {
     }
   };
 
-  for (const file of files) {
+  for (const [n, file] of files.entries()) {
+    // Reading is most of the cost in a big tree, so it shares the deadline.
+    if ((n & 63) === 63 && Date.now() > st.until) {
+      st.truncated = true;
+      break;
+    }
     const rel = file.startsWith(root) ? file.slice(root.length + 1) : file;
     const base = rel.split("/").pop()!;
     let text: string;
@@ -167,7 +213,7 @@ export function scanRepo(root: string): Usage[] {
     });
   }
 
-  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return { usages: [...found.values()].sort((a, b) => a.name.localeCompare(b.name)), truncated: st.truncated };
 }
 
 export interface Reconciliation {

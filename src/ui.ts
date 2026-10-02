@@ -19,6 +19,7 @@ import { requireIdentity } from "./identity.ts";
 import { isTrustError } from "./integrity.ts";
 import { type UiCtx, openProjectVault } from "./ui-state.ts";
 import { handleApi, json } from "./ui-api.ts";
+import { ensureHelper } from "./biometry.ts";
 
 const TOKEN = randomBytes(24).toString("base64url");
 
@@ -64,6 +65,13 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
   if (existing && !existing.canRead(id)) {
     throw new Error(`Your key is not a recipient of vault "${existing.data.name}".`);
   }
+
+  // The page's first request reports Touch ID status, and on macOS that means
+  // compiling the helper (biometry.ts: never trusted from disk, so built once
+  // per process). Built here, before the link opens, it costs a second in the
+  // terminal instead of a blank page; ensureHelper caches it for the server's
+  // life and returns at once on other platforms or with HUSH_BIOMETRY=off.
+  ensureHelper();
 
   const server = createServer(async (req, res) => {
     try {

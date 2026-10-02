@@ -3,8 +3,9 @@
  * agent, the ladder. `/api/state` returns this, and so does every write.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join, basename } from "node:path";
-import { scanRepo } from "./scan.ts";
+import { join, basename, parse as parsePath } from "node:path";
+import { homedir } from "node:os";
+import { scanTree } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { approvalPromptAvailable } from "./approval.ts";
 import { readPolicyFile } from "./policy.ts";
@@ -167,17 +168,36 @@ function resolutionLines(vault: Vault | null, libraryVault: Vault | null, used: 
  * repo is not worth walking that often; a few seconds stale is invisible.
  */
 const SCAN_TTL_MS = 10_000;
-let scanCache: { root: string; at: number; needs: { name: string; sites: string[]; declared: boolean }[] } | null = null;
-function codeNeeds(root: string): { name: string; sites: string[]; declared: boolean }[] {
-  if (scanCache && scanCache.root === root && Date.now() - scanCache.at < SCAN_TTL_MS) return scanCache.needs;
-  let needs: { name: string; sites: string[]; declared: boolean }[] = [];
+/**
+ * The page waits on this, so it gets a much smaller budget than `hush scan`.
+ * A project's code fits easily; a folder that does not fit is not a project
+ * anyway, and a partial answer is kept for minutes, not seconds — walking the
+ * same oversized tree again on every click is what made the page feel stuck.
+ */
+const UI_SCAN_LIMITS = { maxEntries: 30_000, deadlineMs: 1_500 };
+const PARTIAL_SCAN_TTL_MS = 5 * 60_000;
+type Need = { name: string; sites: string[]; declared: boolean };
+let scanCache: { root: string; at: number; needs: Need[]; partial: boolean; ttl: number } | null = null;
+function codeNeeds(root: string): { needs: Need[]; partial: boolean } {
+  if (scanCache && scanCache.root === root && Date.now() - scanCache.at < scanCache.ttl) return scanCache;
+  // The home folder and a drive's root are where `hush ui` lands when it is
+  // opened from a fresh terminal. Neither is a codebase, and walking one is
+  // minutes of reading other people's files to fill a panel nobody asked for.
+  if (root === homedir() || root === parsePath(root).root) {
+    scanCache = { root, at: Date.now(), needs: [], partial: false, ttl: Number.POSITIVE_INFINITY };
+    return scanCache;
+  }
+  let needs: Need[] = [];
+  let partial = false;
   try {
-    needs = scanRepo(root).slice(0, 300).map((u) => ({ name: u.name, sites: u.sites.slice(0, 3), declared: u.declared }));
+    const r = scanTree(root, UI_SCAN_LIMITS);
+    partial = r.truncated;
+    needs = r.usages.slice(0, 300).map((u) => ({ name: u.name, sites: u.sites.slice(0, 3), declared: u.declared }));
   } catch {
     /* an unreadable tree is not a reason for the page to fail */
   }
-  scanCache = { root, at: Date.now(), needs };
-  return needs;
+  scanCache = { root, at: Date.now(), needs, partial, ttl: partial ? PARTIAL_SCAN_TTL_MS : SCAN_TTL_MS };
+  return scanCache;
 }
 
 export function state(ctx: UiCtx) {
@@ -275,7 +295,7 @@ export function state(ctx: UiCtx) {
   // code references, and which library sets already cover that. Only worth
   // computing once there is no project yet — a linked or vaulted project has
   // already made this choice.
-  const needs = codeNeeds(ctx.root);
+  const { needs, partial: needsPartial } = codeNeeds(ctx.root);
   const suggestion = fState === "unset" ? (() => {
     const needed = needs.map((u) => u.name);
     const files = new Set<string>();
@@ -347,6 +367,7 @@ export function state(ctx: UiCtx) {
     },
     // Names only: which variables this folder's code reads, and where.
     needs,
+    needsPartial,
     agent: agentStatus(ctx),
     posture: {
       rung: posture.rung,

@@ -121,6 +121,12 @@ the only context they have for deciding.
 
 ## Diagnosing a project
 
+- `hush_setup_status` — what is set up for hush on this machine and in this
+  project, and what is next. Call it when the user asks you to set up hush, or
+  when another hush tool says hush is not set up here. Follow it step by step:
+  run "auto" steps, ask the user about "choice" steps, and for "person" steps
+  run the command and wait — it asks the user on their screen, and you must
+  never answer it or add `--yes`.
 - `hush_check_repo` — scans the code for the env vars it references and reports
   which are missing from the vault. Use it before a build or a first run.
 - `hush_describe_secret` — confirms one key is set in a given set (length,
@@ -160,6 +166,7 @@ that needs re-entering with `hush_add_secret`. Do not retry the same call.
 | `hush_list_sets` | Which named sets exist — library and project — and which this project uses |
 | `hush_list_secrets` | Which secret names exist in one set |
 | `hush_describe_secret` | Confirm one is set, without reading it |
+| `hush_setup_status` | What is set up and what is next, step by step |
 | `hush_check_repo` | What this codebase needs vs. what's in the vault |
 | `hush_provision` | Prepare a CLI to run with the right set |
 | `hush_add_secret` | Have the user enter a new key, off-transcript |

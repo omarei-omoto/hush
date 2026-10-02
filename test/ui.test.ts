@@ -1693,3 +1693,25 @@ describe("ui server — signed vaults and scoped members (hush/v3)", () => {
     await api("/api/team", { action: "remove", name: "scoped-ui" });
   });
 });
+
+describe("ui setup checklist", () => {
+  test("the page gets the same checklist as hush setup, and a step can be skipped and offered again", async () => {
+    type Onb = { done: number; total: number; next: string | null; steps: { id: string; status: string; kind: string; command: string | null }[] };
+    const st = (await (await api("/api/state")).json()) as { onboarding: Onb };
+    assert.ok(st.onboarding && Array.isArray(st.onboarding.steps), "no checklist in the page state");
+    assert.ok(st.onboarding.steps.some((s) => s.id === "key" && s.status === "done"));
+    assert.ok(st.onboarding.total >= st.onboarding.done);
+    const id = "conversations";
+    const skipped = (await (await api("/api/setup-skip", { id, skip: true })).json()) as { onboarding: Onb };
+    // An optional step stays optional; skipping a todo one marks it skipped.
+    const todo = skipped.onboarding.steps.find((s) => s.status === "todo");
+    if (todo) {
+      const after = (await (await api("/api/setup-skip", { id: todo.id, skip: true })).json()) as { onboarding: Onb };
+      assert.equal(after.onboarding.steps.find((s) => s.id === todo.id)?.status, "skipped");
+      const back = (await (await api("/api/setup-skip", { id: todo.id, skip: false })).json()) as { onboarding: Onb };
+      assert.equal(back.onboarding.steps.find((s) => s.id === todo.id)?.status, "todo");
+    }
+    assert.equal((await api("/api/setup-skip", { id: "no-such-step" })).status, 400);
+    assert.ok(!JSON.stringify(st).includes("super-secret"), "a value reached the page");
+  });
+});

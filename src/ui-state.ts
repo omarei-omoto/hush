@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, basename, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
 import { scanTree } from "./scan.ts";
+import { setupState } from "./setup.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { approvalPromptAvailable } from "./approval.ts";
 import { readPolicyFile } from "./policy.ts";
@@ -167,6 +168,31 @@ function resolutionLines(vault: Vault | null, libraryVault: Vault | null, used: 
  * value. Cached briefly because state() runs after every click and a large
  * repo is not worth walking that often; a few seconds stale is invisible.
  */
+/**
+ * The setup checklist (src/setup.ts) for the "Finish setting up" card. It
+ * reads a few dozen small files (agents' configs, the policy), so it is kept
+ * for a few seconds like the code scan, and dropped when a step is skipped.
+ */
+const ONBOARDING_TTL_MS = 10_000;
+let onboardingCache: { root: string; at: number; value: ReturnType<typeof onboardingView> } | null = null;
+function onboardingView(root: string) {
+  const st = setupState(root);
+  return {
+    done: st.done,
+    total: st.total,
+    next: st.next?.id ?? null,
+    steps: st.steps.map((s) => ({ id: s.id, title: s.title, kind: s.kind, status: s.status, detail: s.detail, command: s.command ?? null })),
+  };
+}
+function onboarding(root: string) {
+  if (onboardingCache && onboardingCache.root === root && Date.now() - onboardingCache.at < ONBOARDING_TTL_MS) return onboardingCache.value;
+  onboardingCache = { root, at: Date.now(), value: onboardingView(root) };
+  return onboardingCache.value;
+}
+export function forgetOnboarding(): void {
+  onboardingCache = null;
+}
+
 const SCAN_TTL_MS = 10_000;
 /**
  * The page waits on this, so it gets a much smaller budget than `hush scan`.
@@ -368,6 +394,7 @@ export function state(ctx: UiCtx) {
     // Names only: which variables this folder's code reads, and where.
     needs,
     needsPartial,
+    onboarding: onboarding(ctx.root),
     agent: agentStatus(ctx),
     posture: {
       rung: posture.rung,

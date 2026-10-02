@@ -15,7 +15,8 @@ import { requireIdentity } from "./identity.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 import { withoutChain } from "./audit.ts";
-import { type UiCtx, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
+import { type UiCtx, forgetOnboarding, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
+import { setSkip, setupState } from "./setup.ts";
 
 /**
  * Never let a repo-supplied symlink redirect a write hush performs.
@@ -621,6 +622,19 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
      * no business carrying key material until it actually needs to (see
      * projectVault()).
      */
+    case "/api/setup-skip": {
+      // Skip (or offer again) a setup step in this project, the same record
+      // hush setup skip and hush start use.
+      const { id, skip } = body;
+      const steps = setupState(ctx.root).steps;
+      if (typeof id !== "string" || !steps.some((s) => s.id === id)) {
+        return json(res, 400, { error: `id must be one of: ${steps.map((s) => s.id).join(", ")}` });
+      }
+      setSkip(setupState(ctx.root).root, id, skip !== false);
+      forgetOnboarding();
+      return json(res, 200, state(ctx));
+    }
+
     case "/api/setup": {
       const { use, agent } = body;
       if (!Array.isArray(use) || use.some((u: unknown) => typeof u !== "string")) {

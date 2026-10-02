@@ -6,6 +6,36 @@
  */
 export const SECTIONS = String.raw`/* ---------------------------------------------------------------- project */
 
+/* The setup checklist's remaining steps (src/setup.ts, the same list hush
+   setup and hush start use). Each runs in a terminal, so the card offers the
+   command to copy, a Skip, and the prompt that hands the rest to an agent. */
+const AGENT_PROMPT="Set up hush in this project. Run hush setup --json and follow it: run each step's command as written, ask me in the chat for anything marked \"choice\", and for anything marked \"person\", run it and wait for me. Never open a .env file or ask me for a key in the chat.";
+async function copyText(text,what){
+  try{await navigator.clipboard.writeText(text);toast("copied "+what)}catch(e){toast("copying is blocked here — select the text instead",{error:true})}
+}
+async function skipStep(id){await refresh(await api("/api/setup-skip",{id:id,skip:true}))}
+function onboardingCard(){
+  const o=S.onboarding;
+  if(!o||!o.next)return null;
+  const todo=o.steps.filter(function(s){return s.status==="todo"});
+  const card=h("section",{class:"card pad","aria-label":"Finish setting up"});
+  card.append(h("div",{class:"sechead",style:"margin:0"},
+    h("div",null,h("h3",{text:"Finish setting up"}),
+      h("p",{class:"lead",text:o.done+" of "+o.total+" done. Each step runs in your terminal, or hand them to your coding agent."})),
+    h("button",{type:"button",class:"btn sm",onclick:function(){copyText(AGENT_PROMPT,"the prompt for your agent")}},icon("copy"),"Prompt for your agent")));
+  const list=h("div",{class:"stack",style:"margin-top:14px"});
+  todo.forEach(function(s){
+    list.append(h("div",{class:"offer"},
+      h("div",{class:"what"},h("b",{text:s.title}),h("div",{text:s.detail}),
+        s.command?h("code",{text:s.command,style:"font-size:12.5px;display:block;margin-top:4px"}):null,
+        s.kind==="person"?h("div",{class:"muted",text:"Asks you before it changes anything."}):null),
+      s.command?h("button",{type:"button",class:"btn sm",onclick:function(){copyText(s.command,"the command")}},icon("copy"),"Copy"):null,
+      h("button",{type:"button",class:"btn sm ghost",onclick:function(){skipStep(s.id)}},"Skip")));
+  });
+  card.append(list);
+  return card;
+}
+
 function needsCard(){
   const needs=S.needs||[];
   if(!needs.length)return null;
@@ -73,6 +103,9 @@ function renderProject(page){
       h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog()}},icon("plus"),"Add secret"))));
 
   if(fstate==="unset"){page.append(setupPanel());return}
+
+  const oc=onboardingCard();
+  if(oc)page.append(oc);
 
   const nc=needsCard();
   if(nc)page.append(nc);

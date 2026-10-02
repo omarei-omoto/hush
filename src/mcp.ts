@@ -199,6 +199,16 @@ export const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "hush_setup_status",
+    description:
+      "What is set up for hush on this machine and in this project, and what is next. Each step has a " +
+      "status, the exact command that does it, and a kind: auto (run it), choice (ask the user which " +
+      "option, then run it), or person (run it and wait: it asks the user on their screen, and you must " +
+      "never answer it or add --yes). Call this when the user asks you to set up hush, or when another " +
+      "hush tool says hush is not set up here. It never shows a secret.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "hush_check_repo",
     description:
       "Scan the current codebase for the environment variables it references, and report which " +
@@ -407,7 +417,8 @@ export function serveMcp(): void {
               "hush holds this project's secrets. You can see which secrets exist and run " +
               "commands with them injected, but you can never read their values — that is " +
               "deliberate, and there is no flag that changes it. If a task needs a credential, " +
-              "call hush_run rather than asking the user to paste one.",
+              "call hush_run rather than asking the user to paste one. If hush is not set up in this project, " +
+              "call hush_setup_status and follow it.",
           });
 
         case "notifications/initialized":

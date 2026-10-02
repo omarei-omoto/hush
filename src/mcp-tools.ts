@@ -23,6 +23,7 @@ import { scanTree, reconcile } from "./scan.ts";
 import { runWithSecrets } from "./run.ts";
 import { preview } from "./redact.ts";
 import { loadPolicy, type Policy } from "./mcp.ts";
+import { AGENT_RULES, commandOf, setupState } from "./setup.ts";
 
 
 /** A required string argument. Without this, a missing `command` reached spawn as "undefined". */
@@ -61,7 +62,7 @@ export interface Ctx {
 
 function loadCtx(): Ctx {
   const loc = resolveVaultPath(process.cwd());
-  if (!loc) throw new Error("No hush vault found from this directory. Run `hush init`.");
+  if (!loc) throw new Error("hush is not set up in this project yet. Call hush_setup_status to see the steps.");
   const vault = Vault.open(loc.vaultPath);
   const identity = requireIdentity();
   if (!vault.canRead(identity)) {
@@ -155,6 +156,8 @@ function listSets(ctx: Ctx): ListedSet[] {
 }
 
 export async function callTool(name: string, args: any, injected?: Ctx): Promise<unknown> {
+  // Before loadCtx: this is the tool for a project with no vault yet.
+  if (name === "hush_setup_status" && !injected) return setupStatus();
   const ctx = injected ?? loadCtx();
   if (ctx.tools && !ctx.tools.has(name)) return errText(`${name} is not offered here.`);
 
@@ -673,4 +676,17 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+/** hush_setup_status: the setup checklist (src/setup.ts) as text an agent can follow. */
+function setupStatus(): unknown {
+  const st = setupState(process.cwd());
+  const lines = [`hush setup for ${st.root}: ${st.done} of ${st.total} required steps done.`, ""];
+  for (const s of st.steps) {
+    lines.push(`- ${s.id} [${s.status}, ${s.kind}] ${s.title}: ${s.detail}`);
+    if ((s.status === "todo" || s.status === "optional") && s.command) lines.push(`    command: ${s.command}`);
+    for (const o of s.options ?? []) lines.push(`    option: ${o.label}${o.argv ? ` -> ${commandOf(o.argv)}` : ""}`);
+  }
+  lines.push("", st.next ? `Next: ${st.next.id}` : "Everything required is done.", "", "Rules:", ...AGENT_RULES.map((r) => `- ${r}`));
+  return text(lines.join("\n"));
 }

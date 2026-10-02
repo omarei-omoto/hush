@@ -34,6 +34,12 @@ it now?". Answer `s` to skip a step for good in this project. Run `hush start`
 again any time and it carries on from the first step not done. `hush setup`
 shows the list without asking anything.
 
+## In the app
+
+`hush ui` shows a **Finish setting up** card above your sets while steps are
+left. Each step has its command to copy, a Skip, and a button that copies the
+prompt below for your agent.
+
 ## With your coding agent
 
 Paste this into Claude Code, Codex, Cursor or any agent with a shell:
@@ -44,7 +50,10 @@ Paste this into Claude Code, Codex, Cursor or any agent with a shell:
 > file or ask me for a key in the chat.
 
 `hush setup --json` gives the agent every step: its status, its exact command,
-the options for a choice, and the rules it has to follow. What keeps this
+the options for a choice, and the rules it has to follow. An agent already
+connected to hush can call the `hush_setup_status` tool for the same list. It
+works in a project with no vault yet, and other hush tools point at it when
+hush is not set up. What keeps this
 safe does not depend on the agent following those rules:
 
 - **auto** steps (create a key, import a `.env`) are safe for an agent to run.

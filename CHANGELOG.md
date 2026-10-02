@@ -17,6 +17,11 @@ each step's kind and the rules it must follow:
 - **person** steps ask you directly, on your terminal or in a hush dialog the
   agent cannot answer.
 
+An agent connected to hush can call the new `hush_setup_status` tool for the
+same list, even in a project with no vault yet. `hush ui` shows a "Finish
+setting up" card with each remaining step's command, a Skip, and the prompt to
+hand the rest to your agent.
+
 `hush start` now continues past the first run through whatever is left, one
 step at a time, and off a terminal shows the checklist instead of refusing.
 Skips are remembered per project. Confirmations for deleting a `.env` and for

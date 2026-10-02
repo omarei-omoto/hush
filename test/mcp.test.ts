@@ -1106,3 +1106,29 @@ describe("tool text only names tools that exist", () => {
     p.cleanup();
   });
 });
+
+describe("mcp setup status", () => {
+  test("hush_setup_status answers in a folder with no vault yet, lists each step's kind and command, and shows no value", async () => {
+    const p = project();
+    // A folder hush has never seen: the tool an agent calls to set it up must work here.
+    const bare = mkdtempSync(join(tmpdir(), "hush-mcp-bare-"));
+    writeFileSync(join(bare, ".env"), "STRIPE_SECRET_KEY=sk_live_setupstatus_Rq7Tz2\n");
+    try {
+      const s = await talk({ ...p, root: bare }, [init, call(1, "hush_setup_status"), call(2, "hush_list_secrets")], { HOME: p.home });
+      assert.equal(s.crashed, false, s.stderr);
+      const status = s.replies.find((r) => r.id === 1)!;
+      const text = status.result?.content?.[0]?.text ?? "";
+      assert.ok(!status.result?.isError, text);
+      assert.match(text, /- project \[todo, choice\]/);
+      assert.match(text, /command: hush import \.env --as/);
+      assert.match(text, /never answer it/i, "the rules for the agent are missing");
+      assert.ok(!text.includes("sk_live_setupstatus"), "a value from .env reached the agent");
+      // Any other tool in an unset folder points the agent at the setup status.
+      const other = s.replies.find((r) => r.id === 2)!;
+      assert.match(other.result?.content?.[0]?.text ?? "", /hush_setup_status/);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+      p.cleanup();
+    }
+  });
+});

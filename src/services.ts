@@ -59,6 +59,7 @@ export const CATALOG: Record<string, { vars: string[]; label: string; rotate?: s
   mongodb: { vars: ["MONGODB_URI"], label: "MongoDB" },
   redis: { vars: ["REDIS_URL"], label: "Redis" },
   pinecone: { vars: ["PINECONE_API_KEY"], label: "Pinecone" },
+  tailscale: { vars: ["TAILSCALE_API_KEY"], label: "Tailscale", rotate: "https://login.tailscale.com/admin/settings/keys" },
 };
 
 export const SCOPE_SEP = "/";

@@ -75,6 +75,14 @@ the enrolled machine's hush key, for that one command, after an approval that
 shows it, and expire in a minute if unused. The command policy applies, and the
 child's output is redacted.
 
+`hush tailnet grant --to sam@example.com --sets staging` writes that grant into
+your tailnet policy file, so nobody has to learn the policy syntax. With a
+Tailscale API key stored in hush it previews the diff, has Tailscale validate
+it, and saves only with `--apply`, after an approval and only over the version
+it read. Your comments and other rules stay exactly as they were. Without a key
+it prints the grant to paste. `hush tailnet grants` and `hush tailnet revoke`
+manage the ones it wrote.
+
 ### Release channels
 
 A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag

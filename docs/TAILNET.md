@@ -81,6 +81,31 @@ file instead, and the broker reads the grant from each caller's identity:
 ]
 ```
 
+You do not have to write it by hand. `hush tailnet grant` does it:
+
+```bash
+hush tailnet grant --to sam@example.com --sets staging            # preview: the diff, checked by Tailscale
+hush tailnet grant --to sam@example.com --sets staging --apply    # save it, after asking
+hush tailnet grants                                               # the grants hush wrote
+hush tailnet revoke hush-3f9a0c1d --apply                         # take one away
+```
+
+- With a Tailscale API key stored in hush (`hush add tailscale --as tailscale
+  --library`), it reads your policy file and inserts or removes *only* its own
+  grant, as text. Your comments and formatting stay as they were. It shows
+  the diff and has Tailscale validate it. It saves only with `--apply`,
+  after an approval, and only over the version it read: a change someone
+  made meanwhile is never overwritten. The key goes into the request header
+  inside hush and is never shown, to you or to an agent.
+- Without a key, it prints the grant for you to paste in the admin console.
+- The grant points at the broker's tailnet IP by default, so the broker
+  needs no tag. Tagging a personal laptop would make Tailscale stop treating
+  it as yours. `--dst tag:hush` is for a dedicated team broker. The grant
+  opens the broker's port (`ip`) as well as naming the sets (`app`), so it
+  also works on a tailnet whose rules do not already allow that connection.
+- Each grant carries its id (`hush-3f9a0c1d`), which is how `grants` and
+  `revoke` find exactly hush's entries and nothing else.
+
 A grant admits its holders and names the sets they may use. It can only
 narrow: it picks from the sets the broker was started with (`"*"` means all of
 them), and nothing in it turns approval off. Someone on `--allow` gets

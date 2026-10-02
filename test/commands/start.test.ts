@@ -15,13 +15,15 @@ describe("hush start", () => {
     return p;
   }
 
-  test("off a terminal it says so, rather than reading answers nobody gave", () => {
+  test("off a terminal it shows the checklist and the commands, rather than reading answers nobody gave", () => {
     const p = project();
     try {
       const r = p.run(["start"]);
-      assert.equal(r.code, 1, r.out);
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /hush · set up/, "it did not show where things stand");
       assert.match(r.out, /needs a terminal/);
       assert.match(r.out, /hush import <file> --as <name>/, "it does not name the non-interactive path");
+      assert.match(r.out, /hush setup --json/, "it does not point a coding agent at its checklist");
     } finally {
       p.cleanup();
     }

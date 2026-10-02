@@ -19,6 +19,7 @@ import { createEnclaveIdentity, enclaveAvailable, loadEnclaveIdentity } from "./
 import { encodeSePub } from "./crypto.ts";
 import { parseEnvFile } from "./scan.ts";
 import { DEFAULT_POLICY } from "./mcp.ts";
+import { consent } from "./cli/consent.ts";
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = (code: string) => (s: string) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -31,8 +32,10 @@ const cyan = c("36");
 
 const out = (s = ""): void => void process.stdout.write(s + "\n");
 
-function ask(question: string): Promise<boolean> {
-  if (!process.stdin.isTTY) return Promise.resolve(false);
+function ask(question: string, hushDir?: string | null): Promise<boolean> {
+  // Off a terminal (an agent driving setup), the person answers in a hush
+  // dialog instead; with nowhere to ask at all, the answer is no.
+  if (!process.stdin.isTTY) return consent(question.trim(), { hushDir: hushDir ?? hushHome() });
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   return new Promise((res) =>
     rl.question(`${question} ${dim("[y/N]")} `, (a) => {
@@ -210,7 +213,7 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
       for (const file of stray) {
         const names = Object.keys(parseEnvFile(readFileSync(file, "utf8")));
         out(`  ${file} holds ${names.length} variable(s): ${dim(names.slice(0, 6).join(", "))}`);
-        if (!(await ask(`  Import into the vault and delete the file?`))) continue;
+        if (!(await ask(`  Import ${file} into the vault and delete the file?`, ctx.hushDir))) continue;
 
         const id = loadIdentity();
         if (!id) return out(red("  no identity on this machine"));

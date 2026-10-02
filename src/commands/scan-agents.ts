@@ -14,7 +14,7 @@ import { type Args, bool, parseArgs } from "../cli/args.ts";
 import { ctxLoose } from "../cli/context.ts";
 import { beginSetWrite } from "../cli/sets.ts";
 import { absoluteSelfCommand, selfCommand } from "../cli/programs.ts";
-import { askLine } from "../cli/prompts.ts";
+import { consent } from "../cli/consent.ts";
 import { bold, cyan, die, dim, green, info, out, red, warn, yellow } from "../cli/output.ts";
 import {
   agentConfigFiles, alreadyWrapped, applyWrap, findSecrets, indentOf, planWraps,
@@ -214,10 +214,19 @@ async function fix(a: Args, loose: ReturnType<typeof ctxLoose>, scanned: Scanned
     info(dim(`    and rewrite ${tilde(s.file.path)} to start ${s.plans.length === 1 ? "it" : "them"} through hush run`));
   }
   if (!globalVaultExists()) info(dim(`  (and create your library first — you do not have one yet)`));
-  if (!bool(a, "yes")) {
-    if (!process.stdin.isTTY) die("Nothing was changed.", "Run it in a terminal to confirm, or pass --yes.");
-    const ans = (await askLine(`Go ahead? ${dim("[Y/n]")} `)).trim().toLowerCase();
-    if (ans === "n" || ans === "no") return info(dim("nothing changed"));
+  // A person's yes: on their terminal, or in a hush dialog when an agent ran
+  // this. --yes skips the question on a terminal, and stands in for it only
+  // where no dialog can be shown (consent.ts) — an agent cannot answer for them.
+  if (!(process.stdin.isTTY && bool(a, "yes"))) {
+    const ok = await consent(`Move ${count} key(s) from your agents' configs into hush, and rewrite ${work.length} file(s)?`, {
+      hushDir: loose.hushDir,
+      detail: work.map((s) => `${s.file.agent}: ${tilde(s.file.path)}`),
+      yes: bool(a, "yes"),
+    });
+    if (!ok) {
+      if (!process.stdin.isTTY && !bool(a, "yes")) die("Nothing was changed.", "Run it in a terminal to confirm, or pass --yes where no dialog can be shown.");
+      return info(dim("nothing changed"));
+    }
   }
 
   if (!globalVaultExists()) await cmdGlobal(parseArgs(["--create"]));

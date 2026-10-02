@@ -4,6 +4,27 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### Setting up, with or without your agent
+
+Setup is now one checklist that a person and a coding agent both follow.
+`hush setup` shows where this machine and project stand and the command for
+each step: your key, your library, this project's keys, your agents, keys in
+their configs, no plaintext `.env`, approvals, and, optionally, keys in past
+conversations. `hush setup --json` gives a coding agent the same list, with
+each step's kind and the rules it must follow:
+- **auto** steps it runs;
+- **choice** steps it asks you about in the chat;
+- **person** steps ask you directly, on your terminal or in a hush dialog the
+  agent cannot answer.
+
+`hush start` now continues past the first run through whatever is left, one
+step at a time, and off a terminal shows the checklist instead of refusing.
+Skips are remembered per project. Confirmations for deleting a `.env` and for
+`hush scan --agents --fix` now go to a hush dialog when there is no terminal.
+`--yes` stands in only where no dialog can be shown, so an agent cannot answer
+for you.
+
+
 ### Keys in your agents' own config files
 
 `hush scan --agents` reads the files coding agents keep MCP servers in

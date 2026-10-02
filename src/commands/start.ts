@@ -16,6 +16,8 @@ import { packageManagerFor } from "../cli/programs.ts";
 import { askLine, promptSecret } from "../cli/prompts.ts";
 import { beginSetWrite, importInto, shortValueWarning, targetFor, warnShort } from "../cli/sets.ts";
 import { runCommand } from "../commands/run.ts";
+import { renderSetup, runHush, walkSetup } from "./setup.ts";
+import { setSkip, setupState } from "../setup.ts";
 
 // ----------------------------------------------------------------- commands
 
@@ -29,11 +31,22 @@ import { runCommand } from "../commands/run.ts";
  * it can be read and tested on its own.
  */
 export async function cmdStart(a: Args): Promise<void> {
+  // Off a terminal (a script, or a coding agent's shell) there is nobody to
+  // answer questions here, so show the same checklist hush setup does, and
+  // the commands that do each step, rather than refusing outright.
   if (!interactiveSetup()) {
-    die(
-      "`hush start` is a conversation, so it needs a terminal.",
-      "For scripts: hush import <file> --as <name>, hush add KEY=value, hush use <name>.",
-    );
+    renderSetup(setupState(process.cwd()));
+    info("");
+    info(dim("`hush start` is a conversation, so it needs a terminal. Without one, run the steps above:"));
+    info(dim("  for scripts: hush import <file> --as <name>, hush add KEY=value, hush use <name>"));
+    info(dim("  for a coding agent: hush setup --json, which lists each step, its command, and the rules to follow"));
+    return;
+  }
+
+  // A project that already has its keys skips straight to whatever is left.
+  if (realTerminal() && setupState(process.cwd()).steps.find((s) => s.id === "project")?.status === "done") {
+    renderSetup(setupState(process.cwd()));
+    return walk();
   }
 
   const loose = ctxLoose(a);
@@ -181,4 +194,22 @@ async function finishStart(
   }
 
   for (const line of closingLines({ devCommand })) info(line);
+  if (realTerminal()) await walk();
+}
+
+/**
+ * A real terminal, not HUSH_INTERACTIVE: the walk after the first run runs
+ * other commands (connecting agents, rewriting their configs), and piped
+ * answers in a test or a script must never say yes to those.
+ */
+const realTerminal = (): boolean => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+function walk(): Promise<void> {
+  return walkSetup({
+    state: () => setupState(process.cwd()),
+    ask: (q) => askLine(q),
+    run: runHush,
+    skip: (id) => setSkip(setupState(process.cwd()).root, id, true),
+    print: (l) => info(l),
+  });
 }

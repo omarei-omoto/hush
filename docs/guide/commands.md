@@ -74,6 +74,7 @@ agents
 other
   hush init [name]               create a vault here (.hush/vault.json — commit it)
   hush doctor                    check this machine's setup
+  hush setup [--json]            what is set up and what is next (--json: for a coding agent)
   hush hook <zsh|bash|fish|powershell|nu>  auto-load on cd (least safe; unloads on leave)
   hush export [--out .env]       write plaintext out (last resort)
   hush get <KEY>                 reveal one value (asks first)

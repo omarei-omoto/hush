@@ -41,6 +41,7 @@ import { cmdApprovals, cmdRelay } from "./commands/approvals.ts";
 import { cmdServe } from "./commands/serve.ts";
 import { cmdLease } from "./commands/lease.ts";
 import { cmdTailnet } from "./commands/tailnet.ts";
+import { cmdSetup } from "./commands/setup.ts";
 import { bold, cyan, die, dim, out, red } from "./cli/output.ts";
 import { FULL_HELP, SHORT_HELP } from "./cli/help.ts";
 import { onPath } from "./cli/programs.ts";
@@ -93,6 +94,7 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   serve: cmdServe,
   lease: cmdLease,
   tailnet: cmdTailnet,
+  setup: cmdSetup,
   "merge-driver": cmdMergeDriver,
 };
 

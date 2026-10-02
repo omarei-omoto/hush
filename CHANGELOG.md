@@ -76,12 +76,17 @@ shows it, and expire in a minute if unused. The command policy applies, and the
 child's output is redacted.
 
 `hush tailnet grant --to sam@example.com --sets staging` writes that grant into
-your tailnet policy file, so nobody has to learn the policy syntax. With a
-Tailscale API key stored in hush it previews the diff, has Tailscale validate
-it, and saves only with `--apply`, after an approval and only over the version
-it read. Your comments and other rules stay exactly as they were. Without a key
-it prints the grant to paste. `hush tailnet grants` and `hush tailnet revoke`
-manage the ones it wrote.
+your tailnet policy file, so nobody has to learn the policy syntax. The
+`tailscale` CLI cannot change a tailnet's policy (only an admin can, in the
+console or through the API), so without a credential it prints the grant to
+paste. With a Tailscale OAuth client stored in hush (`hush add tailscale`;
+create it with only *Policy File: write*) it previews the diff, has Tailscale
+validate it, and saves only with `--apply`, after an approval and only over
+the version it read. Your comments and other rules stay exactly as they were.
+Each command trades the client for an hour-long token, and warns if the client
+can do more than the policy file. An API access token also works, with a note
+that it is broader. `hush tailnet grants` and `hush tailnet revoke` manage the
+grants it wrote.
 
 ### Release channels
 

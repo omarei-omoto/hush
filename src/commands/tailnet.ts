@@ -14,7 +14,7 @@
  */
 import { existsSync } from "node:fs";
 import { type Args, bool, list, str } from "../cli/args.ts";
-import { bold, cyan, die, dim, green, info, red, warn } from "../cli/output.ts";
+import { bold, die, dim, green, info, red, warn } from "../cli/output.ts";
 import { ctxLoose, policyFor } from "../cli/context.ts";
 import { askLine } from "../cli/prompts.ts";
 import { Vault, audit, locateProject } from "../vault.ts";
@@ -22,7 +22,7 @@ import { requireIdentity } from "../identity.ts";
 import { globalVaultPath } from "../library.ts";
 import { requestApproval } from "../approval.ts";
 import { tailnetIPv4 } from "../tailscale.ts";
-import { KEY_NAME, policyApi, type PolicyApi } from "../tailscale-api.ts";
+import { KEY_NAME, OAUTH_ID, OAUTH_SECRET, POLICY_SCOPE, policyApi, type PolicyApi, type TailscaleCredential } from "../tailscale-api.ts";
 import {
   grantSnippet, hushGrants, insertGrant, lineDiff, newGrantId, removeGrant, validDestination, validPrincipal,
   type HushGrant,
@@ -30,14 +30,20 @@ import {
 
 const ADMIN_URL = "https://login.tailscale.com/admin/acls/file";
 
-/** The stored Tailscale API key: from `--use <set>`, or the first set that has one. */
-function findKey(a: Args): { value: string; where: string } | null {
+/**
+ * The stored Tailscale credential, from `--use <set>` or the first set that
+ * has one. An OAuth client (its ID and secret in one set) is preferred over an
+ * API access token: it can be limited to the policy file, and what hush uses
+ * of it lasts an hour.
+ */
+function findKey(a: Args): { cred: TailscaleCredential; where: string } | null {
   const only = str(a, "use");
   const id = requireIdentity();
   const vaults: string[] = [];
   const loc = locateProject(process.cwd());
   if (loc?.hasVault) vaults.push(loc.vaultPath);
   if (existsSync(globalVaultPath())) vaults.push(globalVaultPath());
+  let token: { cred: TailscaleCredential; where: string } | null = null;
   for (const path of vaults) {
     let v: Vault;
     try {
@@ -47,21 +53,40 @@ function findKey(a: Args): { value: string; where: string } | null {
     }
     for (const s of v.sets()) {
       if (only && s.name !== only && s.label !== only) continue;
-      if (!s.keys.includes(KEY_NAME)) continue;
+      const where = `${v.data.name} · ${s.label || s.name}`;
       try {
-        return { value: v.get(id, s.name, KEY_NAME), where: `${v.data.name} · ${s.label || s.name}` };
+        if (s.keys.includes(OAUTH_ID) && s.keys.includes(OAUTH_SECRET)) {
+          return { cred: { kind: "oauth", clientId: v.get(id, s.name, OAUTH_ID), clientSecret: v.get(id, s.name, OAUTH_SECRET) }, where };
+        }
+        if (!token && s.keys.includes(KEY_NAME)) token = { cred: { kind: "token", token: v.get(id, s.name, KEY_NAME) }, where };
       } catch {
         continue;
       }
     }
   }
-  return null;
+  return token;
 }
+
+/** The API, with what hush noticed about the credential said once. */
+function apiWith(found: { cred: TailscaleCredential; where: string }, make: (c: TailscaleCredential, onScope: (s: string[]) => void) => PolicyApi): PolicyApi {
+  info(dim(`using the Tailscale ${found.cred.kind === "oauth" ? "OAuth client" : "API access token"} in ${found.where}`));
+  if (found.cred.kind === "token") {
+    info(dim("  An API access token can do anything its creator can, for up to 90 days. An OAuth client limited to"));
+    info(dim(`  the policy file is safer: ${OAUTH_HINT}`));
+  }
+  return make(found.cred, (granted) => {
+    const extra = granted.filter((g) => g !== POLICY_SCOPE && g !== `${POLICY_SCOPE}:read`);
+    if (extra.length) warn(`This OAuth client can also do: ${extra.join(", ")}. hush needs only ${POLICY_SCOPE}; a client with just that is safer.`);
+  });
+}
+
+const OAUTH_HINT = "Settings → OAuth clients → Generate, with only Policy File: write, then hush add tailscale --as tailscale --library";
 
 function noKey(what: string): void {
   info("");
-  info(dim(`  To have hush ${what} for you, store a Tailscale API key (Settings → Keys → API access token):`));
-  info(`    ${cyan("hush add tailscale --as tailscale --library")}`);
+  info(dim(`  To have hush ${what} for you, give it an OAuth client that may edit only the policy file:`));
+  info(dim(`    ${OAUTH_HINT}`));
+  info(dim("  (an API access token works too: hush add tailscale-token --as tailscale --library)"));
 }
 
 /** The approval, or a terminal yes where approvals are off. Dies on no. */
@@ -72,7 +97,7 @@ async function confirmChange(a: Args, summary: string, detail: string[], scope: 
     const ap = await requestApproval(loose.hushDir, {
       action: "request",
       summary,
-      detail: [...detail, "Via:  api.tailscale.com, with your stored Tailscale API key"],
+      detail: [...detail, "Via:  api.tailscale.com, with your stored Tailscale credential"],
       scope,
       ttlSeconds: policy.approvalTtlSeconds,
       timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
@@ -111,9 +136,12 @@ async function edit(a: Args, api: PolicyApi, change: (text: string) => string, w
   info(`${green("✓")} ${what.done}`);
 }
 
-export async function cmdTailnet(a: Args, deps: { api?: (key: string) => PolicyApi } = {}): Promise<void> {
+export async function cmdTailnet(
+  a: Args,
+  deps: { api?: (cred: TailscaleCredential, onScope: (granted: string[]) => void) => PolicyApi } = {},
+): Promise<void> {
   const sub = a._[0];
-  const apiFor = deps.api ?? ((key: string) => policyApi(key));
+  const make = deps.api ?? ((c: TailscaleCredential, onScope: (s: string[]) => void) => policyApi(c, undefined, undefined, onScope));
 
   if (sub === "grant") {
     const to = list(a, "to");
@@ -137,8 +165,7 @@ export async function cmdTailnet(a: Args, deps: { api?: (key: string) => PolicyA
       noKey("add it");
       return;
     }
-    info(dim(`using the Tailscale API key in ${key.where}`));
-    return edit(a, apiFor(key.value), (t) => insertGrant(t, grant), {
+    return edit(a, apiWith(key, make), (t) => insertGrant(t, grant), {
       summary: `Change your tailnet's policy file: let ${to.join(", ")} use ${sets.join(", ")} on the broker`,
       detail: [`Adds:  ${to.join(", ")} → ${dst}:${port}, sets ${sets.join(", ")}`],
       scope: `tailnet-grant:${grant.id}`,
@@ -153,7 +180,7 @@ export async function cmdTailnet(a: Args, deps: { api?: (key: string) => PolicyA
       noKey("read them");
       return;
     }
-    const { text } = await apiFor(key.value).get();
+    const { text } = await apiWith(key, make).get();
     const mine = hushGrants(text);
     if (!mine.length) return info(dim("No grants written by hush in your tailnet's policy file."));
     for (const g of mine) info(`  ${bold(g.id)}  ${g.src.join(", ")}  →  ${g.dst.join(", ")}:${g.port}  ${dim(`sets: ${g.sets.join(", ")}`)}`);
@@ -169,7 +196,7 @@ export async function cmdTailnet(a: Args, deps: { api?: (key: string) => PolicyA
       noKey("remove it");
       return;
     }
-    return edit(a, apiFor(key.value), (t) => removeGrant(t, id), {
+    return edit(a, apiWith(key, make), (t) => removeGrant(t, id), {
       summary: `Change your tailnet's policy file: remove hush grant ${id}`,
       detail: [`Removes:  ${id}`],
       scope: `tailnet-revoke:${id}`,

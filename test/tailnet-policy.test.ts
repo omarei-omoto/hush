@@ -80,14 +80,24 @@ test("the snippet and the diff read cleanly", () => {
 
 // ------------------------------------------------------------------ the API
 
-function fakeTailscale(policy: { text: string; etag: string }) {
+function fakeTailscale(policy: { text: string; etag: string; scope?: string }) {
   const seen: { method: string; url: string; auth: string; ifMatch?: string; body: string }[] = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       seen.push({ method: req.method!, url: req.url!, auth: String(req.headers.authorization), ifMatch: req.headers["if-match"] as string | undefined, body });
-      if (req.headers.authorization !== "Bearer tskey-api-FAKE7Lm02Np93Kr74") {
+      if (req.url?.endsWith("/oauth/token")) {
+        const form = new URLSearchParams(body);
+        if (form.get("client_id") !== "kOAUTHid123" || form.get("client_secret") !== "tskey-client-kOAUTHid123-FAKEsecret789") {
+          res.writeHead(401);
+          return res.end("{}");
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ access_token: "tskey-access-FAKEhour456", token_type: "Bearer", expires_in: 3600, scope: policy.scope ?? "policy_file" }));
+      }
+      const okAuth = ["Bearer tskey-api-FAKE7Lm02Np93Kr74", "Bearer tskey-access-FAKEhour456"];
+      if (!okAuth.includes(String(req.headers.authorization))) {
         res.writeHead(401);
         return res.end("{}");
       }
@@ -154,9 +164,9 @@ test("without a stored Tailscale key, hush tailnet grant prints the grant to pas
   }
 });
 
-test("with a stored key: a preview saves nothing, --apply --yes saves exactly the grant, revoke takes it back", async () => {
+test("with a stored credential: a preview saves nothing, --apply --yes saves exactly the grant, revoke takes it back", async () => {
   const state = { text: POLICY, etag: '"e1"' };
-  const { server } = fakeTailscale(state);
+  const { server, seen } = fakeTailscale(state);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v2`;
@@ -174,11 +184,14 @@ test("with a stored key: a preview saves nothing, --apply --yes saves exactly th
     process.env.HUSH_NO_DIALOG = "1";
     mkdirSync(join(work, "home", "vaults", "global"), { recursive: true });
     const lib = Vault.create(join(work, "home", "vaults", "global", "vault.json"), "global", { name: "me", pub: id.pub });
-    lib.set(id, "tailscale", "TAILSCALE_API_KEY", "tskey-api-FAKE7Lm02Np93Kr74");
+    // Both kinds stored: the OAuth client must win over the broader API token.
+    lib.set(id, "tailscale-token", "TAILSCALE_API_KEY", "tskey-api-FAKE7Lm02Np93Kr74");
+    lib.set(id, "tailscale", "TAILSCALE_OAUTH_CLIENT_ID", "kOAUTHid123");
+    lib.set(id, "tailscale", "TAILSCALE_OAUTH_CLIENT_SECRET", "tskey-client-kOAUTHid123-FAKEsecret789");
     lib.save();
     mkdirSync(join(work, "proj"));
     process.chdir(join(work, "proj"));
-    const api = (key: string) => realApi(key, base);
+    const api = (c: Parameters<typeof realApi>[0], onScope: (s: string[]) => void) => realApi(c, base, undefined, onScope);
 
     await cmdTailnet(parseArgs(["grant", "--to", "sam@example.com", "--sets", "staging", "--dst", "100.64.0.5"]), { api });
     assert.equal(state.text, POLICY, "a preview saved the file");
@@ -190,6 +203,9 @@ test("with a stored key: a preview saves nothing, --apply --yes saves exactly th
 
     await cmdTailnet(parseArgs(["revoke", written[0].id, "--apply", "--yes"]), { api });
     assert.equal(state.text, POLICY);
+    const policyCalls = seen.filter((x) => !x.url.endsWith("/oauth/token"));
+    assert.ok(policyCalls.length >= 4);
+    assert.ok(policyCalls.every((x) => x.auth === "Bearer tskey-access-FAKEhour456"), "the API token was used although an OAuth client was stored");
   } finally {
     process.chdir(saved.cwd);
     for (const [k, v] of [["HUSH_HOME", saved.home], ["HUSH_IDENTITY", saved.id], ["HUSH_NO_DIALOG", saved.dialog]] as const) {
@@ -198,5 +214,33 @@ test("with a stored key: a preview saves nothing, --apply --yes saves exactly th
     }
     server.close();
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("an OAuth client: its secret goes only to the sign-in, the policy calls use the hour-long token", async () => {
+  const state = { text: POLICY, etag: '"e1"', scope: "policy_file devices:core" };
+  const { server, seen } = fakeTailscale(state);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v2`;
+  try {
+    let scopes: string[] = [];
+    const api = policyApi({ kind: "oauth", clientId: "kOAUTHid123", clientSecret: "tskey-client-kOAUTHid123-FAKEsecret789" }, base, "-", (s) => (scopes = s));
+    const { text, etag } = await api.get();
+    await api.set(insertGrant(text, grant()), etag);
+    assert.deepEqual(scopes, ["policy_file", "devices:core"], "the granted scopes were not reported");
+    const signIns = seen.filter((x) => x.url.endsWith("/oauth/token"));
+    assert.equal(signIns.length, 1, "it signed in more than once for one command");
+    assert.match(signIns[0].body, /scope=policy_file/);
+    for (const x of seen.filter((x) => !x.url.endsWith("/oauth/token"))) {
+      assert.equal(x.auth, "Bearer tskey-access-FAKEhour456");
+      assert.ok(!x.body.includes("FAKEsecret789"), "the client secret left the sign-in request");
+    }
+    await assert.rejects(
+      policyApi({ kind: "oauth", clientId: "kOAUTHid123", clientSecret: "wrong-secret-000000000000" }, base).get(),
+      /refused the OAuth client/,
+    );
+  } finally {
+    server.close();
   }
 });

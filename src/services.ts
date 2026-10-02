@@ -59,7 +59,10 @@ export const CATALOG: Record<string, { vars: string[]; label: string; rotate?: s
   mongodb: { vars: ["MONGODB_URI"], label: "MongoDB" },
   redis: { vars: ["REDIS_URL"], label: "Redis" },
   pinecone: { vars: ["PINECONE_API_KEY"], label: "Pinecone" },
-  tailscale: { vars: ["TAILSCALE_API_KEY"], label: "Tailscale", rotate: "https://login.tailscale.com/admin/settings/keys" },
+  // An OAuth client limited to the policy file (hush tailnet grant); the API
+  // access token is the broader, longer-lived alternative.
+  tailscale: { vars: ["TAILSCALE_OAUTH_CLIENT_ID", "TAILSCALE_OAUTH_CLIENT_SECRET"], label: "Tailscale", rotate: "https://login.tailscale.com/admin/settings/oauth" },
+  "tailscale-token": { vars: ["TAILSCALE_API_KEY"], label: "Tailscale API token", rotate: "https://login.tailscale.com/admin/settings/keys" },
 };
 
 export const SCOPE_SEP = "/";

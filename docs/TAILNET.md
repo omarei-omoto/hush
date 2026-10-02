@@ -90,14 +90,27 @@ hush tailnet grants                                               # the grants h
 hush tailnet revoke hush-3f9a0c1d --apply                         # take one away
 ```
 
-- With a Tailscale API key stored in hush (`hush add tailscale --as tailscale
-  --library`), it reads your policy file and inserts or removes *only* its own
+- **No credential is needed to get the grant.** The `tailscale` CLI cannot
+  read or change the policy file: it manages one device, and the policy
+  belongs to the tailnet. Only an admin can change it, in the admin console
+  or through the API. Without a credential, hush prints the grant and you
+  paste it in the console once.
+- **To have hush apply it**, give hush an OAuth client that may edit only the
+  policy file. In the admin console: Settings → OAuth clients → Generate,
+  with only *Policy File: write*. Then `hush add tailscale --as tailscale
+  --library` stores its ID and secret. Each command trades them for an access
+  token that lasts an hour, and warns if the client was given more than the
+  policy file. An API access token also works
+  (`hush add tailscale-token --as tailscale --library`), but it can do
+  anything its creator can, for up to 90 days, so hush says so when it uses
+  one.
+- With either stored, it reads your policy file and inserts or removes *only* its own
   grant, as text. Your comments and formatting stay as they were. It shows
   the diff and has Tailscale validate it. It saves only with `--apply`,
   after an approval, and only over the version it read: a change someone
-  made meanwhile is never overwritten. The key goes into the request header
-  inside hush and is never shown, to you or to an agent.
-- Without a key, it prints the grant for you to paste in the admin console.
+  made meanwhile is never overwritten. The credential goes into the sign-in
+  request or the request header inside hush, and is never shown to you or to
+  an agent.
 - The grant points at the broker's tailnet IP by default, so the broker
   needs no tag. Tagging a personal laptop would make Tailscale stop treating
   it as yours. `--dst tag:hush` is for a dedicated team broker. The grant

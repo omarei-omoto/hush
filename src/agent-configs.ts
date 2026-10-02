@@ -82,30 +82,74 @@ export function agentConfigFiles(root: string, env: NodeJS.ProcessEnv, plat: str
 // ------------------------------------------------------------------ detection
 
 /**
- * Prefixes providers put on their keys. A match is a credential whatever the
- * field is called. Order matters where one prefix contains another: the
- * Anthropic and OpenRouter forms both start with OpenAI's `sk-`.
+ * Providers' key formats. A match is a credential whatever the field is
+ * called. Lengths are each provider's real range, and both ends are bounded:
+ * without that, `sk-` followed by any long run matched base64 blobs thousands
+ * of characters long, and Context7's `ctx7sk-…` read as an OpenAI key.
+ * Order matters where one prefix contains another (Anthropic's and
+ * OpenRouter's keys both start with OpenAI's `sk-`).
  */
+const KEY_FORMATS: [service: string, source: string][] = [
+  ["anthropic", String.raw`sk-ant-[A-Za-z0-9_-]{32,200}`],
+  ["openrouter", String.raw`sk-or-v1-[A-Za-z0-9]{48,80}`],
+  ["openai", String.raw`sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,220}|sk-[A-Za-z0-9]{32,64}`],
+  ["stripe", String.raw`[sr]k_(?:live|test)_[A-Za-z0-9]{20,120}`],
+  ["github", String.raw`gh[pousr]_[A-Za-z0-9]{36,40}|github_pat_[A-Za-z0-9_]{60,100}`],
+  ["gitlab", String.raw`glpat-[A-Za-z0-9_-]{20,30}`],
+  ["slack", String.raw`xox[abposr]-[0-9A-Za-z-]{20,200}`],
+  ["aws", String.raw`(?:AKIA|ASIA)[0-9A-Z]{16}`],
+  ["google", String.raw`AIza[0-9A-Za-z_-]{35}`],
+  ["huggingface", String.raw`hf_[A-Za-z0-9]{30,40}`],
+  ["replicate", String.raw`r8_[A-Za-z0-9]{36,40}`],
+  ["groq", String.raw`gsk_[A-Za-z0-9]{48,56}`],
+  ["linear", String.raw`lin_api_[A-Za-z0-9]{32,48}`],
+  ["notion", String.raw`ntn_[A-Za-z0-9]{40,50}|secret_[A-Za-z0-9]{40,50}`],
+  ["figma", String.raw`figd_[A-Za-z0-9_-]{36,60}`],
+  ["sendgrid", String.raw`SG\.[A-Za-z0-9_-]{20,24}\.[A-Za-z0-9_-]{40,46}`],
+  ["npm", String.raw`npm_[A-Za-z0-9]{36}`],
+];
+
+/**
+ * Not glued to more key-ish characters on either side. A JSON-escaped line
+ * break (`\n` written as backslash-n) counts as a boundary too: a key on a
+ * line of its own inside a saved tool output is preceded by an "n".
+ */
+const LEFT = String.raw`(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))`;
+const RIGHT = String.raw`(?![A-Za-z0-9_-])`;
+const PRIVATE_KEY = String.raw`-----BEGIN [A-Z ]*PRIVATE KEY-----`;
+
+/**
+ * Every format as one regex source, for scanning large text in one pass. The
+ * left boundary is *not* in it: a pattern that opens with a lookbehind cannot
+ * skip ahead to the characters a key starts with, and ran at a tenth of the
+ * speed. Check each match with `boundedLeft` instead.
+ */
+export const KEY_SOURCE = `(?:${KEY_FORMATS.map(([, src]) => src).join("|")})${RIGHT}|${PRIVATE_KEY}`;
+
+/**
+ * The literal starts of every format. Searching for these first and checking
+ * the full format only where one occurs is several times faster than one big
+ * regex over megabytes of text.
+ */
+export const KEY_PREFIXES = [
+  "sk-", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+  "glpat-", "xoxa-", "xoxb-", "xoxp-", "xoxo-", "xoxs-", "xoxr-", "AKIA", "ASIA", "AIza", "hf_", "r8_", "gsk_",
+  "lin_api_", "ntn_", "secret_", "figd_", "SG.", "npm_", "-----BEGIN",
+];
+
+/** Whether the match at `index` in `text` starts on a boundary (see LEFT). */
+export function boundedLeft(text: string, index: number): boolean {
+  if (index === 0 || text.startsWith("-----BEGIN", index)) return true;
+  const c = text.charCodeAt(index - 1);
+  const keyish = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 45;
+  if (!keyish) return true;
+  // A JSON-escaped line break or tab right before it: "\n", "\r", "\t".
+  return index >= 2 && text.charCodeAt(index - 2) === 92 && (c === 110 || c === 114 || c === 116);
+}
+
 const TOKEN_PATTERNS: [service: string, pattern: RegExp][] = [
-  // Not preceded by a letter or digit: Context7's `ctx7sk-…` is not an OpenAI key.
-  ["anthropic", /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/],
-  ["openrouter", /(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{32,}/],
-  ["openai", /(?<![A-Za-z0-9])sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/],
-  ["stripe", /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/],
-  ["github", /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{40,}/],
-  ["gitlab", /\bglpat-[A-Za-z0-9_-]{20,}/],
-  ["slack", /\bxox[abposr]-[A-Za-z0-9-]{10,}/],
-  ["aws", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
-  ["google", /\bAIza[0-9A-Za-z_-]{35}/],
-  ["huggingface", /\bhf_[A-Za-z0-9]{30,}/],
-  ["replicate", /\br8_[A-Za-z0-9]{30,}/],
-  ["groq", /\bgsk_[A-Za-z0-9]{40,}/],
-  ["linear", /\blin_api_[A-Za-z0-9]{30,}/],
-  ["notion", /\b(?:ntn|secret)_[A-Za-z0-9]{40,}/],
-  ["figma", /\bfigd_[A-Za-z0-9_-]{30,}/],
-  ["sendgrid", /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/],
-  ["npm", /\bnpm_[A-Za-z0-9]{36}\b/],
-  ["private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ...KEY_FORMATS.map(([svc, src]): [string, RegExp] => [svc, new RegExp(`${LEFT}(?:${src})${RIGHT}`)]),
+  ["private key", new RegExp(PRIVATE_KEY)],
 ];
 
 export function serviceOf(value: string): string | null {
@@ -150,6 +194,10 @@ export function looksLikeCredential(value: string): boolean {
   // Dates and times: `claudeCodeFirstTokenDate` has "Token" in it and a value
   // with digits and capitals, and is still not a key.
   if (/^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(v)) return false;
+  // Short lowercase words joined up — a deployment or project name like
+  // Convex's `dev:happy-otter-123` — is a name, not a key. Every part short:
+  // Firecrawl's `fc-` + 32 hex characters is lowercase too, and is a key.
+  if (/^[a-z]{1,12}(?:[:._-][a-z0-9]{1,12})+$/.test(v)) return false;
   const classes = [/[a-z]/, /[A-Z]/, /[0-9]/].filter((r) => r.test(v)).length;
   return classes >= 2;
 }
@@ -205,6 +253,15 @@ function judge(name: string, value: string, kind: FindingKind): { secret: boolea
     return { secret: !!m && m[1].length >= 12 && !isPlaceholder(m[1]), service: null };
   }
   return { secret: secretName(name) && looksLikeCredential(value), service: null };
+}
+
+/**
+ * Whether a stored value is worth looking for elsewhere: a credential by its
+ * shape or its name, not a setting. `NODE_ENV=production` or a public URL in
+ * a vault would otherwise match half of every transcript.
+ */
+export function credentialLike(name: string, value: string): boolean {
+  return judge(name, value, "env").secret || looksLikeCredential(value);
 }
 
 /** `--api-key=sk-…`, or `--token` followed by the value as the next argument. */

@@ -80,6 +80,11 @@ function scanAll(root: string): Scanned[] {
   return results;
 }
 
+/** Every plaintext credential in an agent config, with where it is — for the transcript scan. */
+export function agentConfigSecrets(root: string): { agent: string; path: string; finding: Finding }[] {
+  return scanAll(root).flatMap((s) => s.findings.map((finding) => ({ agent: s.file.agent, path: s.file.path, finding })));
+}
+
 /** For `hush doctor`: how many plaintext credentials, in how many files. */
 export function agentCredentialCount(root: string): { count: number; files: number } {
   const hits = scanAll(root).filter((s) => s.findings.length);

@@ -16,6 +16,19 @@ reads it back, and only then rewrites the server to start through
 indentation. Keys it cannot move (a header, a URL, an app's own setting) are
 listed with what to do instead. `--json` for scripts.
 
+### Your secrets in agents' saved conversations
+
+`hush scan --transcripts` searches the conversations coding agents keep on disk
+(Claude Code, Codex, Gemini CLI, opencode, Continue, Cline, Cursor) for three
+things: the values in your hush vaults, the plaintext keys in agents' config
+files, and strings shaped like a provider's key that hush has never seen. It
+reports the variable, where it is stored, how many conversations hold it and
+when — never a hush value — and where to replace each key. Read-only: it does
+not edit, redact or delete a conversation. `--since 30d` narrows it,
+`--verbose` lists each file, `--json` for scripts. It reads in parallel and
+splits large sessions across threads; 25 GB of history takes about half a
+minute.
+
 ### Fixed
 
 - `hush ui` opened from the home folder no longer sits blank: the code scan

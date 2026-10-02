@@ -18,6 +18,13 @@ name: Release
 # Developer ID is configured, checksummed, given a GitHub build-provenance
 # attestation, and attached to a GitHub release with the package-manager
 # manifests. RELEASING.md lists the secrets, all optional.
+#
+# Two channels, chosen by the tag itself. `v0.11.0` is a release: npm `latest`,
+# a normal GitHub release, the Homebrew tap and the MCP registry. A tag with a
+# prerelease part — `v0.11.0-beta.1` — is the beta channel: npm `beta` (so
+# `npm i -g @omarei/hush` never picks it up, `npm i -g @omarei/hush@beta`
+# does), a GitHub release marked prerelease (so install.sh's
+# releases/latest/download never serves it), and no tap or registry update.
 on:
   push:
     tags: ["v*"]
@@ -87,12 +94,22 @@ jobs:
       # anyone can check what they installed came from here (npm shows it on
       # the package page). Trusted publishing attaches it anyway; the flag
       # makes a publish that cannot attach it fail rather than go out without.
-      - run: npm publish --provenance --access public
+      - name: npm publish (latest, or beta for a prerelease tag)
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF_NAME" in
+            *-*) channel=beta ;;
+            *) channel=latest ;;
+          esac
+          echo "publishing ${GITHUB_REF_NAME#v} to the $channel channel"
+          npm publish --provenance --access public --tag "$channel"
 
       # The official MCP registry, signed in with this workflow's GitHub OIDC
       # identity (the io.github.omarei-omoto/* namespace) — no token. The
       # publisher is pinned and checked against the registry release's sums.
       - name: list this version in the MCP registry
+        # The registry lists the newest version it is given; a beta is not that.
+        if: ${{ !contains(github.ref_name, '-') }}
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/mcpp.tgz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
@@ -250,7 +267,10 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           awk -v v="$v" '$0 ~ "^## " v "( |$)" {on=1; next} on && /^## / {exit} on' CHANGELOG.md > /tmp/notes.md
           test -s /tmp/notes.md || echo "hush $v" > /tmp/notes.md
-          printf '\n---\nInstall: `curl -fsSL https://raw.githubusercontent.com/omarei-omoto/hush/main/scripts/install.sh | sh`, `brew install omarei-omoto/tap/hush`, or `npm i -g @omarei/hush`. Every binary is listed in SHA256SUMS and has a build-provenance attestation.\n' >> /tmp/notes.md
+          case "$v" in
+            *-*) printf '\n---\nThis is a **beta**. Install it with `npm i -g @omarei/hush@beta`, or download a binary below; the stable channel (`npm i -g @omarei/hush`, Homebrew, install.sh) is unchanged. Every binary is listed in SHA256SUMS and has a build-provenance attestation.\n' >> /tmp/notes.md ;;
+            *) printf '\n---\nInstall: `curl -fsSL https://raw.githubusercontent.com/omarei-omoto/hush/main/scripts/install.sh | sh`, `brew install omarei-omoto/tap/hush`, or `npm i -g @omarei/hush`. Every binary is listed in SHA256SUMS and has a build-provenance attestation.\n' >> /tmp/notes.md ;;
+          esac
       - name: create the release (or add to one made by hand)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -260,7 +280,9 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --title "hush ${GITHUB_REF_NAME#v}" --notes-file /tmp/notes.md
+            pre=()
+            case "$GITHUB_REF_NAME" in *-*) pre=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag "${pre[@]}" --title "hush ${GITHUB_REF_NAME#v}" --notes-file /tmp/notes.md
           fi
       # The tap updates itself from each release (its own workflow, its own
       # token). This step only makes that immediate, and only if a token with
@@ -268,7 +290,7 @@ jobs:
       - name: update the Homebrew tap
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_TOKEN != '' && !contains(github.ref_name, '-')
         run: |
           set -euo pipefail
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/omarei-omoto/homebrew-tap.git" /tmp/tap

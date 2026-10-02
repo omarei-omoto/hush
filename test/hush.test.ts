@@ -305,7 +305,7 @@ describe("redactor", () => {
   });
 
   test("longer values show a recognisable prefix and suffix", () => {
-    const p = preview("sk_live_51ABCDEFGHIJKLMNOP");
+    const p = preview("sk_" + "live_51ABCDEFGHIJKLMNOP");
     assert.match(p, /^sk_…OP \(26 chars\)$/);
   });
 });

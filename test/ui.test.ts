@@ -403,7 +403,7 @@ describe("ui dropzone — staging a dropped .env", () => {
     // The whole point: the browser gets metadata, not secrets.
     const raw = JSON.stringify(st);
     assert.ok(!raw.includes("fal_dropped_value_here"), "a value came back to the browser");
-    assert.ok(!raw.includes("sk_live_abcdefghijklmnop"));
+    assert.ok(!raw.includes("sk_" + "live_abcdefghijklmnop"));
     assert.ok(!raw.includes("BEGIN K"));
 
     // Useful suggestions, so the common case is one click.

@@ -203,13 +203,13 @@ export function assertKeyName(key: string): void {
   }
 }
 
-export function assertScopeName(scope: string): void {
+const isValidScopeName = (scope: string): boolean => {
   const segments = scope.split("/");
-  const valid =
-    segments.length >= 1 &&
-    segments.length <= 2 &&
-    segments.every((s) => SCOPE_SEGMENT.test(s) && !RESERVED_NAMES.has(s));
-  if (!valid) {
+  return segments.length >= 1 && segments.length <= 2 && segments.every((s) => SCOPE_SEGMENT.test(s) && !RESERVED_NAMES.has(s));
+};
+
+export function assertScopeName(scope: string): void {
+  if (!isValidScopeName(scope)) {
     throw new ValidationError(
       `"${scope.slice(0, 40)}" is not a valid environment or account name. ` +
         `Use letters, digits, dot, dash and underscore, optionally as service/account.`,
@@ -796,12 +796,15 @@ export function assertVaultShape(data: VaultFile, path: string): void {
   if (!isObject(data.envs)) bad("the environments are not an object");
   // Names are object keys all the way through hush; a reserved one (see
   // RESERVED_NAMES) was not written by hush and is refused before it is used.
+  // Other odd names are not refused here — a vault from before name rules may
+  // hold one — and are scrubbed wherever they are shown instead (safeText).
+  const reservedSet = (env: string) => env.split("/").some((s) => RESERVED_NAMES.has(s));
   for (const [env, slot] of Object.entries(data.envs)) {
-    if (env.split("/").some((s) => RESERVED_NAMES.has(s))) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
+    if (reservedSet(env)) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
     if (isObject(slot)) for (const key of Object.keys(slot)) if (RESERVED_NAMES.has(key)) bad(`set "${env.slice(0, 24)}" has a key named "${key}", which is reserved`);
   }
   for (const table of [data.meta, data.setKeys]) {
-    if (isObject(table)) for (const env of Object.keys(table)) if (env.split("/").some((s) => RESERVED_NAMES.has(s))) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
+    if (isObject(table)) for (const env of Object.keys(table)) if (reservedSet(env)) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
   }
 
   for (const [fp, r] of Object.entries(data.recipients)) {
@@ -854,6 +857,19 @@ export function assertVaultShape(data: VaultFile, path: string): void {
     if (!isObject(data.meta)) bad("the environment descriptions are not an object");
     for (const [env, m] of Object.entries(data.meta)) {
       if (!isObject(m)) bad(`the description of "${env.slice(0, 40)}" is not an object`);
+      // The same rules a pattern meets when someone types it (--only-in): a
+      // list of absolute folder patterns, each at most 300 characters. Only
+      // checked on write before, so a vault from git could carry anything.
+      if (m.onlyIn !== undefined) {
+        if (!Array.isArray(m.onlyIn) || m.onlyIn.length > 64) bad(`the folders of set "${env.slice(0, 40)}" are not a list hush writes`);
+        for (const pattern of m.onlyIn as unknown[]) {
+          try {
+            assertOnlyInPattern(pattern);
+          } catch {
+            bad(`set "${env.slice(0, 40)}" is kept to a folder pattern hush would not write`);
+          }
+        }
+      }
     }
   }
   for (const [env, values] of Object.entries(data.envs)) {
@@ -861,6 +877,10 @@ export function assertVaultShape(data: VaultFile, path: string): void {
     for (const [key, e] of Object.entries(values)) {
       if (!isObject(e) || typeof e.iv !== "string" || typeof e.ct !== "string" || typeof e.tag !== "string") {
         bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" is not a sealed value`);
+      }
+      const exposed = (e as unknown as SecretEntry).exposed;
+      if (exposed !== undefined && (!Array.isArray(exposed) || exposed.some((n) => typeof n !== "string"))) {
+        bad(`"${env.slice(0, 20)}/${key.slice(0, 40)}" has an exposure list that is not a list of names`);
       }
       // A non-numeric generation here would defeat the re-seal check the same
       // way a non-numeric one on the data key defeats rollback detection.

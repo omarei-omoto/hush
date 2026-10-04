@@ -54,22 +54,26 @@ const parseVault = (text: string, label: string): VaultFile | null => {
   }
 };
 
+/** A set or key name from a file, made safe to print: an escape sequence in one is not the terminal's to obey. */
+const name = (s: unknown): string => safeText(s, 64) ?? "?";
+
 /** One line per conflict, for a person: set, key, who and when on each side. */
 function describeConflict(c: MergeConflict): string {
   const side = (s: MergeConflict["ours"]) =>
     s.deleted ? "deleted it" : `${safeText(s.updatedBy, 40) ?? "someone"} at ${safeText(s.updatedAt, 24) ?? "?"}`;
-  return `${c.set}/${c.key}   this branch: ${side(c.ours)}   other branch: ${side(c.theirs)}`;
+  return `${name(c.set)}/${name(c.key)}   this branch: ${side(c.ours)}   other branch: ${side(c.theirs)}`;
 }
 
 function report(r: MergeResult, pathForHumans: string): void {
   const err = (s: string) => process.stderr.write(s + "\n");
   if (r.structural) {
-    err(red(`✗ hush could not merge ${pathForHumans}: ${r.structural}.`));
+    err(red(`✗ hush could not merge ${pathForHumans}: ${safeText(r.structural, 400)}.`));
     return;
   }
-  if (r.rewrapped.length) err(dim(`hush: gave the newer vault key to ${r.rewrapped.join(", ")} (added on the other branch)`));
+  if (r.rewrapped.length) err(dim(`hush: gave the newer vault key to ${r.rewrapped.map((m) => name(m)).join(", ")} (added on the other branch)`));
   if (r.resealed) err(dim(`hush: re-sealed ${r.resealed} value(s) under the newer vault key`));
-  for (const n of r.notes) err(yellow(`! ${n}`));
+  // Notes quote set and member names from the files merged: scrubbed like every other file-sourced string.
+  for (const n of r.notes) err(yellow(`! ${safeText(n, 400)}`));
   if (r.conflicts.length) {
     err(yellow(`! ${r.conflicts.length} key(s) were changed on both branches; this branch's value is kept for now:`));
     for (const c of r.conflicts) err(`    ${describeConflict(c)}`);
@@ -258,8 +262,8 @@ function mergePick(a: Args, vaultPath: string): void {
   if (!record) die("There is no merge in progress with keys to choose.", "hush merge status");
   const set = str(a, "set");
   const matches = record.conflicts.filter((c) => c.key === key && (!set || c.set === set));
-  if (!matches.length) die(`"${key}" is not one of the keys left to choose.`, "hush merge status");
-  if (matches.length > 1) die(`"${key}" is left to choose in ${matches.map((c) => c.set).join(" and ")}.`, "Say which with --set <set>.");
+  if (!matches.length) die(`"${name(key)}" is not one of the keys left to choose.`, "hush merge status");
+  if (matches.length > 1) die(`"${name(key)}" is left to choose in ${matches.map((c) => name(c.set)).join(" and ")}.`, "Say which with --set <set>.");
   const c = matches[0];
   const side = wantOurs ? c.ours : c.theirs;
 
@@ -284,7 +288,7 @@ function mergePick(a: Args, vaultPath: string): void {
   } else {
     unlinkSync(conflictFile(vaultPath));
   }
-  info(`${green("✓")} ${c.set}/${c.key}: kept ${wantOurs ? "this branch's" : "the other branch's"} ${side.deleted ? "deletion" : "value"}`);
+  info(`${green("✓")} ${name(c.set)}/${name(c.key)}: kept ${wantOurs ? "this branch's" : "the other branch's"} ${side.deleted ? "deletion" : "value"}`);
   if (rest.length) info(dim(`  ${rest.length} left: hush merge status`));
   else info(`  ${dim("all chosen — now:")} ${cyan(`git add ${relative(process.cwd(), vaultPath)}`)}`);
 }

@@ -244,6 +244,29 @@ describe("V-1: accepting covers exactly what was shown", () => {
     }
   });
 
+  test("a changed data key behind a generation already seen cannot be accepted, and the pin survives (review F2)", () => {
+    const home = mkdtempSync(join(tmpdir(), "hush-trust-unit-"));
+    const prev = process.env.HUSH_HOME;
+    process.env.HUSH_HOME = home;
+    try {
+      const owner = generateIdentity();
+      const v = Vault.create(join(home, "v.json"), "unit", { name: "owner", pub: owner.pub });
+      const real = v.trustView(v.dekForReview(owner));
+      recordTrusted(real);
+      // The same generation, under a different key: what a substitution looks like.
+      const swapped = { ...real, dek: newDek() };
+      const shown = pendingChanges(swapped);
+      assert.ok(shown.keyChanged, "the changed key was not noticed");
+      assert.throws(() => acceptPending(swapped, shown), /cannot be accepted/);
+      assert.ok(pendingChanges(swapped).keyChanged, "the refused accept overwrote the pinned commitment");
+      assert.equal(hasProblems(pendingChanges(real)), false, "the real key no longer matches its pin");
+    } finally {
+      if (prev === undefined) delete process.env.HUSH_HOME;
+      else process.env.HUSH_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("the key commitment reveals nothing and changes with the key, the vault and the generation", () => {
     const a = newDek();
     const b = newDek();

@@ -535,3 +535,15 @@ describe("the pairing QR code", () => {
   });
 });
 
+
+test("an Allow for a while on the approver covers what was shown, never a request id the requester chose (review F14)", async () => {
+  const { relayGrantScope } = await import("../src/commands/approvals.ts");
+  const peer = { spk: "hush_spk_device" };
+  const shown = { id: "fixed-id", action: "run", summary: "run npm test", detail: ["sets: default"], host: "laptop" };
+  const scope = relayGrantScope(peer, shown);
+  assert.notEqual(relayGrantScope(peer, { ...shown, summary: "run curl evil.example" }), scope, "same id, different action, same grant");
+  assert.notEqual(relayGrantScope(peer, { ...shown, detail: ["sets: prod"] }), scope);
+  assert.notEqual(relayGrantScope({ spk: "hush_spk_other" }, shown), scope, "one device's grant covered another's");
+  assert.equal(relayGrantScope(peer, { ...shown, id: "a-new-random-id" }), scope, "the same action again is not covered");
+  assert.ok(!scope.includes("fixed-id"));
+});

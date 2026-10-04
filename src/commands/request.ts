@@ -156,11 +156,15 @@ export async function cmdRequest(a: Args): Promise<void> {
         summary: `Request:  ${requestSummary(input, secrets)}`,
         detail: [
           `Sends:  ${sends.join(", ") || "(no secret)"}`,
+          ...(input.insecure && parsed.protocol === "http:"
+            ? ["Cleartext:  --insecure — the credential is sent unencrypted, readable by anything on the network path"]
+            : []),
           `Using sets:  ${layers.join(", ") || "(none)"}`,
           `Directory:  ${process.cwd()}`,
           requestCoverageLine(policy, parsed.host, layers),
         ],
-        scope: requestScope(policy, parsed.host, layers),
+        // A grant for the https request is not one for its cleartext twin.
+        scope: requestScope(policy, parsed.host, layers) + (input.insecure && parsed.protocol === "http:" ? "#cleartext" : ""),
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
@@ -194,6 +198,7 @@ export async function cmdRequest(a: Args): Promise<void> {
     // substitution, which has the value in its query.
     url: result.requested,
     ...(result.redirects ? { landed: result.url } : {}),
+    ...(input.insecure && parsed.protocol === "http:" ? { cleartext: true } : {}),
     method: result.method,
     status: result.status,
     layers,

@@ -371,6 +371,26 @@ describe("hush run --materialize", () => {
   });
 });
 
+describe("hush run --no-redact (review F7)", () => {
+  test("turning masking off is gated like a reveal, even where plain runs are not", () => {
+    const p = project();
+    try {
+      const path = join(p.root, "show.sh");
+      writeFileSync(path, '#!/bin/sh\necho "value=$STRIPE_SECRET_KEY"\n');
+      chmodSync(path, 0o755);
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["reveal"], approvalTimeoutSeconds: 1 }));
+      const masked = p.run(["run", "--", "./show.sh"]);
+      assert.equal(masked.code, 0, masked.out);
+      assert.match(masked.out, /value=\[redacted:STRIPE_SECRET_KEY\]/);
+      const unmasked = p.run(["run", "--no-redact", "--", "./show.sh"]);
+      assert.notEqual(unmasked.code, 0, `--no-redact ran with nobody asked:\n${unmasked.out}`);
+      assert.doesNotMatch(unmasked.out, /value=/, "the command ran despite the gate");
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
 describe("a run leaves no value on disk", () => {
   // The invariant ARCHITECTURE.md names: the value exists in the child's
   // environment and hush's memory, and nowhere a file could hold it. The child

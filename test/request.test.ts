@@ -232,7 +232,8 @@ describe("what the approval dialog is shown", () => {
       secrets,
     };
     const summary = requestSummary(input, secrets);
-    assert.match(summary, /POST api\.stripe\.com\/v1\/refunds/);
+    assert.match(summary, /POST https:\/\/api\.stripe\.com\/v1\/refunds/);
+    assert.match(requestSummary({ ...input, url: "http://api.example.com/x" }, secrets), /POST http:\/\/api\.example\.com\/x/, "http and https read the same (review F6)");
     assert.match(summary, /sends API_KEY/);
     assert.doesNotMatch(summary, new RegExp(SECRET));
     assert.deepEqual(requestSecretNames(input, secrets), ["API_KEY"]);

@@ -120,11 +120,17 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
       });
       dieOnApproval(ap, `writing ${specs.map((s) => s.key).join(", ")} to disk`);
     }
-    if (policy.requireApproval.includes("run")) {
+    // --no-redact turns masking off, so whatever the command prints — the
+    // injected values included — reaches whoever reads its output. That is
+    // closer to a reveal than a run: it is gated by either, it says so in the
+    // dialog, and an ordinary "run" grant never covers it.
+    const unmasked = bool(a, "no-redact");
+    if (policy.requireApproval.includes("run") || (unmasked && policy.requireApproval.includes("reveal"))) {
       const ap = await requestApproval(loose.hushDir, {
-        action: "run",
-        summary: `Run:  ${argv.join(" ")}`.trim(),
+        action: unmasked ? "reveal" : "run",
+        summary: `${unmasked ? "Run, output NOT masked" : "Run"}:  ${argv.join(" ")}`.trim(),
         detail: [
+          ...(unmasked ? ["Unmasked:  --no-redact — anything this command prints, injected values included, is shown as is"] : []),
           `Using sets:  ${layers.join(", ") || "(none)"}`,
           `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
           `Directory:  ${process.cwd()}`,
@@ -136,7 +142,7 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
         // Built by runScope() — the same helper mcp.ts's hush_run calls — so a
         // grant cached by one surface (a "session" approval from either) is
         // honoured by the other for the same command and sets.
-        scope: runScope(policy, argv[0], layers),
+        scope: (unmasked ? "unmasked:" : "") + runScope(policy, argv[0], layers),
         ttlSeconds: policy.approvalTtlSeconds,
         timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
         biometry: policy.biometry,
@@ -185,6 +191,7 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
     action: "run",
     layers,
     command: argv[0],
+    ...(bool(a, "no-redact") ? { unmasked: true } : {}),
     // Materialised keys are not injected; the child gets a path, not a value.
     injected: Object.keys(secrets).filter((k) => !specs.some((s) => s.key === k)).length,
     ...(specs.length ? { materialized: specs.map((s) => s.key) } : {}),

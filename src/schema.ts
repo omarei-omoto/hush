@@ -30,9 +30,29 @@
  *   - A failure message names the key, the rule, and the length. Never the
  *     value, never a prefix of it, never a hash of it.
  */
+import { runInNewContext } from "node:vm";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ValidationError, isValidKeyName } from "./vault.ts";
+
+/**
+ * `.env.schema` is a repository file, so its @pattern is a regular expression
+ * someone else wrote — and it is tested against the real value, on every run.
+ * A pattern like ^([a-z0-9]+)+$ backtracks for ever against a token with a
+ * delimiter in it, which hung every hush command in that repository. Patterns
+ * are capped in length, and each test gets a time limit.
+ */
+const MAX_PATTERN_CHARS = 500;
+const PATTERN_TIMEOUT_MS = 100;
+
+function testWithin(pattern: RegExp, value: string): boolean | "timeout" {
+  try {
+    return runInNewContext("pattern.test(value)", { pattern, value }, { timeout: PATTERN_TIMEOUT_MS }) === true;
+  } catch (e) {
+    if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return "timeout";
+    throw e;
+  }
+}
 
 export type TypeName = "string" | "number" | "boolean" | "url" | "port" | "email" | "enum";
 
@@ -155,6 +175,9 @@ export function parseSchema(text: string, where = SCHEMA_FILE): Rule[] {
           pending.type = parseTypeSpec(value, at);
         } else if (name === "pattern") {
           if (!value) throw new ValidationError(`${at}: @pattern needs a regular expression.`);
+          if (value.length > MAX_PATTERN_CHARS) {
+            throw new ValidationError(`${at}: @pattern is longer than ${MAX_PATTERN_CHARS} characters.`);
+          }
           try {
             pending.pattern = new RegExp(value);
           } catch (e) {
@@ -253,8 +276,12 @@ function check(rule: Rule, value: string): string | null {
     }
   }
 
-  if (rule.pattern && !rule.pattern.test(value)) {
-    return `does not match /${rule.pattern.source}/ (${held})`;
+  if (rule.pattern) {
+    const matched = testWithin(rule.pattern, value);
+    if (matched === "timeout") {
+      return `could not be checked: /${rule.pattern.source.slice(0, 60)}/ took over ${PATTERN_TIMEOUT_MS}ms, so it is too slow to run against a value`;
+    }
+    if (!matched) return `does not match /${rule.pattern.source}/ (${held})`;
   }
   return null;
 }

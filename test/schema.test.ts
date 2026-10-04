@@ -176,3 +176,17 @@ describe("unsensitive", () => {
     assert.deepEqual(unsensitive(rules), ["APP_ENV", "LOG_LEVEL"]);
   });
 });
+
+test("a slow @pattern from the repository is stopped, not run for ever against the value (review F31)", () => {
+  // Nested quantifiers backtrack exponentially against a long run that ends
+  // in a character the pattern cannot take — the shape of most real tokens.
+  const rules = parseSchema("# @pattern=\"^([A-Za-z0-9]+)+$\"\nTOKEN=\n");
+  const started = Date.now();
+  const problems = validate({ TOKEN: "a".repeat(40) + "!" }, rules);
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started}ms`);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].why, /too slow/);
+  // An ordinary pattern still answers normally.
+  assert.equal(validate({ TOKEN: "abc" }, rules).length, 0);
+  assert.throws(() => parseSchema(`# @pattern=${"a".repeat(600)}\nX=\n`), /longer than 500/);
+});

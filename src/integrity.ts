@@ -477,6 +477,15 @@ export function acceptPending(view: TrustView, shown: Pending): void {
       "This vault's signature does not hold, so there is nothing trustworthy to accept. Restore it (hush team reject shows how).",
     );
   }
+  // A different data key behind a generation already seen is the one change no
+  // hush command makes, so there is nothing a person could be agreeing to.
+  // Accepting it used to overwrite the pinned commitment — the only evidence.
+  if (now.keyChanged) {
+    throw new Error(
+      `The data key behind generation ${now.keyChanged.generation} is not the one this machine saw, which no hush command does. ` +
+        "It cannot be accepted. Restore the vault (hush team reject shows how).",
+    );
+  }
   recordTrusted(view, { noticed: true });
   // An admin nobody here had seen is trusted from now on: that is what was accepted.
   if (now.unknownSigner) {
@@ -551,7 +560,7 @@ export function describeTrustProblems(p: Pending): string[] {
   }
   // A signature that does not hold is not something to accept: nobody can
   // vouch for the forged part, whoever you ask. Restoring is the only way out.
-  if (p.unsigned || p.commitMismatch || p.downgraded) {
+  if (p.unsigned || p.commitMismatch || p.downgraded || p.keyChanged) {
     lines.push("  This cannot be accepted. Restore the vault from before it changed:  hush team reject   (shows how)");
   } else {
     lines.push("  If you expected this:  hush team accept", "  If you did not:        hush team reject   (how to undo it)");

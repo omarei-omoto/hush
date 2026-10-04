@@ -106,3 +106,30 @@ test("a member fingerprint named after an Object property is refused when the va
   }
 });
 
+
+test("folder patterns and exposure lists from a vault file meet the rules hush writes them by (review F26)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hush-shape-"));
+  try {
+    const id = generateIdentity();
+    const path = join(dir, "vault.json");
+    const v = Vault.create(path, "t", { name: "me", pub: id.pub });
+    v.set(id, "default", "K", "a-long-enough-value");
+    v.save();
+    const good = JSON.parse(readFileSync(path, "utf8"));
+    const withMeta = (onlyIn: unknown) => ({ ...good, meta: { default: { onlyIn } } });
+    for (const [label, data] of [
+      ["an over-long pattern", withMeta(["/" + "**a".repeat(200) + "b"])],
+      ["a relative pattern", withMeta(["code/*"])],
+      ["a pattern that is not a string", withMeta([{}])],
+      ["onlyIn that is not a list", withMeta("/x")],
+      ["an exposure list of objects", { ...good, envs: { default: { K: { ...good.envs.default.K, exposed: [{ toString: 1 }] } } } }],
+    ] as const) {
+      writeFileSync(path, JSON.stringify(data));
+      assert.throws(() => Vault.open(path), /malformed/, label);
+    }
+    writeFileSync(path, JSON.stringify(withMeta(["~/code/*"])));
+    assert.doesNotThrow(() => Vault.open(path), "an ordinary pattern was refused");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

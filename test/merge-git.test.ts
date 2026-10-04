@@ -175,4 +175,22 @@ describe("F-1: through git", { skip: !hasGit && "git is not installed" }, () => 
     rmSync(dir, { recursive: true, force: true });
     r.cleanup();
   });
+
+  test("set and key names from the merged files reach the terminal scrubbed (review F25)", () => {
+    const r = repo();
+    const good = JSON.parse(readFileSync(r.path, "utf8"));
+    const evil = "\u001b[2Jprod";
+    const sides = [good.envs.default.KEEP, good.envs.default.KEY_C, { ...good.envs.default.KEEP, updatedAt: "2000-01-01T00:00:00.000Z" }];
+    const dir = mkdtempSync(join(tmpdir(), "hush-mg-esc-"));
+    const files = ["base", "ours", "theirs"].map((n, i) => {
+      const f = join(dir, n);
+      writeFileSync(f, JSON.stringify({ ...good, envs: { ...good.envs, [evil]: { K: sides[i] } } }));
+      return f;
+    });
+    const merged = r.hush("merge-driver", ...files, ".hush/vault.json");
+    assert.ok(!merged.out.includes("\u001b"), `a raw escape reached the terminal: ${JSON.stringify(merged.out)}`);
+    rmSync(dir, { recursive: true, force: true });
+    r.cleanup();
+  });
 });
+

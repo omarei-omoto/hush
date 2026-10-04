@@ -543,7 +543,9 @@ export function requestSummary(input: RequestInput, secrets: Record<string, stri
   const target = (() => {
     try {
       const u = new URL(input.url);
-      return `${u.host}${u.pathname}`;
+      // The scheme too: http and https read the same without it, and the
+      // difference is whether the credential crosses the network in the clear.
+      return `${u.protocol}//${u.host}${u.pathname}`;
     } catch {
       return input.url;
     }

@@ -15,7 +15,7 @@
  *   hush relay serve                         (laptop, localhost:8787)
  *   ssh -R 8787:localhost:8787 server        then pair with --relay http://localhost:8787
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { requestApproval } from "../approval.ts";
 import { hushHome } from "../identity.ts";
 import { encodeSpk } from "../crypto.ts";
@@ -30,6 +30,20 @@ import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, info, red, shown, yellow } from "../cli/output.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * What an "Allow for a while" on this device covers: the paired device that
+ * asked, and exactly what the person was shown. Not the request's id — that
+ * is the requester's to choose, and keying the grant on it let a reused id
+ * carry a different action through an earlier allow, with no dialog.
+ */
+export function relayGrantScope(
+  peer: { spk: string },
+  r: { action: string; summary: string; detail: string[]; host: string; id?: string },
+): string {
+  const shownToThePerson = JSON.stringify([r.action, r.summary, r.detail, r.host]);
+  return `relay:${peer.spk}:${createHash("sha256").update(shownToThePerson).digest("hex")}`;
+}
 
 export async function cmdApprovals(a: Args): Promise<void> {
   const sub = a._[0];
@@ -192,7 +206,7 @@ async function listen(a: Args): Promise<void> {
           action: r.action,
           summary: `${shown(peer.name, 40)}: ${r.summary}`,
           detail: [...r.detail, `from ${shown(r.host, 40)} through the relay`],
-          scope: `relay:${r.id}`,
+          scope: relayGrantScope(peer, r),
           ttlSeconds: r.ttlSeconds ?? 60,
           sessionGrant: r.ttlSeconds !== null,
           code: r.code,

@@ -116,7 +116,7 @@ export async function cmdTeam(a: Args): Promise<void> {
     }
     // Everything but the closing advice, which is this command.
     const lines = describeTrustProblems(pending);
-    const advice = pending.unsigned || pending.commitMismatch || pending.downgraded ? 1 : 2;
+    const advice = pending.unsigned || pending.commitMismatch || pending.downgraded || pending.keyChanged ? 1 : 2;
     for (const line of lines.slice(0, -advice)) info(line);
     const provenance = lastVaultCommit(vault.path);
     if (provenance) info(dim(`  last change to the vault file: ${provenance}`));

@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # beta too, while it is the branch releases are cut from (RELEASING.md).
+    branches: [main, beta]
   pull_request:
 
 # A read-only token is all this needs.

@@ -22,7 +22,26 @@ import { render, inline } from "./markdown.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = "https://github.com/omarei-omoto/hush";
-const SITE = "https://omarei-omoto.github.io/hush/";
+/**
+ * Where the site lives, for canonical links and, on a custom domain, the
+ * CNAME file GitHub Pages reads. `--site <url>` overrides it.
+ */
+const argValue = (flag) => {
+  const i = process.argv.indexOf(flag);
+  return i === -1 ? undefined : process.argv[i + 1];
+};
+const SITE = (argValue("--site") ?? "https://tryhush.dev/").replace(/\/?$/, "/");
+/**
+ * The branch the pages are read from, so "edit this page" opens a page that
+ * exists: the beta branch has pages main does not have yet.
+ */
+const BRANCH = argValue("--branch") ?? process.env.GITHUB_REF_NAME ?? (() => {
+  try {
+    return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" }).trim() || "main";
+  } catch {
+    return "main";
+  }
+})();
 const ROOT_PAGES = ["README.md", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", "RELEASING.md", "RESEARCH.md", "CODE_OF_CONDUCT.md"];
 
 /** The Markdown files that become pages: what git would commit, under docs/, plus the root documents. */
@@ -107,7 +126,7 @@ export function buildSite(out, dir = root) {
       )
       .join("\n");
     const title = src === "README.md" ? "hush — secrets your AI agent can use but never read" : `${titleOf(md, src)} · hush`;
-    const html = page({ title, body, nav: navHtml, up, edit: `${REPO}/blob/main/${src}`, canonical: SITE + outFile.replace(/index\.html$/, ""), logo, icon });
+    const html = page({ title, body, nav: navHtml, up, edit: `${REPO}/blob/${BRANCH}/${src}`, canonical: SITE + outFile.replace(/index\.html$/, ""), logo, icon });
     mkdirSync(join(out, posix.dirname(outFile)), { recursive: true });
     writeFileSync(join(out, outFile), html);
     written.push(outFile);
@@ -184,5 +203,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const i = process.argv.indexOf("--out");
   const out = i === -1 ? join(root, "site") : process.argv[i + 1];
   const written = buildSite(out);
-  process.stdout.write(`${written.length} pages → ${out}\n`);
+  // A custom domain needs a CNAME file at the root of what GitHub Pages serves.
+  const host = new URL(SITE).host;
+  if (!host.endsWith(".github.io")) writeFileSync(join(out, "CNAME"), host + "\n");
+  process.stdout.write(`${written.length} pages → ${out} (${SITE}, edit links on ${BRANCH})\n`);
 }

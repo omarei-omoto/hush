@@ -104,7 +104,20 @@ hush start
 
 That is the whole thing. It looks for your keys, gets them in, asks whether an
 AI assistant will be near them, and offers to run your project. A few questions,
-nothing you have to know already.
+nothing you have to know already. Run it again any time: it picks up whatever
+is left, and `hush setup` shows where you are.
+
+**Or let your coding agent set it up.** Paste this into Claude Code, Codex or
+Cursor:
+
+> Set up hush in this project. Run `hush setup --json` and follow it: run each
+> step's command as written, ask me in the chat for anything marked "choice",
+> and for anything marked "person", run it and wait for me. Never open a `.env`
+> file or ask me for a key in the chat.
+
+Anything that needs you, such as a new key or deleting a `.env`, asks you on
+your own screen, not in the chat. More in
+[Setting up](docs/guide/setting-up.md).
 
 Prefer to see every step yourself? The same thing, by hand:
 
@@ -124,6 +137,16 @@ hush dev                     # or: find package.json and run its dev script
 
 Secrets exist in that process's environment and nowhere else. Not on disk, not
 in your shell, not in your scrollback.
+
+Then a quick checkup of what is already out there:
+
+```bash
+hush scan --agents           # plaintext keys in your agents' config files; --fix moves them into hush
+hush scan --transcripts      # your keys in agents' saved conversations (read-only)
+```
+
+Agents on other machines (a server, a devcontainer) can use keys that stay
+on yours: [hush on a tailnet](docs/TAILNET.md) (beta).
 
 ## Why this exists
 
@@ -158,7 +181,7 @@ will not get you there and does not pretend to. Full comparison in
 ## Documentation
 
 Everything else is in the guide — on GitHub under [docs/guide](docs/guide/), or
-as a site at **[omarei-omoto.github.io/hush](https://omarei-omoto.github.io/hush/)**.
+as a site at **[tryhush.dev](https://tryhush.dev/)**.
 
 - **Using it** — [Sets](docs/guide/sets.md) · [Coming from another tool](docs/guide/coming-from-another-tool.md) · [Several keys for one service](docs/guide/several-keys-for-one-service.md) · [Running things](docs/guide/running-things.md) · [Credentials that are a file](docs/guide/credentials-that-are-a-file.md) · [The app](docs/guide/the-app.md) · [The shell hook (including Nushell)](docs/guide/the-shell-hook.md)
 - **Checking config** — [What a value should look like](docs/guide/what-a-value-should-look-like.md) · [Finding what a codebase needs](docs/guide/finding-what-a-codebase-needs.md)

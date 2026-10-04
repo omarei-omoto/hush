@@ -69,6 +69,28 @@ ad-hoc signed, and Homebrew users are one manual formula copy behind.
 - **Bun.** The version that builds the binaries is `.bun-version`. Bumping it is
   a normal change: CI builds twice and runs the whole suite against the result.
 
+## The docs site at tryhush.dev, once
+
+The site is built by `.github/workflows/docs.yml` and served by GitHub Pages
+under the custom domain `tryhush.dev` (the build writes the `CNAME` file).
+
+1. **Verify the domain with GitHub first**, so nobody else's Pages site can
+   claim it: GitHub → your Settings → Pages → Add a domain → `tryhush.dev`,
+   then add the `TXT` record it shows in Cloudflare.
+2. **DNS in Cloudflare** (DNS → Records), all *DNS only* (grey cloud) until
+   GitHub has issued the certificate:
+   - `A` `@` → `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, `185.199.111.153`
+   - `AAAA` `@` → `2606:50c0:8000::153`, `2606:50c0:8001::153`, `2606:50c0:8002::153`, `2606:50c0:8003::153`
+   - `CNAME` `www` → `omarei-omoto.github.io`
+3. **The repository**: Settings → Pages → Custom domain `tryhush.dev`, then
+   tick *Enforce HTTPS* once the certificate is issued (it can take a while).
+4. If Pages only allows deploys from the default branch, add `beta` under
+   Settings → Environments → github-pages → Deployment branches, until beta is
+   merged into main.
+
+If you later switch the Cloudflare records to *Proxied*, set SSL/TLS to
+*Full (strict)* so Cloudflare checks GitHub's certificate.
+
 ## Checking a release
 
 - A binary: `gh attestation verify hush-linux-x64 --repo omarei-omoto/hush`

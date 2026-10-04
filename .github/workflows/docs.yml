@@ -1,11 +1,13 @@
 name: Docs
 
-# The docs site (scripts/build-docs.mjs) on GitHub Pages, rebuilt whenever the
-# README, the guide or the docs change on main. One-time setup: Settings →
-# Pages → Source: "GitHub Actions".
+# The docs site (scripts/build-docs.mjs) on GitHub Pages at tryhush.dev, rebuilt
+# whenever the README, the guide or the docs change. Built from beta while beta
+# is where the current docs are; main deploys too, so merging beta changes
+# nothing. One-time setup: Settings → Pages → Source: "GitHub Actions", and
+# Custom domain: tryhush.dev (the DNS records are in RELEASING.md).
 on:
   push:
-    branches: [main]
+    branches: [main, beta]
     paths:
       - "README.md"
       - "SECURITY.md"
@@ -42,7 +44,7 @@ jobs:
       - name: the command reference is current
         run: node scripts/gen-commands.mjs --check
       - name: build
-        run: node scripts/build-docs.mjs --out site
+        run: node scripts/build-docs.mjs --out site --site https://tryhush.dev/
       - name: every link on the site resolves
         run: node --test --test-name-pattern "the real site" test/docs-site.test.ts
       - uses: actions/upload-pages-artifact@v3

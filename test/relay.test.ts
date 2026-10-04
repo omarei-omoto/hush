@@ -287,6 +287,31 @@ describe("requestApproval through the relay", () => {
     }
   });
 
+  test("an environment switch can only make hush refuse; it never sends the request to the relay instead (review F13)", async () => {
+    const p = pairedPair();
+    const a = approverAnswering(p, () => ({ decision: "once", via: "dialog" }));
+    process.env.HUSH_HOME = p.requesterHome;
+    const saved = { dialog: process.env.HUSH_NO_DIALOG, bio: process.env.HUSH_BIOMETRY };
+    try {
+      process.env.HUSH_NO_DIALOG = "1";
+      const noDialog = await requestApproval(p.requesterHome, req(), headless);
+      assert.equal(noDialog.decision, "deny", "HUSH_NO_DIALOG routed the request to a paired approver");
+      delete process.env.HUSH_NO_DIALOG;
+      process.env.HUSH_BIOMETRY = "off";
+      const noBio = await requestApproval(p.requesterHome, req({ biometry: "required" }), headless);
+      assert.equal(noBio.decision, "deny", "HUSH_BIOMETRY=off routed a fingerprint-required request to a paired approver");
+      assert.deepEqual(a.seen, [], "the approver was asked");
+    } finally {
+      for (const [k, v] of [["HUSH_NO_DIALOG", saved.dialog], ["HUSH_BIOMETRY", saved.bio]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      process.env.HUSH_HOME = savedHome;
+      await a.stop();
+      p.cleanup();
+    }
+  });
+
   test("Deny on the laptop is a deny here; Allow for a while is remembered here", async () => {
     const p = pairedPair();
     let next: "deny" | "session" = "deny";

@@ -233,6 +233,15 @@ export async function requestApproval(
 
   const timeoutMs = req.timeoutMs ?? 120_000;
   const mode: BiometryMode = req.biometry ?? "off";
+  // The two switches the environment has, HUSH_NO_DIALOG and HUSH_BIOMETRY=off,
+  // may only ever make hush refuse. They used to also *select* the relay: with
+  // the local prompt switched off, a request went to whichever approver was
+  // paired, so the gated process could set a variable on the hush it spawned
+  // and have its request answered somewhere other than this screen. The relay
+  // stays the answer for a machine that really has no prompt, not one told to
+  // pretend it has none.
+  const promptSwitchedOff = process.env.HUSH_NO_DIALOG === "1";
+  const biometrySwitchedOff = process.env.HUSH_BIOMETRY === "off";
 
   // A broker request from someone with their own paired device: ask them there.
   if (req.approverFor && !req.noRelay && approversFor(req.approverFor).some((p) => p.for?.includes(req.approverFor!))) {
@@ -255,7 +264,7 @@ export async function requestApproval(
     }
     if (mode === "required") {
       // No fingerprint here; a paired approver's fingerprint will do.
-      if (!req.noRelay && approversFor(req.approverFor).length) return viaRelay(hushDir, req, code, timeoutMs, true);
+      if (!req.noRelay && !biometrySwitchedOff && approversFor(req.approverFor).length) return viaRelay(hushDir, req, code, timeoutMs, true);
       return {
         decision: "deny",
         code,
@@ -268,7 +277,9 @@ export async function requestApproval(
   }
 
   const backend = currentBackend(deps);
-  if (!backend && !req.noRelay && approversFor(req.approverFor).length) return viaRelay(hushDir, req, code, timeoutMs, false);
+  if (!backend && !req.noRelay && !promptSwitchedOff && approversFor(req.approverFor).length) {
+    return viaRelay(hushDir, req, code, timeoutMs, false);
+  }
   if (!backend) {
     // Nothing can put this request in front of a human: no dialog program, and
     // no fingerprint helper was available a moment ago. The old fallback wrote

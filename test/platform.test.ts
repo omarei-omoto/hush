@@ -117,3 +117,34 @@ describe("F-7: the PowerShell shell hook", () => {
     assert.doesNotMatch(r.stdout, /Invoke-Expression|iex /i);
   });
 });
+
+test("the Windows folder is never one the environment points at (review F33, F15)", async () => {
+  const { windowsRoot, powershellPath } = await import("../src/platform.ts");
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const yes = () => true;
+  const no = () => false;
+  // Where C:\Windows exists, it is the answer whatever the variable says.
+  assert.equal(windowsRoot({ SystemRoot: "C:\\Users\\me\\evil" }, yes), "C:\\Windows");
+  assert.equal(windowsRoot({ SystemRoot: "D:\\Windows" }, yes), "C:\\Windows");
+  // Without one, only a "<drive>:\Windows" claim is believed.
+  assert.equal(windowsRoot({ SystemRoot: "D:\\Windows" }, no), "D:\\Windows");
+  assert.equal(windowsRoot({ SystemRoot: "D:\\Users\\me\\Windows" }, no), "C:\\Windows");
+  assert.equal(windowsRoot({ SystemRoot: "\\\\server\\share\\Windows" }, no), "C:\\Windows");
+  assert.equal(windowsRoot({}, no), "C:\\Windows");
+
+  // End to end: a planted powershell.exe under a SystemRoot the caller chose is never returned.
+  const dir = mkdtempSync(join(tmpdir(), "hush-sysroot-"));
+  const saved = process.env.SystemRoot;
+  try {
+    mkdirSync(join(dir, "System32", "WindowsPowerShell", "v1.0"), { recursive: true });
+    writeFileSync(join(dir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "planted");
+    process.env.SystemRoot = dir;
+    assert.ok(!(powershellPath() ?? "").startsWith(dir), "the planted powershell.exe was chosen");
+  } finally {
+    if (saved === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

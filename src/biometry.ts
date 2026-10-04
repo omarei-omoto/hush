@@ -25,13 +25,13 @@
 import { execFile, execFileSync } from "node:child_process";
 import { platform } from "node:os";
 import { asset } from "./assets.ts";
-import { buildSwiftHelper } from "./swift.ts";
+import { buildSwiftHelper, helperUnchanged } from "./swift.ts";
 
 export type BiometryMode = "off" | "preferred" | "required";
 export type BiometryResult = "ok" | "denied" | "unavailable";
 
 /** Per-process cache: one compile per platform, however many times we ask. */
-let compiled: { plat: string; result: { ok: boolean; reason?: string; path?: string } } | null = null;
+let compiled: { plat: string; result: { ok: boolean; reason?: string; path?: string; sha256?: string } } | null = null;
 
 /** Test seam: forget the compile done by this process. Real callers never need it. */
 export function resetBiometryCache(): void {
@@ -55,7 +55,13 @@ export function ensureHelper(plat: string = platform()): { ok: boolean; reason?:
   // Escape hatch for headless machines, CI, and tests.
   if (process.env.HUSH_BIOMETRY === "off") return { ok: false, reason: OFF_REASON };
   if (plat !== "darwin") return { ok: false, reason: "biometry gating is macOS-only for now" };
-  if (compiled?.plat === plat) return compiled.result;
+  if (compiled?.plat === plat) {
+    if (!compiled.result.ok || helperUnchanged(compiled.result)) return compiled.result;
+    // Replaced since this process built it. Nothing that file says is
+    // believed: this approval fails, and the next one builds afresh.
+    compiled = null;
+    return { ok: false, reason: "the Touch ID helper changed on disk after hush built it" };
+  }
 
   const source = asset("touchid");
   if (!source) return { ok: false, reason: "the Touch ID helper's source is missing from this copy of hush" };

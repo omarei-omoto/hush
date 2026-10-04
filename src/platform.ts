@@ -18,10 +18,35 @@ import { join } from "node:path";
 
 export const isWindows = (platform: string = process.platform): boolean => platform === "win32";
 
-/** A program under %SystemRoot%\System32, if it is there as a regular file. */
+/**
+ * The Windows folder, decided without trusting the environment's say-so.
+ *
+ * %SystemRoot% is an environment variable, and the environment belongs to
+ * whoever started this process — the gated agent included. Taken as given, it
+ * chose which powershell.exe received the private identity key on its way
+ * into DPAPI, and which program drew the approval dialog. So C:\Windows is
+ * the answer wherever it exists, and the variable is consulted only on a
+ * machine without one — Windows installed on another drive — and even then
+ * only when it names `<drive>:\Windows`, never a folder of the caller's.
+ */
+export function windowsRoot(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = isDirectory): string {
+  const standard = "C:\\Windows";
+  if (exists(standard)) return standard;
+  const claimed = env.SystemRoot || env.SYSTEMROOT;
+  return claimed && /^[A-Za-z]:\\Windows$/i.test(claimed) ? claimed : standard;
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** A program under the Windows folder's System32, if it is there as a regular file. */
 export function system32(...parts: string[]): string | null {
-  const root = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
-  const path = join(root, "System32", ...parts);
+  const path = join(windowsRoot(), "System32", ...parts);
   try {
     return statSync(path).isFile() ? path : null;
   } catch {

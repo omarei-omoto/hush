@@ -18,7 +18,8 @@
  *     made, compiled there, and the directory is removed when the process ends.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -44,8 +45,25 @@ export function compilerEnv(): NodeJS.ProcessEnv {
   };
 }
 
+const sha256Of = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+/**
+ * Is the helper at `path` still the one this process built? The folder is
+ * private to the user, not to this process: anything running as the user can
+ * write there, so a long-lived hush (the MCP server, `hush ui`) re-checks the
+ * bytes before each run instead of trusting a path it built an hour ago.
+ */
+export function helperUnchanged(built: { path?: string; sha256?: string }): boolean {
+  if (!built.path || !built.sha256) return false;
+  try {
+    return statSync(built.path).isFile() && sha256Of(built.path) === built.sha256;
+  } catch {
+    return false;
+  }
+}
+
 /** Compile `source` into a private, process-lifetime binary called `name`. */
-export function buildSwiftHelper(name: string, source: string): { ok: boolean; path?: string; reason?: string } {
+export function buildSwiftHelper(name: string, source: string): { ok: boolean; path?: string; sha256?: string; reason?: string } {
   const swiftc = trustedSwiftc();
   if (!swiftc) {
     return { ok: false, reason: "swiftc not found at /usr/bin — install Xcode Command Line Tools (xcode-select --install)" };
@@ -64,7 +82,7 @@ export function buildSwiftHelper(name: string, source: string): { ok: boolean; p
     process.once("exit", () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     });
-    return { ok: true, path: bin };
+    return { ok: true, path: bin, sha256: sha256Of(bin) };
   } catch (e) {
     return { ok: false, reason: `could not compile the ${name} helper: ${(e as Error).message.split("\n")[0]}` };
   }

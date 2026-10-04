@@ -324,3 +324,32 @@ describe("F-1: refusals", () => {
     assert.ok(!JSON.stringify(r.conflicts).includes("says"));
   });
 });
+
+test("a member removed on one branch is not handed the new key because the other branch has them too (review F27)", () => {
+  // The base has no mallory; each branch got the addition separately (a
+  // cherry-pick), and then this branch removed her again.
+  const base = baseVault().data;
+  const mallory = generateIdentity();
+  const dir = mkdtempSync(join(tmpdir(), "hush-merge-f27-"));
+  try {
+    const side = (name: string, edit: (v: Vault) => void): VaultFile => {
+      const path = join(dir, `${name}.json`);
+      const v = Vault.fromData(path, JSON.parse(JSON.stringify(base)));
+      edit(v);
+      v.save();
+      return JSON.parse(readFileSync(path, "utf8")) as VaultFile;
+    };
+    const ours = side("ours", (v) => {
+      v.addRecipient(owner, "mallory", encodePub(mallory.pub));
+      v.removeRecipient(owner, "mallory");
+    });
+    const theirs = side("theirs", (v) => v.addRecipient(owner, "mallory", encodePub(mallory.pub)));
+    for (const [a, b] of [[ours, theirs], [theirs, ours]]) {
+      const r = mergeVaults(base, a, b, owner);
+      assert.ok(r.structural, `mallory got the new key back: ${JSON.stringify(r.rewrapped)}`);
+      assert.match(r.structural!, /mallory was removed on one branch/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

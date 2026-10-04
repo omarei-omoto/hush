@@ -10,10 +10,15 @@
  */
 import { type Args, bool, list, str } from "../cli/args.ts";
 import { bold, die, dim, green, info } from "../cli/output.ts";
-import { requireIdentity } from "../identity.ts";
+import { hushHome, requireIdentity } from "../identity.ts";
 import { encodePub, fingerprint } from "../crypto.ts";
 import { openLease, type SealedLease } from "../lease.ts";
 import { runWithSecrets } from "../run.ts";
+import { checkCommand, checkScopes, runScope } from "../policy.ts";
+import { requestApproval } from "../approval.ts";
+import { audit } from "../audit.ts";
+import { locateProject } from "../vault-files.ts";
+import { dieOnApproval, policyFor } from "../cli/context.ts";
 
 /** `https://box.t.ts.net:8788`, from that or the MCP URL the broker printed. */
 export function brokerBase(input: string): string {
@@ -72,9 +77,39 @@ export async function leaseRun(a: Args, argv: string[]): Promise<void> {
   const base = brokerBase(str(a, "from")!);
   const key = leaseKey();
   const [command, ...args] = argv;
+  const requested = list(a, "use");
+  const unmasked = bool(a, "no-redact");
+
+  // This machine's own policy decides what it will ask a broker for, the same
+  // checks `hush run` makes here — a floor that refuses a command refuses it
+  // whichever machine the key comes from. The broker then applies its own.
+  // Skipping them made --from the way around every local gate.
+  const project = locateProject();
+  const policy = policyFor(project?.hushDir ?? hushHome());
+  if (policy) {
+    checkCommand({ ...policy, denyCommands: [] }, command);
+    if (requested.length) checkScopes(policy, requested);
+    if (policy.requireApproval.includes("run") || (unmasked && policy.requireApproval.includes("reveal"))) {
+      const ap = await requestApproval(project?.hushDir ?? hushHome(), {
+        action: unmasked ? "reveal" : "run",
+        summary: `${unmasked ? "Run, output NOT masked" : "Run"} with keys from ${base}:  ${argv.join(" ")}`.trim(),
+        detail: [
+          ...(unmasked ? ["Unmasked:  --no-redact — anything this command prints, leased values included, is shown as is"] : []),
+          `Asks for:  ${requested.join(", ") || "the sets the broker offers"}`,
+          `Directory:  ${process.cwd()}`,
+        ],
+        scope: `${unmasked ? "unmasked:" : ""}lease:${base}:${runScope(policy, command, requested)}`,
+        ttlSeconds: policy.approvalTtlSeconds,
+        timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+        biometry: policy.biometry,
+        sessionGrant: false,
+      });
+      dieOnApproval(ap, `running "${command}" with a lease`);
+    }
+  }
   if (!bool(a, "quiet")) process.stderr.write(dim(`hush: asking ${base} for a lease (it may ask the broker's owner first)…\n`));
 
-  const r = await post(`${base}/lease`, { pub: key.pub, sets: list(a, "use"), command, args, cwd: process.cwd() });
+  const r = await post(`${base}/lease`, { pub: key.pub, sets: requested, command, args, cwd: process.cwd() });
   if (r.status !== 200) {
     if (r.json.enroll) die("This machine is not enrolled with that broker.", `Enroll it once:  hush lease enroll ${base}`);
     die(`No lease: ${String(r.json.error ?? `the broker answered ${r.status}`)}`);
@@ -86,12 +121,15 @@ export async function leaseRun(a: Args, argv: string[]): Promise<void> {
   } catch (e) {
     die(`Refused the lease: ${(e as Error).message}`);
   }
+  // The sets that came back, against this machine's policy too.
+  if (policy) checkScopes(policy, payload.sets);
+  if (project) audit(project.hushDir, { actor: "cli", action: "lease.run", from: base, command, sets: payload.sets, ...(unmasked ? { unmasked: true } : {}) });
   if (!bool(a, "quiet")) process.stderr.write(dim(`hush: leased ${payload.sets.join(", ")} from ${base}\n`));
 
   const result = await runWithSecrets(command, args, {
     cwd: process.cwd(),
     secrets: payload.secrets,
-    redact: !bool(a, "no-redact"),
+    redact: !unmasked,
     capture: false,
   }).catch((e) => die(`could not run "${command}": ${(e as Error).message}`));
   // Not process.exit(): it can drop buffered output when stdout is a pipe.

@@ -13,6 +13,7 @@ import { type Args, bool, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, indent, info, warn } from "../cli/output.ts";
 import { askLine } from "../cli/prompts.ts";
 import { ctxLoose, describePolicyEffect, ensureFloorSaying } from "../cli/context.ts";
+import { writeRepoFile } from "../vault-files.ts";
 
 /**
  * The entry an agent's config gets. A bare `hush mcp` whenever the `hush` on
@@ -111,7 +112,7 @@ export async function cmdInstallMcp(a: Args): Promise<void> {
     // A folder with no `.hush/` yet is exactly the case this command is for,
     // and this used to die with ENOENT before writing anything.
     mkdirSync(dirname(policyPath), { recursive: true });
-    writeFileSync(policyPath, JSON.stringify(template, null, 2) + "\n");
+    writeRepoFile(policyPath, JSON.stringify(template, null, 2) + "\n");
     info(`${green("✓")} wrote ${cyan(".hush/policy.json")} ${dim("(what the agent may run)")}`);
     describePolicyEffect();
   } else if (writePolicy) {

@@ -8,9 +8,10 @@
  * vault.ts, is what reads and writes one.
  */
 import {
-  existsSync, readFileSync, openSync, writeSync, closeSync, unlinkSync, statSync, realpathSync, fsyncSync, renameSync,
+  existsSync, readFileSync, openSync, writeSync, closeSync, unlinkSync, statSync, realpathSync, fsyncSync, renameSync, lstatSync, linkSync,
 } from "node:fs";
 import { dirname, join, resolve, isAbsolute, sep } from "node:path";
+import { hostname } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import {
   decodePub,
@@ -657,14 +658,20 @@ export const hashOf = (s: string | Buffer): string =>
   createHash("sha256").update(s).digest("hex");
 
 /**
- * Hold an exclusive lock for the duration of a read-modify-write.
- *
- * Without this, two `hush set` commands each read the vault, each add their own
- * key, and the second write silently discards the first. Running eight at once
- * left one survivor.
+ * Write a file hush keeps in a repository (`.hush/policy.json` and friends)
+ * — refusing when the path is anything but a regular file or nothing at all.
+ * A repository can commit a symlink there (git stores them), and an ordinary
+ * write follows it: one `hush secure` would then rewrite whatever it points
+ * at, the user's own `~/.hush/policy.json` floor included. A dangling link
+ * counts too: `existsSync` says false for it, and the write creates its target.
  */
-/** A lock untouched for this long is assumed to belong to a dead process. */
-const STALE_LOCK_MS = 30_000;
+export function writeRepoFile(path: string, body: string): void {
+  const st = lstatSync(path, { throwIfNoEntry: false });
+  if (st && !st.isFile()) {
+    throw new ValidationError(`${path} is not a regular file — it is a link or a device. Remove it and try again.`);
+  }
+  writeFileAtomic(path, body, st ? st.mode & 0o777 : 0o644);
+}
 
 /**
  * Replace `path` with `body` so that a reader sees the old file or the new
@@ -696,9 +703,74 @@ export function writeFileAtomic(path: string, body: string, mode = 0o600): void 
 /** Tunable for CI and for tests that need to observe the wait, not sit through it. */
 const lockTimeoutMs = (): number => Number(process.env.HUSH_LOCK_TIMEOUT_MS) || 15_000;
 
+/**
+ * A lock whose owner cannot be asked (another machine, or one not yet
+ * written) is assumed abandoned after this long untouched.
+ */
+const STALE_LOCK_MS = 30_000;
+/**
+ * However alive its owner looks, a lock this old is taken: a process id can be
+ * reused, and no honest save holds the vault for ten minutes.
+ */
+const ABANDONED_LOCK_MS = 10 * 60_000;
+
+/** Is the process that wrote this lock gone? Judged by asking it, where that is possible. */
+function lockAbandoned(lockPath: string, st: { mtimeMs: number }): boolean {
+  const age = Date.now() - st.mtimeMs;
+  if (age > ABANDONED_LOCK_MS) return true;
+  let owner: { pid?: unknown; host?: unknown } | null = null;
+  try {
+    owner = JSON.parse(readFileSync(lockPath, "utf8"));
+  } catch {
+    // Not written yet (open "wx" creates it empty, fills it a moment later), or
+    // an older hush's: only the clock can say.
+  }
+  if (owner && typeof owner.pid === "number" && owner.host === hostname()) {
+    try {
+      process.kill(owner.pid, 0);
+      return false; // alive — however long it takes, a touch prompt included
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  }
+  return age > STALE_LOCK_MS;
+}
+
+/**
+ * Take `lockPath` out of the way only if it is still the file `expect` says.
+ * Moved aside first (a rename is atomic, so one process wins), then checked;
+ * a different file — someone's live lock that replaced it in between — goes
+ * straight back. Unlinking by name could delete that live lock instead.
+ */
+function removeLockIf(lockPath: string, expect: (moved: string) => boolean): void {
+  const aside = `${lockPath}.${process.pid}.${randomBytes(4).toString("hex")}.gone`;
+  try {
+    renameSync(lockPath, aside);
+  } catch {
+    return; // already gone
+  }
+  try {
+    if (!expect(aside)) linkSync(aside, lockPath);
+  } catch { /* someone holds the name already; theirs stands */ }
+  try { unlinkSync(aside); } catch { /* best effort */ }
+}
+
+/**
+ * Hold an exclusive lock for the duration of a read-modify-write.
+ *
+ * Without this, two `hush set` commands each read the vault, each add their own
+ * key, and the second write silently discards the first. Running eight at once
+ * left one survivor.
+ *
+ * The lock names its owner (process, machine and a token), because "untouched
+ * for 30 seconds" is not "dead": a save that waits on a hardware-key touch
+ * holds it longer, and a synchronous save cannot refresh it meanwhile. A
+ * second process took it, both wrote, one write was lost.
+ */
 export function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = lockTimeoutMs()): T {
   const lockPath = `${vaultPath}.lock`;
   const deadline = Date.now() + timeoutMs;
+  const token = JSON.stringify({ pid: process.pid, host: hostname(), id: randomBytes(8).toString("hex") });
   let fd: number | undefined;
 
   for (;;) {
@@ -707,27 +779,15 @@ export function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = loc
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-
-      // A process that died mid-write would otherwise wedge the vault forever,
-      // so a lock that has not been touched for a while is reclaimable.
-      //
-      // Staleness is judged by mtime, never by the file's contents. open(…,"wx")
-      // creates the file EMPTY and fills it a moment later; a reader landing in
-      // that window sees "", fails to parse it, and — on the old "unreadable
-      // means stale" rule — deleted a lock that was very much alive. Two writers
-      // then held it at once and one's write was silently lost, while still
-      // reporting success.
-      let age: number;
+      let st: { mtimeMs: number; ino: number };
       try {
-        age = Date.now() - statSync(lockPath).mtimeMs;
+        st = statSync(lockPath);
       } catch {
         continue; // the lock vanished; race for it again
       }
-      if (age > STALE_LOCK_MS) {
-        try {
-          // Only reclaim if nobody refreshed it since we looked.
-          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) unlinkSync(lockPath);
-        } catch { /* someone else got there first */ }
+      if (lockAbandoned(lockPath, st)) {
+        // Only the lock that was judged: compared by inode once it is aside.
+        removeLockIf(lockPath, (moved) => statSync(moved).ino === st.ino);
         continue;
       }
       if (Date.now() > deadline) {
@@ -740,7 +800,7 @@ export function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = loc
   }
 
   try {
-    writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    writeSync(fd, token);
     closeSync(fd);
     fd = undefined;
     return fn();
@@ -748,7 +808,9 @@ export function withVaultLock<T>(vaultPath: string, fn: () => T, timeoutMs = loc
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* already closed */ }
     }
-    try { unlinkSync(lockPath); } catch { /* best effort */ }
+    // Only this process's own lock: if it was taken over meanwhile, the
+    // new holder's lock is not this process's to delete.
+    removeLockIf(lockPath, (moved) => readFileSync(moved, "utf8") === token);
   }
 }
 

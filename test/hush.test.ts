@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync, chmodSync, existsSync, utimesSync , statSync } from "node:fs";
-import { tmpdir, platform } from "node:os";
+import { tmpdir, platform, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -19,7 +19,7 @@ import {
   newDek,
   fingerprint,
 } from "../src/crypto.ts";
-import { Vault, resolveVaultPath, memberKeyString } from "../src/vault.ts";
+import { Vault, resolveVaultPath, memberKeyString, withVaultLock } from "../src/vault.ts";
 import { loadPolicy } from "../src/mcp.ts";
 import { assess, assessRisk, shouldNudge } from "../src/posture.ts";
 import { Redactor as _R } from "../src/redact.ts";
@@ -1744,6 +1744,59 @@ describe("the vault lock cannot be stolen", () => {
     vault.set(owner, "default", "AFTER_STALE", "v");
     assert.doesNotThrow(() => vault.save(), "a dead process wedged the vault forever");
     assert.equal(Vault.open(path).get(owner, "default", "AFTER_STALE"), "v");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("the vault lock knows its owner (review F23)", () => {
+  const lockFor = (pid: number, host = hostname()) => JSON.stringify({ pid, host, id: "someone" });
+
+  test("an old lock whose owner is still running is waited for, not taken", () => {
+    const dir = scratch();
+    const path = join(dir, "vault.json");
+    const owner = generateIdentity();
+    const vault = Vault.create(path, "t", { name: "a", pub: owner.pub });
+    vault.save();
+    // A save waiting on a hardware-key touch: alive, and past the 30s window.
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"]);
+    const prev = process.env.HUSH_LOCK_TIMEOUT_MS;
+    try {
+      writeFileSync(`${path}.lock`, lockFor(holder.pid!));
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(`${path}.lock`, old, old);
+      process.env.HUSH_LOCK_TIMEOUT_MS = "300";
+      vault.set(owner, "default", "K", "value-one");
+      assert.throws(() => vault.save(), /Timed out waiting for the vault lock/, "a live holder's lock was taken");
+    } finally {
+      holder.kill();
+      if (prev === undefined) delete process.env.HUSH_LOCK_TIMEOUT_MS;
+      else process.env.HUSH_LOCK_TIMEOUT_MS = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a fresh lock whose owner has exited is taken at once", () => {
+    const dir = scratch();
+    const path = join(dir, "vault.json");
+    const owner = generateIdentity();
+    const vault = Vault.create(path, "t", { name: "a", pub: owner.pub });
+    vault.save();
+    const gone = spawnSync(process.execPath, ["-e", "0"]).pid!;
+    writeFileSync(`${path}.lock`, lockFor(gone));
+    vault.set(owner, "default", "K", "value-one");
+    assert.doesNotThrow(() => vault.save());
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a holder whose lock was taken over leaves the new holder's lock alone", () => {
+    const dir = scratch();
+    const path = join(dir, "vault.json");
+    const theirs = lockFor(process.pid, "another-machine");
+    withVaultLock(path, () => {
+      // Meanwhile, someone decided this lock was abandoned and took it.
+      writeFileSync(`${path}.lock`, theirs);
+    });
+    assert.equal(readFileSync(`${path}.lock`, "utf8"), theirs, "the new holder's lock was deleted");
     rmSync(dir, { recursive: true, force: true });
   });
 });

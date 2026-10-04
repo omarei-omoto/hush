@@ -165,3 +165,23 @@ test("hush lease enroll, then hush run --from: the command gets the value, its o
     f.cleanup?.();
   }
 });
+
+test("hush run --from still meets this machine's own policy before it asks the broker (review F22)", { skip: process.platform === "win32" }, async () => {
+  const b = await brokerWith();
+  const f = bareFolder();
+  try {
+    assert.equal((await runAsync(f.root, f.env, ["lease", "enroll", b.base])).code, 0);
+    const script = join(f.root, "show.sh");
+    writeFileSync(script, '#!/bin/sh\necho "ran"\n');
+    chmodSync(script, 0o755);
+    // This machine's floor allows npm and nothing else.
+    writeFileSync(join(f.env.HUSH_HOME!, "policy.json"), JSON.stringify({ allowCommands: ["npm"], requireApproval: [] }));
+    const r = await runAsync(f.root, f.env, ["run", "--from", b.base, "--", script]);
+    assert.notEqual(r.code, 0, `--from walked around the local policy:\n${r.out}`);
+    assert.doesNotMatch(r.out, /^ran$/m);
+    assert.doesNotMatch(r.out, /leased/, "it asked the broker before checking");
+  } finally {
+    b.close();
+    f.cleanup?.();
+  }
+});

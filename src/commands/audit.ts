@@ -6,7 +6,7 @@ import { join, basename } from "node:path";
 import { locateProject } from "../vault.ts";
 import { verifyAudit, withoutChain } from "../audit.ts";
 import { type Args, bool, str } from "../cli/args.ts";
-import { bold, die, dim, green, info, out, red, shown } from "../cli/output.ts";
+import { bold, die, dim, green, info, out, red, shown, yellow } from "../cli/output.ts";
 
 /**
  * `hush audit` — the local log of what hush did here, newest last; and
@@ -36,6 +36,9 @@ export async function cmdAudit(a: Args): Promise<void> {
             r.unchained.length ? `${r.unchained.length} written while another hush held the log (lines ${r.unchained.slice(0, 5).join(", ")})` : "",
           ].filter(Boolean);
           info(`${green("✓")} ${name}  ${dim(`${r.lines} line(s), each following from the one above` + (extra.length ? `; ${extra.join("; ")}` : ""))}`);
+        }
+        if (r.earlierGone) {
+          info(`    ${yellow("!")} ${dim("it began by replacing an older log that is no longer here: the history before it is gone")}`);
         }
       }
       info("");

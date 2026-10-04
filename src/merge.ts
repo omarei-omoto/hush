@@ -185,6 +185,25 @@ export function mergeVaults(
   const wraps: Record<string, DekWrap> = { ...lead.data.dek.wraps };
   const addedByOther = Object.keys(other.data.recipients).filter((fp) => !O.data.recipients[fp] && !recipients[fp]);
   const removedByOther = Object.keys(O.data.recipients).filter((fp) => !other.data.recipients[fp]);
+  // A member this branch removed — the removal re-keyed the vault and marked
+  // every value they could read with their name — is not someone the other
+  // branch "added", even when the merge base cannot show they were there (no
+  // common ancestor, or the addition reached both branches separately).
+  // Handing them the new key would quietly undo the revocation.
+  if (rotation) {
+    const removedHere = new Set<string>();
+    for (const values of Object.values(lead.data.envs)) {
+      for (const e of Object.values(values)) for (const n of e.exposed ?? []) removedHere.add(n);
+    }
+    const back = addedByOther.map((fp) => other.data.recipients[fp].name).filter((n) => removedHere.has(n));
+    if (back.length) {
+      return refuse(
+        `${back.join(", ")} ${back.length === 1 ? "was" : "were"} removed on one branch and ${back.length === 1 ? "is" : "are"} still a member on the other, ` +
+          "and a merge will not give them the new vault key. Remove them on the other branch too (hush team rm), " +
+          "or merge and then add them again on purpose",
+      );
+    }
+  }
   for (const fp of removedByOther) {
     if (!rotation) {
       delete recipients[fp];

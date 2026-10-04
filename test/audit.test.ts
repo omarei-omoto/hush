@@ -97,14 +97,44 @@ describe("S-3: the audit log is a hash chain", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  /** About 5 KB a line: sixteen fields at the 300-character cap. */
+  const fill = (dir: string, lines: number) => {
+    const pads = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`pad${i}`, "x".repeat(300)]));
+    for (let i = 0; i < lines; i++) audit(dir, { actor: "test", action: "fill", ...pads });
+  };
+
   test("rotation starts a new chain, and both files verify", () => {
     const dir = mkdtempSync(join(tmpdir(), "hush-audit-"));
-    const big = "x".repeat(4096);
-    for (let i = 0; i < 560; i++) audit(dir, { actor: "test", action: "fill", pad: big });
+    fill(dir, 450);
     const reports = verifyAudit(dir);
     assert.equal(reports.length, 2, "the log did not rotate");
     for (const r of reports) assert.deepEqual(r.breaks, [], `${r.file}: ${JSON.stringify(r.breaks[0])}`);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a field is capped, generations are kept, each follows the last, and history pushed away is said (review F5)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hush-audit-"));
+    try {
+      audit(dir, { actor: "broker", action: "call", tool: "t".repeat(1_000_000) });
+      const first = JSON.parse(readFileSync(join(dir, "audit.log"), "utf8").split("\n")[0]);
+      assert.ok(first.tool.length <= 301, `a ${first.tool.length}-character field was written whole`);
+
+      fill(dir, 1300); // three rotations
+      const reports = verifyAudit(dir);
+      assert.equal(reports.length, 4, "older generations were not kept");
+      for (const r of reports) assert.deepEqual(r.breaks, [], `${r.file}: ${JSON.stringify(r.breaks[0])}`);
+      assert.ok(!reports.some((r) => r.earlierGone), "nothing was removed, yet history is reported gone");
+
+      // Deleting the oldest generation is said, not passed over as a fresh start.
+      rmSync(reports[0].file);
+      assert.equal(verifyAudit(dir)[0].earlierGone, true);
+      // And a generation edited in the middle no longer lines up with the next.
+      const middle = verifyAudit(dir)[1].file;
+      writeFileSync(middle, readFileSync(middle, "utf8").replace(/\n[^\n]*\n$/, "\n"));
+      assert.ok(verifyAudit(dir)[2].breaks.some((b) => /follow on/.test(b.why)), "a cut generation went unnoticed");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("hush audit verify exits non-zero on a break and names it; hush audit shows no chain fields", () => {

@@ -25,6 +25,29 @@ import { createHash, randomBytes } from "node:crypto";
 /** Rotate at this size so a long-lived machine cannot fill the disk. */
 const AUDIT_MAX_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Generations kept besides the live file: audit.log.1 (newest) to .5. One
+ * used to be the whole history, so anything able to write enough lines — a
+ * tailnet peer, through the broker — could push every earlier line off the
+ * end, and the fresh file looked like an ordinary start.
+ */
+const AUDIT_GENERATIONS = 5;
+
+/**
+ * Longest string an audit field keeps, and most items in a list. Values come
+ * from callers that include remote peers (a tool name, a caller's label), so
+ * one line must not be able to stand for megabytes.
+ */
+const FIELD_MAX_CHARS = 300;
+const FIELD_MAX_ITEMS = 64;
+
+const capField = (v: unknown): unknown =>
+  typeof v === "string"
+    ? v.length > FIELD_MAX_CHARS ? v.slice(0, FIELD_MAX_CHARS) + "\u2026" : v
+    : Array.isArray(v)
+      ? v.slice(0, FIELD_MAX_ITEMS).map(capField)
+      : v;
+
 const START = "hush/audit/start|";
 
 export const lineHash = (line: string): string => createHash("sha256").update(line, "utf8").digest("hex");
@@ -93,12 +116,23 @@ export function audit(hushDir: string, event: Record<string, unknown>): void {
     mkdirSync(hushDir, { recursive: true });
     const path = auditPath(hushDir);
     withAppendLock(path, (locked) => {
+      // On rotation the new file's first line names the last line of the one
+      // it replaced (`follows`), so verify can tell a rotation it can follow
+      // from history that was pushed out of reach.
+      let follows: string | undefined;
       if (existsSync(path) && statSync(path).size > AUDIT_MAX_BYTES) {
-        renameSync(path, `${path}.1`); // keeps exactly one previous generation
+        const last = lastLine(path);
+        if (last !== null) follows = lineHash(last);
+        try { unlinkSync(`${path}.${AUDIT_GENERATIONS}`); } catch { /* not there yet */ }
+        for (let g = AUDIT_GENERATIONS - 1; g >= 1; g--) {
+          if (existsSync(`${path}.${g}`)) renameSync(`${path}.${g}`, `${path}.${g + 1}`);
+        }
+        renameSync(path, `${path}.1`);
       }
       // Fields hush controls go last, so an event can never supply its own.
-      const { prev: _p, salt: _s, unchained: _u, ...body } = event;
-      const entry: Record<string, unknown> = { at: new Date().toISOString(), ...body };
+      const { prev: _p, salt: _s, unchained: _u, follows: _f, ...raw } = event;
+      const body = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, capField(v)]));
+      const entry: Record<string, unknown> = { at: new Date().toISOString(), ...body, ...(follows ? { follows } : {}) };
       if (!locked) {
         entry.unchained = true;
       } else {
@@ -132,6 +166,11 @@ export interface ChainReport {
   unchained: number[];
   /** 1-based line numbers where the chain does not hold, with why. */
   breaks: { line: number; why: string }[];
+  /**
+   * This file began by rotating away an older one that is no longer here: the
+   * history before it is gone (aged out, or pushed out by a flood of lines).
+   */
+  earlierGone?: boolean;
 }
 
 /**
@@ -181,14 +220,33 @@ export function verifyChain(file: string): ChainReport {
   return report;
 }
 
-/** Both generations, oldest first: `audit.log.1` then `audit.log`. */
+/**
+ * Every generation still here, oldest first, each checked on its own and
+ * against the one before it: a file that began by rotating another away must
+ * follow on from that file's last line.
+ */
 export function verifyAudit(hushDir: string): ChainReport[] {
   const path = auditPath(hushDir);
-  return [`${path}.1`, path].filter((f) => existsSync(f)).map(verifyChain);
+  const files = [...Array.from({ length: AUDIT_GENERATIONS }, (_, i) => `${path}.${AUDIT_GENERATIONS - i}`), path].filter((f) => existsSync(f));
+  return files.map((file, i) => {
+    const report = verifyChain(file);
+    const first = readFileSync(file, "utf8").split("\n")[0];
+    let follows: unknown;
+    try {
+      follows = (JSON.parse(first) as Record<string, unknown>).follows;
+    } catch {
+      return report;
+    }
+    if (typeof follows !== "string") return report;
+    const before = i > 0 ? lastLine(files[i - 1]) : null;
+    if (before === null) report.earlierGone = true;
+    else if (lineHash(before) !== follows) report.breaks.unshift({ line: 1, why: "it does not follow on from the end of the older file" });
+    return report;
+  });
 }
 
 /** Fields that exist for the chain, not for a person reading the log. */
 export function withoutChain(entry: Record<string, unknown>): Record<string, unknown> {
-  const { prev: _p, salt: _s, unchained: _u, ...rest } = entry;
+  const { prev: _p, salt: _s, unchained: _u, follows: _f, ...rest } = entry;
   return rest;
 }

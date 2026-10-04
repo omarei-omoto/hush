@@ -275,9 +275,12 @@ export function createBroker(o: BrokerOptions): Server {
       case "tools/call": {
         const name = String(rpc.params?.name ?? "");
         const who = callerName(caller) + hint;
-        audit(o.base.hushDir, { actor: "broker", action: "call", tool: name, caller: who });
+        // Only a name this broker offers is written down as given: anything
+        // else is the caller's text, of any length, and is recorded as such.
+        const offered = name === "hush_list_sets" || OFFERED.has(name);
+        audit(o.base.hushDir, { actor: "broker", action: "call", tool: offered ? name : "(not offered)", caller: who });
         if (name === "hush_list_sets") return ok(id, listSets(permitted));
-        if (!OFFERED.has(name)) return ok(id, errText(`${name} is not offered by this broker.`));
+        if (!OFFERED.has(name)) return ok(id, errText(`${name.slice(0, 80)} is not offered by this broker.`));
         try {
           return ok(id, await callTool(name, rpc.params?.arguments ?? {}, {
             ...o.base, tools: OFFERED, compose: composeFor(permitted), caller: who,

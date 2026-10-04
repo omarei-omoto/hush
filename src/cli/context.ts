@@ -2,7 +2,7 @@
  * Which project and vault a command acts on, the policy that governs it, and the
  * one-time setup dialogue for a folder hush has not been told about yet.
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { Vault, locateProject, slugifyEnv, assertScopeName, assertProjectHushDir } from "../vault.ts";
 import { loadIdentity, createIdentity, hushHome } from "../identity.ts";
@@ -15,6 +15,7 @@ import { approvalPromptAvailable } from "../approval.ts";
 import { bold, cyan, die, dim, green, info, red, shown, warn, yellow } from "../cli/output.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { askLine } from "../cli/prompts.ts";
+import { writeRepoFile } from "../vault-files.ts";
 
 // -------------------------------------------------------------- vault access
 
@@ -353,10 +354,7 @@ export async function askAgentQuestion(hushDir: string, a: Args): Promise<void> 
     // "the default policy is not retyped anywhere" exists because a
     // hand-written copy is exactly how `allowReveal` kept being written into
     // every new project after it stopped meaning anything.
-    writeFileSync(
-      policyPath,
-      JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n",
-    );
+    writeRepoFile(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
   }
   info(`${green("✓")} approvals on  ${dim("— hush install-mcp when you're ready")}`);
   ensureFloorSaying();

@@ -5,7 +5,8 @@
  * actually performs the upgrade, not a link to a doc. A nudge you cannot act on
  * in one step is just guilt.
  */
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { parseJson } from "./json.ts";
 import { join } from "node:path";
 import { platform } from "node:os";
 import { createInterface } from "node:readline";
@@ -20,6 +21,7 @@ import { encodeSePub } from "./crypto.ts";
 import { parseEnvFile } from "./scan.ts";
 import { DEFAULT_POLICY } from "./mcp.ts";
 import { consent } from "./cli/consent.ts";
+import { writeRepoFile } from "./vault-files.ts";
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = (code: string) => (s: string) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -142,8 +144,8 @@ export function parseDuration(raw: string): number {
 
 function setPolicy(hushDir: string, patch: Record<string, unknown>): void {
   const p = join(hushDir, "policy.json");
-  const current = existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
-  writeFileSync(p, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
+  const current = existsSync(p) ? parseJson(readFileSync(p, "utf8")) : {};
+  writeRepoFile(p, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
 }
 
 const durationPhrase = (s: number): string =>

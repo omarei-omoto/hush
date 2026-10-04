@@ -3,7 +3,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { ageAvailable } from "../../src/age.ts";
 import { execFileSync } from "node:child_process";
@@ -225,6 +225,33 @@ describe("hush secure --biometry will not promise what the hardware cannot do", 
         );
       }
     } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("a symlink a repository committed at .hush/policy.json (review F21)", () => {
+  test("hush secure refuses to write through it, and the file it points at is untouched", () => {
+    const p = project();
+    const outside = mkdtempSync(join(tmpdir(), "hush-floor-"));
+    try {
+      const target = join(outside, "policy.json");
+      writeFileSync(target, '{"requireApproval":["run"]}\n');
+      const policy = join(p.hushDir, "policy.json");
+      rmSync(policy, { force: true });
+      symlinkSync(target, policy);
+      const r = p.run(["secure", "approval", "--for", "30m"]);
+      assert.notEqual(r.code, 0, r.out);
+      assert.match(r.out, /not a regular file/);
+      assert.equal(readFileSync(target, "utf8"), '{"requireApproval":["run"]}\n', "the write went through the link");
+      // A dangling link is a link too: existsSync says false, and a write creates its target.
+      const absent = join(outside, "floor-not-made-yet.json");
+      rmSync(policy);
+      symlinkSync(absent, policy);
+      p.run(["secure", "approval", "--for", "30m"]);
+      assert.ok(!existsSync(absent), "a dangling link's target was created");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
       p.cleanup();
     }
   });

@@ -4,6 +4,16 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.11.1 — 2026-10-04
+
+### Security
+
+- **A folder pattern could make hush hang.** The folders a set is kept to
+  (`--only-in`) are stored in the vault, and matching a crafted pattern could
+  take practically for ever, so one line in a shared vault could stop every
+  hush command on that repository. Patterns are now matched in time
+  proportional to their length, whatever they contain.
+
 ## 0.11.0 — 2026-10-04
 
 Everything new since 0.10.0: what was in 0.11.0-beta.1, and the security fixes

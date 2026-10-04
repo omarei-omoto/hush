@@ -288,24 +288,69 @@ export function assertOnlyInPattern(pattern: unknown): void {
 const expandHome = (p: string, home: string): string => (p === "~" ? home : p.startsWith("~/") ? home + p.slice(1) : p);
 const slashes = (p: string): string => p.replace(/\\/g, "/");
 
-function globToRegExp(glob: string, caseInsensitive: boolean): RegExp {
-  let re = "";
+type GlobToken = { kind: "char"; c: string } | { kind: "one" } | { kind: "name" } | { kind: "any" } | { kind: "folders" };
+
+/**
+ * Does `path` match `glob`? `*` is anything within one folder name, `?` one
+ * character of one, `**` and a slash zero or more whole folders, and a
+ * trailing `**` anything at all; every other character is itself.
+ *
+ * Matched directly, not compiled to a RegExp. A pattern can arrive in a vault
+ * through git, and as a RegExp `**a**a**a…b` is `.*a.*a.*a…b`, which backtracks
+ * for ever against a path that nearly matches: one line in a teammate's vault
+ * would hang every hush command on the repository. This fills a table over
+ * (place in the pattern, place in the path), so it costs at most their product.
+ */
+function globMatch(glob: string, path: string, caseInsensitive: boolean): boolean {
+  const tokens: GlobToken[] = [];
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
     if (c === "*" && glob[i + 1] === "*") {
-      // "**/" is zero or more whole folders; a trailing "**" is anything.
       if (glob[i + 2] === "/") {
-        re += "(?:.*/)?";
+        tokens.push({ kind: "folders" });
         i += 2;
       } else {
-        re += ".*";
+        tokens.push({ kind: "any" });
         i += 1;
       }
-    } else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    } else if (c === "*") tokens.push({ kind: "name" });
+    else if (c === "?") tokens.push({ kind: "one" });
+    else tokens.push({ kind: "char", c });
   }
-  return new RegExp(`^${re}$`, caseInsensitive ? "i" : "");
+  const same = caseInsensitive ? (a: string, b: string) => a.toLowerCase() === b.toLowerCase() : (a: string, b: string) => a === b;
+  const n = path.length;
+  // after[j]: do the tokens after this one match path.slice(j)? Built from the last token back.
+  let after = new Uint8Array(n + 1);
+  after[n] = 1;
+  for (let t = tokens.length - 1; t >= 0; t--) {
+    const tok = tokens[t];
+    const here = new Uint8Array(n + 1);
+    // For "folders": is there a "/" at or after j whose remainder matches?
+    let slashThen = 0;
+    for (let j = n; j >= 0; j--) {
+      const ch = path[j];
+      switch (tok.kind) {
+        case "char":
+          here[j] = j < n && same(ch, tok.c) ? after[j + 1] : 0;
+          break;
+        case "one":
+          here[j] = j < n && ch !== "/" ? after[j + 1] : 0;
+          break;
+        case "name":
+          here[j] = after[j] || (j < n && ch !== "/" ? here[j + 1] : 0);
+          break;
+        case "any":
+          here[j] = after[j] || (j < n ? here[j + 1] : 0);
+          break;
+        case "folders":
+          if (j < n && ch === "/" && after[j + 1]) slashThen = 1;
+          here[j] = after[j] || slashThen;
+          break;
+      }
+    }
+    after = here;
+  }
+  return after[0] === 1;
 }
 
 /**
@@ -321,7 +366,13 @@ export function onlyInAllows(
   opts: { home: string; platform: string },
 ): boolean {
   const ci = opts.platform === "darwin" || opts.platform === "win32";
-  const tidy = (p: string) => slashes(p).replace(/(.)\/+$/, "$1");
+  // Trailing slashes off, but "/" stays "/". A loop, not /(.)\/+$/, which is
+  // quadratic on a long run of slashes, and a pattern comes from the vault.
+  const tidy = (p: string) => {
+    let s = slashes(p);
+    while (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  };
   const candidates: string[] = [];
   for (let p = tidy(place); ; ) {
     candidates.push(p);
@@ -330,8 +381,8 @@ export function onlyInAllows(
     p = up;
   }
   return patterns.some((pattern) => {
-    const re = globToRegExp(tidy(expandHome(slashes(pattern.trim()), slashes(opts.home))), ci);
-    return candidates.some((c) => re.test(c));
+    const glob = tidy(expandHome(slashes(pattern.trim()), slashes(opts.home)));
+    return candidates.some((c) => globMatch(glob, c, ci));
   });
 }
 

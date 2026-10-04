@@ -232,3 +232,49 @@ function mcp(w: ReturnType<typeof world>, cwd: string, requests: unknown[]): Pro
     child.stdin.end();
   });
 }
+
+test("a pattern from a vault cannot make matching hang", () => {
+  // As a RegExp this was .*a.*a.*a…b, which backtracks for ever against a
+  // path of a's: one line in a teammate's vault hung every hush command.
+  const opts = { home: "/Users/me", platform: "linux" };
+  const pattern = "/" + "**a".repeat(90) + "b";
+  const place = "/" + "a".repeat(200);
+  const started = Date.now();
+  assert.equal(onlyInAllows([pattern], place, opts), false);
+  assert.equal(onlyInAllows(["/" + "/".repeat(5000) + "x"], place, opts), false);
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started}ms`);
+});
+
+
+test("the matcher agrees with the RegExp it replaced, on thousands of random patterns and paths", () => {
+  // The old compilation, kept here as the reference: same rules, backtracking and all.
+  const reference = (glob: string, path: string): boolean => {
+    let re = "";
+    for (let i = 0; i < glob.length; i++) {
+      const c = glob[i];
+      if (c === "*" && glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") { re += "(?:.*/)?"; i += 2; } else { re += ".*"; i += 1; }
+      } else if (c === "*") re += "[^/]*";
+      else if (c === "?") re += "[^/]";
+      else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+    return new RegExp(`^${re}$`).test(path);
+  };
+  const pick = <T,>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
+  const opts = { home: "/h", platform: "linux" };
+  for (let n = 0; n < 4000; n++) {
+    const glob = "/" + Array.from({ length: 1 + Math.floor(Math.random() * 6) }, () => pick(["a", "b", "/", "*", "**", "**/", "?", "."])).join("");
+    const place = "/" + Array.from({ length: Math.floor(Math.random() * 8) }, () => pick(["a", "b", "/", "."])).join("");
+    // onlyInAllows also tries every parent folder of the place; so does the reference.
+    const tidy = (p: string) => { while (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1); return p; };
+    const candidates: string[] = [];
+    for (let p = tidy(place); ; ) {
+      candidates.push(p);
+      const up = p.replace(/\/[^/]*$/, "") || "/";
+      if (up === p) break;
+      p = up;
+    }
+    const want = candidates.some((c) => reference(tidy(glob), c));
+    assert.equal(onlyInAllows([glob], place, opts), want, `${glob} at ${place}`);
+  }
+});

@@ -52,6 +52,12 @@ const seenDir = (): string => join(process.env.HUSH_HOME || join(homedir(), ".hu
 interface PinnedRecipient {
   name: string;
   pk: string;
+  /**
+   * The role this machine saw when it accepted the member. Read only by the
+   * first signature on a vault pinned before it was signed: the vault's own
+   * claim about a role is the signer's to edit, this record is not.
+   */
+  admin?: boolean;
 }
 
 interface Seen {
@@ -310,10 +316,14 @@ const commitOf = (view: TrustView): string =>
 
 /** Is this signer one this machine trusts to change who can read the vault? */
 function trustedSigner(seen: Seen | null, fp: string, spk: string | undefined): boolean {
-  if (seen?.admins) return Boolean(spk) && seen.admins[fp] === spk;
-  // Pinned before the vault was signed (v2): the first signature is trusted if
-  // it comes from a member this machine had accepted — the upgrade itself.
-  if (seen?.recipients) return Boolean(seen.recipients[fp]);
+  if (seen?.admins) return Boolean(spk) && Object.hasOwn(seen.admins, fp) && seen.admins[fp] === spk;
+  // Pinned before the vault was signed (v2): the first signature is trusted
+  // only from someone this machine accepted *as an admin* — the upgrade
+  // itself. Any accepted member used to count, so a plain member could sign a
+  // header adding someone and every machine took it with a notice instead of
+  // asking. A pin from before roles were recorded proves nothing either way,
+  // so that signature goes to `hush team accept` once.
+  if (seen?.recipients) return Object.hasOwn(seen.recipients, fp) && seen.recipients[fp].admin === true;
   return true; // first look: trust on first use
 }
 
@@ -342,10 +352,10 @@ export function pendingChanges(view: TrustView): Pending {
 
   if (seen?.recipients) {
     for (const [fp, r] of Object.entries(view.recipients)) {
-      if (!seen.recipients[fp]) pending.added.push({ fingerprint: fp, name: r.name, pk: r.pk });
+      if (!Object.hasOwn(seen.recipients, fp)) pending.added.push({ fingerprint: fp, name: r.name, pk: r.pk });
     }
     for (const [fp, r] of Object.entries(seen.recipients)) {
-      if (!view.recipients[fp]) pending.removed.push(r.name);
+      if (!Object.hasOwn(view.recipients, fp)) pending.removed.push(r.name);
     }
   }
 
@@ -386,7 +396,11 @@ export function recordTrusted(view: TrustView, opts: { noticed?: boolean } = {})
   const seen = readSeen(view.vaultId);
   const commits = { ...(seen?.commits ?? {}), [commitSlot(view)]: commitOf(view) };
   const recipients: Record<string, PinnedRecipient> = {};
-  for (const [fp, r] of Object.entries(view.recipients)) recipients[fp] = { name: r.name, pk: r.pk };
+  for (const [fp, r] of Object.entries(view.recipients)) {
+    const full = view.data.recipients[fp];
+    const admin = full?.role === "admin" && !full.ci && !full.sets;
+    recipients[fp] = { name: r.name, pk: r.pk, ...(admin ? { admin: true } : {}) };
+  }
   const signed = view.data.scheme === SCHEME_V3 && verifyHeader(view.data).ok;
   const admins: Record<string, string> = {};
   if (signed) {
@@ -483,7 +497,7 @@ export function unacceptedMembers(vault: Vault): string[] {
     const check = verifyHeader(vault.data);
     if (check.ok && trustedSigner(seen, check.by, vault.data.recipients[check.by]?.spk)) return [];
   }
-  return Object.keys(vault.data.recipients).filter((fp) => !seen.recipients![fp]);
+  return Object.keys(vault.data.recipients).filter((fp) => !Object.hasOwn(seen.recipients!, fp));
 }
 
 /** Plain sentences a person can act on. Never a value; names go through safeText. */

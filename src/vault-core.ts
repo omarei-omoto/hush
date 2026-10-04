@@ -7,7 +7,7 @@
  * signing the header of a hush/v3 vault. `Vault` (vault.ts) builds the values,
  * sets and membership on top.
  */
-import { existsSync, mkdirSync, readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import {
@@ -18,7 +18,7 @@ import { enclaveAgree } from "./enclave.ts";
 import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from "./age.ts";
 import { signerFor } from "./identity.ts";
 import { signHeader, verifyHeader, vaultKeyCommit } from "./header.ts";
-import { withVaultLock, assertVaultShape, hashOf, describeOpener, candidatesOf, safeText, isAgeWrap, isSeWrap, type VaultFile, type Recipient, type EnvMeta, type DekWrap } from "./vault-files.ts";
+import { withVaultLock, writeFileAtomic, assertVaultShape, hashOf, describeOpener, candidatesOf, safeText, isAgeWrap, isSeWrap, type VaultFile, type Recipient, type EnvMeta, type DekWrap } from "./vault-files.ts";
 import { parseJson } from "./json.ts";
 
 export const SCHEMES = [SCHEME, SCHEME_V2, SCHEME_V3];
@@ -344,26 +344,8 @@ export abstract class VaultCore {
       this.data.scheme = SCHEME_V2;
     }
     const body = JSON.stringify(this.data, null, 2) + "\n";
-    const tmp = `${this.path}.${process.pid}.tmp`;
-
-    let fd: number | undefined;
-    try {
-      fd = openSync(tmp, "w", 0o600);
-      writeSync(fd, body);
-      fsyncSync(fd);
-      closeSync(fd);
-      fd = undefined;
-      renameSync(tmp, this.path);
-      this.baseline = hashOf(body);
-    } catch (e) {
-      if (fd !== undefined) {
-        try { closeSync(fd); } catch { /* already closed */ }
-      }
-      if (existsSync(tmp)) {
-        try { unlinkSync(tmp); } catch { /* best effort */ }
-      }
-      throw e;
-    }
+    writeFileAtomic(this.path, body);
+    this.baseline = hashOf(body);
   }
 
   // ------------------------------------------------------------ key access

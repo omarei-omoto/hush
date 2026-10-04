@@ -211,7 +211,7 @@ export abstract class VaultValues extends VaultCore {
   unlistedWraps(): string[] {
     const fps = new Set(Object.keys(this.data.dek.wraps));
     for (const k of Object.values(this.data.setKeys ?? {})) for (const fp of Object.keys(k.wraps)) fps.add(fp);
-    return [...fps].filter((fp) => !this.data.recipients[fp]).sort();
+    return [...fps].filter((fp) => !Object.hasOwn(this.data.recipients, fp)).sort();
   }
 
   /**

@@ -88,3 +88,21 @@ test("a --__proto__ flag is just a flag", () => {
   assert.equal(a.flags.polluted, true);
   assertPrototypeClean();
 });
+
+test("a member fingerprint named after an Object property is refused when the vault is opened (review F18)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hush-proto-"));
+  try {
+    const id = generateIdentity();
+    const path = join(dir, "vault.json");
+    Vault.create(path, "t", { name: "me", pub: id.pub }).save();
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    const [[, me]] = Object.entries(data.recipients);
+    for (const fp of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+      writeFileSync(path, JSON.stringify({ ...data, recipients: { ...data.recipients, [fp]: me } }));
+      assert.throws(() => Vault.open(path), /fingerprint is not one hush writes/, fp);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

@@ -14,7 +14,8 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { Vault, safeText, locateProject, audit, type VaultFile, type SecretEntry } from "../vault.ts";
+import { Vault, safeText, locateProject, audit, assertScopeName, assertKeyName, type VaultFile, type SecretEntry } from "../vault.ts";
+import { assertVaultShape, withVaultLock, writeFileAtomic } from "../vault-files.ts";
 import { loadIdentity } from "../identity.ts";
 import { mergeVaults, type MergeConflict, type MergeResult } from "../merge.ts";
 import { type Args, bool, str } from "../cli/args.ts";
@@ -41,9 +42,15 @@ function git(args: string[], cwd: string): { ok: boolean; out: string } {
 const parseVault = (text: string, label: string): VaultFile | null => {
   if (!text.trim()) return null;
   try {
-    return parseJson(text) as VaultFile;
-  } catch {
-    throw new Error(`the ${label} side of the vault is not valid JSON`);
+    const data = parseJson(text) as VaultFile;
+    // The same check Vault.open makes. A merge input is a vault that arrived
+    // through git like any other, and merging unchecked data once let a set
+    // named "constructor" write onto the global Object constructor.
+    assertVaultShape(data, `the ${label} side of the vault`);
+    return data;
+  } catch (e) {
+    if (e instanceof SyntaxError) throw new Error(`the ${label} side of the vault is not valid JSON`);
+    throw e;
   }
 };
 
@@ -204,7 +211,12 @@ export async function cmdMerge(a: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  writeFileSync(vaultPath, JSON.stringify(r.data, null, 2) + "\n");
+  // Under the vault's lock and atomically, like every other write: a crash
+  // mid-write left a truncated vault, and a `hush set` running alongside
+  // could be silently overwritten. Not vault.save(), which re-reads the file
+  // on disk first — here that file is git's conflict markers.
+  const merged = r.data;
+  withVaultLock(vaultPath, () => writeFileAtomic(vaultPath, JSON.stringify(merged, null, 2) + "\n"));
   writeConflicts(vaultPath, r, rel);
   audit(loc.hushDir, { actor: "cli", action: "merge", conflicts: r.conflicts.length, resealed: r.resealed });
   if (!r.conflicts.length) info(`  ${dim("then:")} ${cyan(`git add ${rel}`)} ${dim("and finish the merge as usual")}`);
@@ -214,7 +226,16 @@ function readConflicts(vaultPath: string): ConflictRecord | null {
   const file = conflictFile(vaultPath);
   if (!existsSync(file)) return null;
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as ConflictRecord;
+    const record = parseJson(readFileSync(file, "utf8")) as ConflictRecord;
+    // The file is hush's own scratch, but it sits in the repository, so it is
+    // read like anything else that could have arrived through git: the set
+    // and key it names become object keys when a side is picked.
+    if (!Array.isArray(record?.conflicts)) throw new Error("no conflicts list");
+    for (const c of record.conflicts) {
+      assertScopeName(String(c?.set));
+      assertKeyName(String(c?.key));
+    }
+    return record;
   } catch {
     die(`${file} is not readable. Delete it and run hush merge again.`);
   }

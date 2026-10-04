@@ -23,8 +23,9 @@ import { fileURLToPath } from "node:url";
 import { Vault } from "../src/vault.ts";
 import {
   generateIdentity, encodeSecret, encodePub, decodePub, fingerprint, newDek, wrapDek, sealValue, dekCommit,
-  type Identity,
+  signerForIdentity, encodeSpk, type Identity,
 } from "../src/crypto.ts";
+import { signHeader } from "../src/header.ts";
 import { recordTrusted, pendingChanges, acceptPending, hasProblems } from "../src/integrity.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
@@ -411,6 +412,42 @@ describe("V-1: ordinary team changes keep working", () => {
     assert.equal(accepted.code, 0, accepted.out);
     assert.match(accepted.out, /dave/);
     assert.match(t.alice.run(runPrint).out, /API_BASE=\[redacted:API_BASE\]/);
+    t.cleanup();
+  });
+
+  test("in a vault pinned unsigned, a plain member who signs a membership change is refused, not trusted (review F1)", () => {
+    const t = team();
+    const v = Vault.open(t.vaultPath);
+    v.addRecipient(t.alice.id, "bob", t.bob.pk);
+    v.save();
+    const data = JSON.parse(readFileSync(t.vaultPath, "utf8"));
+    data.scheme = "hush/v2";
+    delete data.signature;
+    for (const r of Object.values(data.recipients) as { spk?: string }[]) delete r.spk;
+    writeFileSync(t.vaultPath, JSON.stringify(data, null, 2));
+    t.alice.run(["verify"]);
+    t.bob.run(["verify"]);
+
+    // Bob, a member, adds dave and then signs the header himself: he calls
+    // himself an admin, lists his own signing key, and signs with it.
+    const dave = generateIdentity();
+    const asBob = Vault.open(t.vaultPath);
+    asBob.addRecipient(t.bob.id, "dave", encodePub(dave.pub));
+    asBob.save();
+    const dek = Vault.open(t.vaultPath).dekForReview(t.bob.id);
+    const forged = JSON.parse(readFileSync(t.vaultPath, "utf8"));
+    const bobFp = fingerprint(t.bob.id.pub);
+    const signer = signerForIdentity(t.bob.id);
+    forged.scheme = "hush/v3";
+    forged.recipients[bobFp].role = "admin";
+    forged.recipients[bobFp].spk = encodeSpk(signer.spk);
+    forged.dek.commit = dekCommit(dek, forged.id, forged.dek.generation);
+    signHeader(forged, bobFp, signer);
+    writeFileSync(t.vaultPath, JSON.stringify(forged, null, 2));
+
+    const refused = t.alice.run(runPrint);
+    assert.notEqual(refused.code, 0, "Alice took a member's signed change without being asked:\n" + refused.out);
+    assert.match(refused.out, /dave|bob/);
     t.cleanup();
   });
 

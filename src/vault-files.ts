@@ -8,10 +8,10 @@
  * vault.ts, is what reads and writes one.
  */
 import {
-  existsSync, readFileSync, openSync, writeSync, closeSync, unlinkSync, statSync, realpathSync,
+  existsSync, readFileSync, openSync, writeSync, closeSync, unlinkSync, statSync, realpathSync, fsyncSync, renameSync,
 } from "node:fs";
 import { dirname, join, resolve, isAbsolute, sep } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   decodePub,
   encodePub,
@@ -666,6 +666,33 @@ export const hashOf = (s: string | Buffer): string =>
 /** A lock untouched for this long is assumed to belong to a dead process. */
 const STALE_LOCK_MS = 30_000;
 
+/**
+ * Replace `path` with `body` so that a reader sees the old file or the new
+ * one, never half of either: written to a fresh temp file beside it, flushed,
+ * then renamed over. The temp name is random and opened with "wx", so it never
+ * writes through something already there — a symlink a repository carried at
+ * a predictable name included (that once pointed the vault's save at the
+ * personal floor).
+ */
+export function writeFileAtomic(path: string, body: string, mode = 0o600): void {
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, "wx", mode);
+    writeSync(fd, body);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+  } catch (e) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    try { unlinkSync(tmp); } catch { /* never created, or already gone */ }
+    throw e;
+  }
+}
+
 /** Tunable for CI and for tests that need to observe the wait, not sit through it. */
 const lockTimeoutMs = (): number => Number(process.env.HUSH_LOCK_TIMEOUT_MS) || 15_000;
 
@@ -778,7 +805,9 @@ export function assertVaultShape(data: VaultFile, path: string): void {
   }
 
   for (const [fp, r] of Object.entries(data.recipients)) {
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(fp)) bad("a member's fingerprint is not one hush writes");
+    // Not a property every object already has (constructor, toString, …):
+    // fingerprints are looked up in maps, and an inherited one reads as present.
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(fp) || fp in Object.prototype) bad("a member's fingerprint is not one hush writes");
     if (!isObject(r) || typeof r.pk !== "string" || typeof r.name !== "string") {
       bad(`member "${fp.slice(0, 12)}" is missing a name or a public key`);
     }

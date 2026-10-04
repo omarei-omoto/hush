@@ -5,7 +5,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,6 +120,59 @@ describe("F-1: through git", { skip: !hasGit && "git is not installed" }, () => 
     r.hush("merge-driver", "--uninstall");
     assert.doesNotMatch(readFileSync(join(r.root, ".git", "info", "attributes"), "utf8"), /merge=hush/);
     assert.match(r.hush("doctor").out, /✗ merge driver/);
+    r.cleanup();
+  });
+
+  test("hush merge waits for the vault's lock, like every other write (review F20)", () => {
+    const r = repo();
+    r.onBranch("theirs", (v) => v.set(r.id, "default", "FROM_THEIRS", "from-theirs-value"));
+    r.onBranch("ours", (v) => v.set(r.id, "default", "FROM_OURS", "from-ours-value"));
+    r.g("merge", "theirs", "-m", "merge");
+    const before = readFileSync(r.path, "utf8");
+    // Another hush is mid-write: its lock is fresh.
+    const lock = `${r.path}.lock`;
+    writeFileSync(lock, String(process.pid));
+    const env = { ...r.env, HUSH_LOCK_TIMEOUT_MS: "300" };
+    const blocked = spawnSync(process.execPath, [CLI, "merge"], { cwd: r.root, env, encoding: "utf8" });
+    assert.notEqual(blocked.status, 0, "hush merge wrote the vault while another write held the lock");
+    assert.match(blocked.stdout + blocked.stderr, /vault lock/);
+    assert.equal(readFileSync(r.path, "utf8"), before, "the vault changed under someone else's lock");
+    unlinkSync(lock);
+    const fixed = r.hush("merge");
+    assert.equal(fixed.code, 0, fixed.out);
+    assert.deepEqual(Object.keys(r.values()).sort(), ["FROM_OURS", "FROM_THEIRS", "KEEP", "KEY_C"]);
+    r.cleanup();
+  });
+
+  test("a merge-conflicts file naming a reserved set or key is refused, not picked (review F19)", () => {
+    const r = repo();
+    const gen = Vault.open(r.path).data.dek.generation;
+    const entry = { v: 2, gen, ct: "x" };
+    for (const [set, key] of [["constructor", "keys"], ["__proto__", "polluted"], ["default", "constructor"]]) {
+      const record = { at: "now", conflicts: [{ set, key, ours: { entry }, theirs: { entry } }] };
+      writeFileSync(join(r.root, ".hush", "merge-conflicts.json"), JSON.stringify(record));
+      const picked = r.hush("merge", "pick", key, "--ours");
+      assert.notEqual(picked.code, 0, `${set}/${key} was picked`);
+      assert.match(picked.out, /merge-conflicts\.json is not readable/);
+    }
+    r.cleanup();
+  });
+
+  test("a merge input with a reserved set name is refused before it is merged (review F32)", () => {
+    const r = repo();
+    const good = readFileSync(r.path, "utf8");
+    const hostile = JSON.parse(good);
+    hostile.envs.constructor = { keys: hostile.envs.default.KEEP };
+    const dir = mkdtempSync(join(tmpdir(), "hush-mg-sides-"));
+    const [base, ours, theirs] = ["base", "ours", "theirs"].map((n) => join(dir, n));
+    writeFileSync(base, good);
+    writeFileSync(ours, good);
+    writeFileSync(theirs, JSON.stringify(hostile));
+    const merged = r.hush("merge-driver", base, ours, theirs, ".hush/vault.json");
+    assert.notEqual(merged.code, 0);
+    assert.match(merged.out, /reserved/);
+    assert.equal(readFileSync(ours, "utf8"), good, "the driver wrote a merge of unchecked data");
+    rmSync(dir, { recursive: true, force: true });
     r.cleanup();
   });
 });

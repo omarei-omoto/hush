@@ -1,9 +1,9 @@
 /**
  * `hush install-mcp` and `hush install-skill` — tell coding agents about hush.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, dirname, sep, resolve as resolvePath } from "node:path";
-import { assertProjectHushDir } from "../vault.ts";
+import { assertProjectHushDir, ValidationError } from "../vault.ts";
 import { hushHome } from "../identity.ts";
 import { DEFAULT_POLICY } from "../mcp.ts";
 import { AGENTS, renderMcp, skillDescription } from "../agents.ts";
@@ -52,6 +52,37 @@ async function confirmWrites(a: Args, plan: { name: string; file: string; note?:
 }
 
 /** Said next to a file outside the project, which changes more than this project. */
+/**
+ * Write an agent's config or skill file. A file inside the project is one a
+ * repository controls, and git stores symlinks: a committed `.mcp.json` link,
+ * or a `.cursor` folder that is one, would send this write anywhere the user
+ * can write. So inside the project, the folder must resolve inside it and the
+ * file must be a regular file or nothing. A file in the user's own config
+ * (~/.codex, …) is theirs, and their own dotfile links are followed as ever.
+ */
+function writeAgentFile(root: string, file: string, text: string): void {
+  const project = resolvePath(root);
+  if (!resolvePath(file).startsWith(project + sep)) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+    return;
+  }
+  // Create only below the real project, never through a linked folder.
+  const real = realpathSync(project);
+  let dir = dirname(resolvePath(file));
+  const missing: string[] = [];
+  while (!existsSync(dir)) {
+    missing.unshift(dir);
+    dir = dirname(dir);
+  }
+  const resolved = realpathSync(dir);
+  if (resolved !== real && !resolved.startsWith(real + sep)) {
+    throw new ValidationError(`${dir} leads outside this project (it is a link). Remove it and try again.`);
+  }
+  for (const d of missing) mkdirSync(d);
+  writeRepoFile(file, text);
+}
+
 const outsideNote = (file: string, root: string): string | undefined =>
   file.startsWith(resolvePath(root) + sep) ? undefined : "your user config — applies to every project";
 
@@ -123,8 +154,12 @@ export async function cmdInstallMcp(a: Args): Promise<void> {
       info(dim(`  ${agent.name}: skipped`));
       continue;
     }
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, text);
+    try {
+      writeAgentFile(root, file, text);
+    } catch (e) {
+      warn(`${agent.name}: not written — ${(e as Error).message}`);
+      continue;
+    }
     info(`${green("✓")} ${agent.name}: registered hush in ${cyan(file)}`);
     registered++;
   }
@@ -208,8 +243,12 @@ export async function cmdInstallSkill(a: Args): Promise<void> {
       info(dim(`  ${name}: skipped`));
       continue;
     }
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, body);
+    try {
+      writeAgentFile(root, dest, body);
+    } catch (e) {
+      warn(`${name}: not written — ${(e as Error).message}`);
+      continue;
+    }
     info(`${green("✓")} ${name}: ${cyan(dest)}`);
     written.push(dest);
   }

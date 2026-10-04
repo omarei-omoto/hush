@@ -133,3 +133,42 @@ test("folder patterns and exposure lists from a vault file meet the rules hush w
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a save refuses to write a vault it would refuse to open (review F29)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hush-save-shape-"));
+  try {
+    const id = generateIdentity();
+    const path = join(dir, "vault.json");
+    const v = Vault.create(path, "t", { name: "me", pub: id.pub });
+    v.save();
+    const before = readFileSync(path, "utf8");
+    const [fp] = Object.keys(v.data.recipients);
+    (v.data.recipients[fp] as { name: unknown }).name = 123;
+    assert.throws(() => v.save(), /malformed/);
+    assert.equal(readFileSync(path, "utf8"), before, "the broken vault was written");
+    assert.doesNotThrow(() => Vault.open(path));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an atomic write never goes through a link waiting at a temp name (review F10, F11)", async () => {
+  const { writeFileAtomic } = await import("../src/vault-files.ts");
+  const { symlinkSync, readdirSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "hush-atomic-"));
+  try {
+    const target = join(dir, "victim");
+    writeFileSync(target, "untouched");
+    const path = join(dir, "config.json");
+    writeFileSync(path, "old");
+    // The names the old writers used: pid-based, so predictable.
+    symlinkSync(target, `${path}.${process.pid}.tmp`);
+    symlinkSync(target, `${path}.hush-${process.pid}.tmp`);
+    writeFileAtomic(path, "new");
+    assert.equal(readFileSync(path, "utf8"), "new");
+    assert.equal(readFileSync(target, "utf8"), "untouched");
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") && !f.includes(String(process.pid) + ".tmp") && !f.includes("hush-")), [], "a temp file was left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

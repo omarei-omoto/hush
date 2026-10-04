@@ -757,6 +757,14 @@ describe("ui team endpoints", () => {
     assert.ok(!JSON.stringify(state).includes(SECRET_VALUE));
   });
 
+  test("a member whose name is not text is refused, and the vault still opens (review F29)", async () => {
+    const { generateIdentity, encodePub } = await import("../src/crypto.ts");
+    const r = await api("/api/team", { name: 123, pk: encodePub(generateIdentity().pub) });
+    assert.equal(r.status, 400, "a numeric name was accepted");
+    const still = (await (await api("/api/reveal", { scope: "default", key: "API_KEY" })).json()) as { value: string };
+    assert.equal(still.value, SECRET_VALUE, "the vault no longer opens");
+  });
+
   test("removing a member re-keys the vault and reports it", async () => {
     const { generateIdentity, encodePub } = await import("../src/crypto.ts");
     const doomed = generateIdentity();

@@ -34,5 +34,10 @@ export async function consent(
     });
     return ap.decision === "once" || ap.decision === "session";
   }
+  // --yes stands in for a person only on a machine that has no way to ask
+  // one. When the prompt is missing because the environment switched it off,
+  // the switch must not make the answer easier: it used to turn an agent's own
+  // --yes into the person's.
+  if (process.env.HUSH_NO_DIALOG === "1" || process.env.HUSH_BIOMETRY === "off") return false;
   return opts.yes === true;
 }

@@ -189,9 +189,16 @@ test("hush scan --agents reports where, never what", { skip: process.platform ==
   }
 });
 
-test("hush scan --agents --fix moves the keys, rewrites the files, and the server still gets its key", { skip: process.platform === "win32" }, () => {
+/**
+ * A machine with truly no way to ask a person — Linux with no display, no
+ * switches set — where --yes is the only answer there can be. (With the test
+ * suite's usual HUSH_NO_DIALOG, --yes is refused; see the test below.)
+ */
+const headless = (home: string) => ({ ...agentEnv(home), HUSH_NO_DIALOG: "0", HUSH_BIOMETRY: "preferred", DISPLAY: "", WAYLAND_DISPLAY: "" });
+
+test("hush scan --agents --fix moves the keys, rewrites the files, and the server still gets its key", { skip: process.platform !== "linux" && "needs a machine with no prompt at all: Linux without a display" }, () => {
   const h = agentHome();
-  const b = bareFolder(agentEnv(h.home));
+  const b = bareFolder(headless(h.home));
   try {
     const r = b.run(["scan", "--agents", "--fix", "--yes"]);
     assert.equal(r.code, 0, r.out);
@@ -217,6 +224,20 @@ test("hush scan --agents --fix moves the keys, rewrites the files, and the serve
   }
 });
 
+test("--yes is not taken as a person's answer when the environment switched the prompt off (review F16)", { skip: process.platform === "win32" }, () => {
+  const h = agentHome();
+  const b = bareFolder(agentEnv(h.home)); // HUSH_NO_DIALOG=1, HUSH_BIOMETRY=off
+  try {
+    const before = readFileSync(h.desktop, "utf8");
+    const r = b.run(["scan", "--agents", "--fix", "--yes"]);
+    assert.notEqual(r.code, 0, `an agent's --yes stood in for a person:\n${r.out}`);
+    assert.equal(readFileSync(h.desktop, "utf8"), before);
+  } finally {
+    b.cleanup?.();
+    h.cleanup();
+  }
+});
+
 test("--fix with no terminal and no --yes changes nothing", { skip: process.platform === "win32" }, () => {
   const h = agentHome();
   const b = bareFolder(agentEnv(h.home));
@@ -230,4 +251,13 @@ test("--fix with no terminal and no --yes changes nothing", { skip: process.plat
     b.cleanup?.();
     h.cleanup();
   }
+});
+
+test("a config that fails to parse is reported without quoting any of its text (review F30)", () => {
+  const key = "sk-" + "proj-" + "Zq8Kd93LmN2pX7vB4cT6yW1rH5jF0gS";
+  // An unquoted value: the shape V8 quotes a stretch of in its message.
+  const broken = `{"mcpServers": {"x": {"env": {"OPENAI_API_KEY": ${key}}}}}`;
+  const r = findSecrets(broken, "json");
+  assert.ok(r.unreadable, "the broken file was not reported");
+  assert.ok(!r.unreadable!.includes(key.slice(0, 10)), `the message quoted the file: ${r.unreadable}`);
 });

@@ -8,7 +8,7 @@
  * back, and only then rewrites the server entry to start through `hush run`.
  * A file that changed in between is left alone.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { type Args, bool, parseArgs } from "../cli/args.ts";
 import { ctxLoose } from "../cli/context.ts";
@@ -24,7 +24,7 @@ import { preview } from "../redact.ts";
 import { serviceLabel } from "../services.ts";
 import { requireIdentity } from "../identity.ts";
 import { globalVaultExists, globalVaultName, openGlobal } from "../library.ts";
-import { slugifyEnv, audit, type Vault } from "../vault.ts";
+import { slugifyEnv, audit, writeFileAtomic, type Vault } from "../vault.ts";
 import { cmdGlobal } from "./global.ts";
 
 interface Scanned {
@@ -225,6 +225,12 @@ async function fix(a: Args, loose: ReturnType<typeof ctxLoose>, scanned: Scanned
     });
     if (!ok) {
       if (!process.stdin.isTTY && !bool(a, "yes")) die("Nothing was changed.", "Run it in a terminal to confirm, or pass --yes where no dialog can be shown.");
+      if (!process.stdin.isTTY && (process.env.HUSH_NO_DIALOG === "1" || process.env.HUSH_BIOMETRY === "off")) {
+        die(
+          "Nothing was changed: the prompt is switched off here (HUSH_NO_DIALOG or HUSH_BIOMETRY=off), and --yes does not answer for a person then.",
+          "Run it in a terminal to confirm.",
+        );
+      }
       return info(dim("nothing changed"));
     }
   }
@@ -285,9 +291,9 @@ async function fix(a: Args, loose: ReturnType<typeof ctxLoose>, scanned: Scanned
     const text = JSON.stringify(doc, null, indentOf(now)) + (now.endsWith("\n") ? "\n" : "");
     // Written beside the original and renamed over it: an agent reading the
     // file mid-write sees the old version or the new one, never half of each.
-    const tmp = `${s.file.path}.hush-${process.pid}.tmp`;
-    writeFileSync(tmp, text, { mode: statSync(s.file.path).mode & 0o777 });
-    renameSync(tmp, s.file.path);
+    // The temp name is random and created exclusively (writeFileAtomic), so a
+    // link waiting at a predictable name cannot catch the write.
+    writeFileAtomic(s.file.path, text, statSync(s.file.path).mode & 0o777);
     rewritten.push(s);
   }
 

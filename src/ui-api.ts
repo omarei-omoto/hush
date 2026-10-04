@@ -590,6 +590,9 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
 
     case "/api/team": {
       const { action, name, pk } = body;
+      if (typeof name !== "string" || (action !== "remove" && typeof pk !== "string")) {
+        return json(res, 400, { error: "name and pk must be text" });
+      }
       // Adding or removing a teammate only makes sense against a real vault,
       // and giving someone access is exactly the kind of write a links-only
       // folder should earn one for.

@@ -126,3 +126,33 @@ describe("agent registration in a folder that only uses library sets", () => {
     }
   });
 });
+
+describe("a project file a repository made a link (review F9)", () => {
+  test("install-mcp and install-skill do not write through a committed link, or into a linked folder", async () => {
+    const { mkdtempSync, symlinkSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const p = project();
+    const outside = mkdtempSync(join(tmpdir(), "hush-outside-"));
+    try {
+      const fakeHome = join(p.home, "home");
+      mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+      p.env.HOME = fakeHome;
+      p.env.PATH = "";
+      const target = join(outside, "victim.json");
+      writeFileSync(target, "{}\n");
+      symlinkSync(target, join(p.root, ".mcp.json"));
+      mkdirSync(join(outside, "claude-dir"));
+      symlinkSync(join(outside, "claude-dir"), join(p.root, ".claude"));
+
+      const mcp = p.run(["install-mcp"]);
+      assert.equal(readFileSync(target, "utf8"), "{}\n", `install-mcp wrote through the link:\n${mcp.out}`);
+      assert.match(mcp.out, /not a regular file/);
+      const skill = p.run(["install-skill"]);
+      assert.ok(!existsSync(join(outside, "claude-dir", "skills")), `install-skill wrote outside the project:\n${skill.out}`);
+      assert.match(skill.out, /outside this project/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      p.cleanup();
+    }
+  });
+});

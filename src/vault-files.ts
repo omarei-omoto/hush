@@ -526,10 +526,17 @@ const LINK_NAME = /^(?!\.+$)[A-Za-z0-9_.-]+$/;
  * by someone else's link.json it is an arbitrary-file read whose first bytes get
  * printed. The position is the useful half and it survives.
  */
-export const jsonErrorSummary = (e: unknown): string =>
-  String((e as Error)?.message ?? e)
-    .replace(/"[\s\S]*?"\.{0,3}/g, "…")
-    .slice(0, 120);
+export const jsonErrorSummary = (e: unknown): string => {
+  const message = String((e as Error)?.message ?? e);
+  // Everything from the first quote to the last goes. Pairing quotes up was
+  // not enough: the excerpt contains quotes of its own (`..."KEY": sk-pr"...`),
+  // so the pairs fell inside it and the text between them — the value — stayed.
+  const first = message.indexOf('"');
+  const last = message.lastIndexOf('"');
+  const stripped = first === -1 ? message : message.slice(0, first) + "…" + message.slice(last + 1).replace(/^\.{0,3}/, "");
+  // The unexpected character itself is one byte of the file too.
+  return stripped.replace(/token '[^']*'/, "token").slice(0, 120);
+};
 
 /**
  * The vault a link points at must be a regular file.

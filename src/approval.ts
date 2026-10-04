@@ -255,6 +255,11 @@ export async function requestApproval(
     const bio = await deps.authenticate(reason, Math.min(timeoutMs, 60_000));
 
     if (bio === "ok") {
+      // A one-shot caller (sessionGrant: false) gets exactly this action. The
+      // dialog path already withheld "Allow for a while" from it; a touch used
+      // to grant the full TTL anyway, so in a long-lived process (the broker)
+      // one fingerprint approved every repeat for as long as approvals last.
+      if (req.sessionGrant === false) return { decision: "once", code, cached: false, via: "biometry" };
       const expiresAt = Date.now() + req.ttlSeconds * 1000;
       granted.set(key, expiresAt);
       return { decision: "session", code, cached: false, via: "biometry" };

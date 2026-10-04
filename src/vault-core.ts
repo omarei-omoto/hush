@@ -298,6 +298,11 @@ export abstract class VaultCore {
       this.trustedSets = fresh.trustedSets;
     }
 
+    // What is about to be written meets the same check as what is read: a
+    // bad edit (a member whose name is not a string, say) used to be written
+    // and then refused on every open — the vault unopenable for the whole
+    // team, and nobody able to run hush team rm.
+    assertVaultShape(this.data, this.path);
     this.signIfNeeded();
     this.writeAtomically();
     this.journal = [];

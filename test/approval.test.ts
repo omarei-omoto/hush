@@ -454,3 +454,28 @@ describe("backend selection", () => {
     assert.ok(!existsSync(join(dir, "pending")), "a pending-request file was written");
   });
 });
+
+test("a fingerprint for a one-shot request approves that request only, never a cached window (review F17)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "hush-f17-"));
+  let touches = 0;
+  const deps: ApprovalDeps = {
+    authenticate: async () => (touches++, "ok"),
+    platform: () => "linux",
+    resolveDialogProgram: () => null,
+  };
+  const req: ApprovalRequest = {
+    action: "request", summary: "Request: POST https://api.example.com", scope: "request:api.example.com:f17",
+    ttlSeconds: 900, biometry: "required", sessionGrant: false,
+  };
+  try {
+    clearApprovalCache();
+    const first = await requestApproval(home, req, deps);
+    assert.equal(first.decision, "once");
+    const second = await requestApproval(home, req, deps);
+    assert.equal(second.cached, false, "the second request was approved from a cache the first one created");
+    assert.equal(touches, 2);
+  } finally {
+    clearApprovalCache();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

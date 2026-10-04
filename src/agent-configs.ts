@@ -16,6 +16,7 @@
 import { join } from "node:path";
 import { platform as osPlatform } from "node:os";
 import { stripJsonc } from "./agents.ts";
+import { jsonErrorSummary } from "./vault-files.ts";
 
 export type ConfigFormat = "json" | "jsonc" | "toml" | "yaml";
 
@@ -444,7 +445,9 @@ export function findSecrets(text: string, format: ConfigFormat): FileScan {
     try {
       doc = JSON.parse(stripJsonc(text));
     } catch (e) {
-      return { findings: [], unreadable: (e as Error).message };
+      // Not the parser's own message: V8 quotes a stretch of the text it
+      // failed on, and this text is a config file full of credentials.
+      return { findings: [], unreadable: jsonErrorSummary(e) };
     }
   }
   walkJson(doc, [], null, out);

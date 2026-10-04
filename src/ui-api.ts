@@ -17,6 +17,7 @@ import { preview } from "./redact.ts";
 import { withoutChain } from "./audit.ts";
 import { type UiCtx, forgetOnboarding, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
 import { setSkip, setupState } from "./setup.ts";
+import { parseJson } from "./json.ts";
 
 /**
  * Never let a repo-supplied symlink redirect a write hush performs.
@@ -61,7 +62,7 @@ function readBody(req: IncomingMessage): Promise<any> {
     });
     req.on("end", () => {
       try {
-        res(data ? JSON.parse(data) : {});
+        res(data ? parseJson(data) : {});
       } catch {
         rej(new Error("invalid JSON"));
       }
@@ -704,7 +705,7 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
       let existing: Record<string, unknown> = {};
       if (existsSync(policyPath)) {
         try {
-          existing = JSON.parse(readFileSync(policyPath, "utf8"));
+          existing = parseJson(readFileSync(policyPath, "utf8"));
         } catch {
           return json(res, 400, {
             error: ".hush/policy.json is not valid JSON — fix it by hand before the page can change it",

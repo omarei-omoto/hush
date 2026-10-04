@@ -14,7 +14,9 @@ export interface Args {
 
 export function parseArgs(argv: string[]): Args {
   const _: string[] = [];
-  const flags: Record<string, string | boolean | string[]> = {};
+  // No prototype: a flag is whatever was typed after "--", and `--__proto__`
+  // must be a flag like any other rather than a way to reach Object.prototype.
+  const flags: Record<string, string | boolean | string[]> = Object.create(null);
   let rest: string[] = [];
 
   const put = (name: string, value: string | boolean) => {

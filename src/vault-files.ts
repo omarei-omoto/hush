@@ -29,6 +29,7 @@ import {
 } from "./crypto.ts";
 import { isAgeRecipient, ageFingerprint } from "./age.ts";
 import { hushHome } from "./identity.ts";
+import { parseJson } from "./json.ts";
 
 export interface Recipient {
   name: string;
@@ -157,6 +158,14 @@ export interface VaultFile {
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
+ * Names that are properties of every JavaScript object. Set and key names are
+ * object keys inside hush (`envs[set][key]`), and writing `envs["__proto__"]`
+ * reaches the prototype that every object shares instead of adding a set. They
+ * are refused as names everywhere, including in a vault that arrives through git.
+ */
+const RESERVED_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
  * One segment of a scope name. The `(?!\.+$)` rules out ".", ".." and "....".
  *
  * Scopes are only object keys today, so a dot segment is harmless — but it costs
@@ -186,7 +195,7 @@ export function slugifyEnv(label: string): string {
 }
 
 export function assertKeyName(key: string): void {
-  if (!KEY_NAME.test(key)) {
+  if (!KEY_NAME.test(key) || RESERVED_NAMES.has(key)) {
     throw new ValidationError(
       `"${key.slice(0, 40)}" is not a valid variable name. ` +
         `Use letters, digits and underscores, starting with a letter or underscore.`,
@@ -199,7 +208,7 @@ export function assertScopeName(scope: string): void {
   const valid =
     segments.length >= 1 &&
     segments.length <= 2 &&
-    segments.every((s) => SCOPE_SEGMENT.test(s));
+    segments.every((s) => SCOPE_SEGMENT.test(s) && !RESERVED_NAMES.has(s));
   if (!valid) {
     throw new ValidationError(
       `"${scope.slice(0, 40)}" is not a valid environment or account name. ` +
@@ -210,7 +219,7 @@ export function assertScopeName(scope: string): void {
 
 export { ValidationError, isValidationError };
 
-export const isValidKeyName = (k: string): boolean => KEY_NAME.test(k);
+export const isValidKeyName = (k: string): boolean => KEY_NAME.test(k) && !RESERVED_NAMES.has(k);
 
 /**
  * A generous ceiling on one value. The largest real secret is a private key at
@@ -363,7 +372,7 @@ export function loadUse(hushDir: string): UseFile {
   const p = join(hushDir, "use.json");
   if (!existsSync(p)) return {};
   try {
-    return JSON.parse(readFileSync(p, "utf8")) as UseFile;
+    return parseJson(readFileSync(p, "utf8")) as UseFile;
   } catch {
     return {};
   }
@@ -513,7 +522,7 @@ export function resolveVaultPath(start = process.cwd()): { vaultPath: string; hu
   if (existsSync(linkPath)) {
     let link: LinkFile;
     try {
-      link = JSON.parse(readFileSync(linkPath, "utf8")) as LinkFile;
+      link = parseJson(readFileSync(linkPath, "utf8")) as LinkFile;
     } catch (e) {
       throw new Error(
         `${linkPath} is not valid JSON (${jsonErrorSummary(e)}).\n` +
@@ -707,6 +716,15 @@ export function assertVaultShape(data: VaultFile, path: string): void {
   if (!isObject(data.dek.wraps)) bad("the data key has no wraps");
   if (!isObject(data.recipients)) bad("the member list is not an object");
   if (!isObject(data.envs)) bad("the environments are not an object");
+  // Names are object keys all the way through hush; a reserved one (see
+  // RESERVED_NAMES) was not written by hush and is refused before it is used.
+  for (const [env, slot] of Object.entries(data.envs)) {
+    if (env.split("/").some((s) => RESERVED_NAMES.has(s))) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
+    if (isObject(slot)) for (const key of Object.keys(slot)) if (RESERVED_NAMES.has(key)) bad(`set "${env.slice(0, 24)}" has a key named "${key}", which is reserved`);
+  }
+  for (const table of [data.meta, data.setKeys]) {
+    if (isObject(table)) for (const env of Object.keys(table)) if (env.split("/").some((s) => RESERVED_NAMES.has(s))) bad(`a set is named "${env.slice(0, 24)}", which is reserved`);
+  }
 
   for (const [fp, r] of Object.entries(data.recipients)) {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(fp)) bad("a member's fingerprint is not one hush writes");

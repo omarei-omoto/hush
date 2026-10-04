@@ -20,6 +20,7 @@ import { mergeVaults, type MergeConflict, type MergeResult } from "../merge.ts";
 import { type Args, bool, str } from "../cli/args.ts";
 import { bold, cyan, die, dim, green, info, red, yellow } from "../cli/output.ts";
 import { onPath, selfCommand } from "../cli/programs.ts";
+import { parseJson } from "../json.ts";
 
 /** Where the choices a merge left open are kept, beside the vault. Never a value. */
 export const conflictFile = (vaultPath: string): string => join(dirname(vaultPath), "merge-conflicts.json");
@@ -40,7 +41,7 @@ function git(args: string[], cwd: string): { ok: boolean; out: string } {
 const parseVault = (text: string, label: string): VaultFile | null => {
   if (!text.trim()) return null;
   try {
-    return JSON.parse(text) as VaultFile;
+    return parseJson(text) as VaultFile;
   } catch {
     throw new Error(`the ${label} side of the vault is not valid JSON`);
   }

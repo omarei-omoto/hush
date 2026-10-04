@@ -409,7 +409,8 @@ A partial outside review (an automated audit the maintainer ran on
 4 October 2026, which stopped before it finished) reproduced three ways a
 value came back from `hush request`, and one timeout that did not hold. Each
 was confirmed in the code, fixed, and has a test that fails without the fix.
-Looking at the same code turned up the encoding problems.
+Looking at the same code turned up the encoding problems, and CodeQL, run for
+the first time the same day, the last row.
 
 | Severity | Issue | Fix |
 |---|---|---|
@@ -417,6 +418,7 @@ Looking at the same code turned up the encoding problems.
 | Medium | **The redactor only matched a value exactly as stored.** A server that echoed it percent-encoded, or escaped inside a JSON string, got it past the mask, in `hush request` and `hush run` alike | Each value is also masked in its percent-encoded, form-encoded and JSON-escaped forms |
 | Medium | **A value substituted into the query was not encoded.** One containing `&`, `+` or `#` reached the server as two parameters, a space, or a query cut short | Substituted values are percent-encoded, so the server receives the value as one parameter, byte for byte |
 | Low | **The timeout stopped at the headers.** A server could send its headers and then trickle the body for as long as it liked | The timeout runs until the body has been read |
+| High | **A set or key name could reach the prototype every object shares** (found by CodeQL's first run, added the same day). Names are object keys inside hush, and the rules for them accepted `__proto__`: storing a value under that set name, from the CLI or an agent's `hush_add_secret`, wrote onto Object.prototype in that process instead of into the vault, where later lookups, policy among them, would read it. Nothing checked names in a vault file arriving through git either | `__proto__`, `constructor` and `prototype` are refused as set and key names, when written and when a vault is opened; every file and message hush did not write itself is parsed by one function that refuses a `__proto__` key; the CLI's flags have no prototype |
 
 The review's test run also failed in its sandbox, where listing network
 interfaces is refused: the test that the app is not reachable from the network

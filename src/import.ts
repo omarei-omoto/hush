@@ -18,6 +18,7 @@
  */
 import { parseEnvFile } from "./scan.ts";
 import { ValidationError, isValidKeyName } from "./vault.ts";
+import { parseJson } from "./json.ts";
 
 export type ImportFormat = "dotenv" | "json" | "1password";
 
@@ -60,7 +61,7 @@ function put(out: Imported, key: string, value: string, where: string): void {
 function fromJson(text: string, where: string): Imported {
   let data: unknown;
   try {
-    data = JSON.parse(text);
+    data = parseJson(text);
   } catch (e) {
     throw new ValidationError(`${where} is not valid JSON (${(e as Error).message}).`);
   }
@@ -117,7 +118,7 @@ function fromJson(text: string, where: string): Imported {
 function from1Password(text: string, where: string): Imported {
   let data: unknown;
   try {
-    data = JSON.parse(text);
+    data = parseJson(text);
   } catch (e) {
     throw new ValidationError(`${where} is not valid JSON (${(e as Error).message}).`);
   }

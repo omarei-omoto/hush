@@ -19,6 +19,7 @@ import { isAgeRecipient, ageFingerprint, wrapDekWithAge, unwrapDekWithAge } from
 import { signerFor } from "./identity.ts";
 import { signHeader, verifyHeader, vaultKeyCommit } from "./header.ts";
 import { withVaultLock, assertVaultShape, hashOf, describeOpener, candidatesOf, safeText, isAgeWrap, isSeWrap, type VaultFile, type Recipient, type EnvMeta, type DekWrap } from "./vault-files.ts";
+import { parseJson } from "./json.ts";
 
 export const SCHEMES = [SCHEME, SCHEME_V2, SCHEME_V3];
 
@@ -285,7 +286,7 @@ export abstract class VaultCore {
       // file without going through open(), and it adopts it wholesale — so a
       // malformed file landing here would replace our in-memory copy and then
       // be written straight back out, laundering it into the repo.
-      const parsed = JSON.parse(onDisk) as VaultFile;
+      const parsed = parseJson(onDisk) as VaultFile;
       assertVaultShape(parsed, this.path);
       const fresh = this.replay(parsed);
       this.data = fresh.data;

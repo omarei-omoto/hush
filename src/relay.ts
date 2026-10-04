@@ -50,6 +50,7 @@ import {
 } from "./crypto.ts";
 import { hushHome } from "./identity.ts";
 import { restrictToOwner } from "./platform.ts";
+import { parseJson } from "./json.ts";
 
 export const RELAY_PROTOCOL = "hush/relay/v1";
 /** A request is answered within this, or not at all; the relay keeps nothing longer. */
@@ -243,7 +244,7 @@ export function makeHello(secret: Buffer, device: Device, role: Hello["role"], n
 export function openHello(secret: Buffer, text: string, role: Hello["role"]): Hello | null {
   let h: Hello;
   try {
-    h = JSON.parse(text) as Hello;
+    h = parseJson(text) as Hello;
   } catch {
     return null;
   }
@@ -300,7 +301,7 @@ export function seal(plaintext: Buffer, recipient: Buffer): string {
 
 export function unseal(text: string, me: Identity): Buffer | null {
   try {
-    const s = JSON.parse(text) as Sealed;
+    const s = parseJson(text) as Sealed;
     if (s.v !== 1) return null;
     const epk = ub64u(s.epk);
     const shared = diffieHellman({ privateKey: xPrivate(me.priv), publicKey: xPublic(epk) });
@@ -329,10 +330,10 @@ function signBody(kind: "request" | "answer", body: object, signer: Signer): Buf
 
 function verifyBody<T>(kind: "request" | "answer", plaintext: Buffer, spk: string): { body: T; text: string } | null {
   try {
-    const s = JSON.parse(plaintext.toString("utf8")) as Signed;
+    const s = parseJson(plaintext.toString("utf8")) as Signed;
     if (typeof s.body !== "string" || typeof s.sig !== "string") return null;
     if (!verifySignature(decodeSpk(spk), Buffer.concat([domain(kind), Buffer.from(s.body)]), ub64u(s.sig))) return null;
-    return { body: JSON.parse(s.body) as T, text: s.body };
+    return { body: parseJson(s.body) as T, text: s.body };
   } catch {
     return null;
   }
@@ -389,7 +390,7 @@ export function makeRequest(
     detail: rest.detail.slice(0, 20).map((l) => l.slice(0, 500)),
   };
   const plaintext = signBody("request", request, device.signer);
-  const { body } = JSON.parse(plaintext.toString("utf8")) as Signed;
+  const { body } = parseJson(plaintext.toString("utf8")) as Signed;
   return { wire: seal(plaintext, decodePub(approver.x)), request, hash: sha256(body) };
 }
 

@@ -17,6 +17,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { MAX_REQUEST_SECONDS, RELAY_PROTOCOL } from "./relay.ts";
+import { parseJson } from "./json.ts";
 
 export interface RelayLimits {
   maxBodyBytes: number;
@@ -109,7 +110,7 @@ export function createRelayServer(limits: Partial<RelayLimits> = {}): Server {
       if (raw === null) return send(res, 413, { error: "too large" });
       let body: unknown;
       try {
-        body = (JSON.parse(raw) as { body?: unknown }).body;
+        body = (parseJson(raw) as { body?: unknown }).body;
       } catch {
         return send(res, 400, { error: "expected {\"body\": \"…\"}" });
       }

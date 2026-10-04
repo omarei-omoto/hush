@@ -14,6 +14,7 @@ import { readPolicyFile, mergePolicies } from "./policy.ts";
 import { hushHome } from "./identity.ts";
 import { VERSION } from "./version.ts";
 import { callTool, errText } from "./mcp-tools.ts";
+import { parseJson } from "./json.ts";
 
 
 const PROTOCOL = "2025-06-18";
@@ -401,7 +402,7 @@ export function serveMcp(): void {
     if (!trimmed) return;
     let req: Req;
     try {
-      req = JSON.parse(trimmed);
+      req = parseJson(trimmed);
     } catch {
       return;
     }

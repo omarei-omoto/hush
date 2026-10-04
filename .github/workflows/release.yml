@@ -82,7 +82,8 @@ jobs:
           node-version: "24.x"
 
       # Trusted publishing needs npm 11.5.1 or later (staged publishing, 11.15.0).
-      - run: npm install -g npm@latest
+      # An exact version, not @latest: this job holds the right to publish.
+      - run: npm install -g npm@12.2.0
       - run: npm --version
 
       # devDependencies are needed: `prepack` builds dist/ with tsc.

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { ttlLabel } from "./dialogs.ts";
 import { ValidationError } from "./vault.ts";
 import type { Policy } from "./mcp.ts";
+import { parseJson } from "./json.ts";
 
 export function checkEnv(policy: Policy, env: string): void {
   if (policy.allowEnvs.length && !policy.allowEnvs.includes(env)) {
@@ -165,7 +166,7 @@ export function approvalCoverageLine(policy: Policy, command: string, layers: st
 /** Read a policy file (floor or repo), tolerating "missing" and "not valid JSON" alike as "nothing to add". */
 export function readPolicyFile(path: string): Partial<Policy> {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as Partial<Policy>;
+    return parseJson(readFileSync(path, "utf8")) as Partial<Policy>;
   } catch {
     return {};
   }

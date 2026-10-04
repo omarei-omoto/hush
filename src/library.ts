@@ -26,6 +26,7 @@ import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, 
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
+import { parseJson } from "./json.ts";
 
 // ------------------------------------------------------------------- config
 
@@ -97,7 +98,7 @@ const linksPath = (hushDir: string): string => join(hushDir, "envs.json");
 
 export function loadLinks(hushDir: string): string[] {
   try {
-    const raw = JSON.parse(readFileSync(linksPath(hushDir), "utf8")) as LinkedEnvs;
+    const raw = parseJson(readFileSync(linksPath(hushDir), "utf8")) as LinkedEnvs;
     return Array.isArray(raw?.use) ? raw.use.filter((x) => typeof x === "string") : [];
   } catch {
     return [];

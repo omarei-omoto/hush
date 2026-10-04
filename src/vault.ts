@@ -26,6 +26,7 @@ import { setKeyCommit, vaultKeyCommit } from "./header.ts";
 import { assertVaultShape, hashOf, jsonErrorSummary, assertScopeName, safeText, type VaultFile, type Recipient, type SecretEntry, type DekWrap } from "./vault-files.ts";
 import { SCHEMES, wrapFor, parseMemberKey } from "./vault-core.ts";
 import { VaultValues } from "./vault-values.ts";
+import { parseJson } from "./json.ts";
 
 export * from "./vault-files.ts";
 
@@ -114,7 +115,7 @@ export class Vault extends VaultValues {
 
     let data: VaultFile;
     try {
-      data = JSON.parse(raw) as VaultFile;
+      data = parseJson(raw) as VaultFile;
     } catch (e) {
       // By far the likeliest cause: two people added secrets, git conflicted,
       // and the markers were committed. "Unexpected token '<'" helps nobody.

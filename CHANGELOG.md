@@ -26,6 +26,10 @@ below.
 - **A value substituted into the query is now percent-encoded,** so one
   containing `&`, `+` or `#` reaches the server intact, as one parameter.
 - **The request timeout now covers the whole response,** not just the headers.
+- **Names JavaScript treats specially are refused.** A set or key named
+  `__proto__`, `constructor` or `prototype` is refused when you create it and
+  when a vault or project file that contains one is opened, and hush refuses a
+  `__proto__` key in any file or message it did not write itself.
 
 ### Project
 

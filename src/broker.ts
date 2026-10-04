@@ -31,6 +31,7 @@ import { parseMemberKey } from "./vault-core.ts";
 import { requestApproval } from "./approval.ts";
 import { checkCommand, runScope } from "./policy.ts";
 import { sealLease } from "./lease.ts";
+import { parseJson } from "./json.ts";
 
 /** A machine allowed to take leases: its hush key, and who enrolled it. */
 export interface LeaseDevice {
@@ -437,7 +438,7 @@ export function createBroker(o: BrokerOptions): Server {
       if (route !== "/mcp") {
         let body: Record<string, unknown>;
         try {
-          body = JSON.parse(await readBody(req));
+          body = parseJson(await readBody(req));
         } catch {
           return send(res, 400, { error: "invalid JSON" });
         }
@@ -448,7 +449,7 @@ export function createBroker(o: BrokerOptions): Server {
 
       let rpc: Rpc;
       try {
-        rpc = JSON.parse(await readBody(req));
+        rpc = parseJson(await readBody(req));
       } catch (e) {
         return send(res, 400, fail(null, -32700, (e as Error).message === "body too large" ? "body too large" : "invalid JSON"));
       }

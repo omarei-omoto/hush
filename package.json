@@ -66,8 +66,8 @@
     "provenance": true
   },
   "devDependencies": {
-    "@types/node": "^22.20.2",
-    "typescript": "^5.8.0"
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2"
   },
   "os": [
     "darwin",

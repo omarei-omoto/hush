@@ -4,6 +4,11 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.11.0-beta.1 — 2026-10-04
+
+The first beta: everything below is new since 0.10.0. Install it with
+`npm i -g @omarei/hush@beta`; the stable channel stays on 0.10.0.
+
 ### Setting up, with or without your agent
 
 Setup is now one checklist that a person and a coding agent both follow.

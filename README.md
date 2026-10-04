@@ -146,7 +146,7 @@ hush scan --transcripts      # your keys in agents' saved conversations (read-on
 ```
 
 Agents on other machines (a server, a devcontainer) can use keys that stay
-on yours: [hush on a tailnet](docs/TAILNET.md) (beta).
+on yours: [hush on a tailnet](docs/TAILNET.md).
 
 ## Why this exists
 

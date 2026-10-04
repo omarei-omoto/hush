@@ -159,7 +159,7 @@ your rules but not loosen them once you have a personal floor
 (`~/.hush/policy.json`, `hush secure --floor`); without one, the repository's
 own policy decides whether you are asked, which is why setup now includes it.
 
-### The tailnet broker (beta)
+### The tailnet broker
 
 `hush serve --tailnet` answers other machines on your tailnet
 ([docs/TAILNET.md](docs/TAILNET.md)). A caller is whoever Tailscale says holds

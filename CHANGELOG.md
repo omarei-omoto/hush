@@ -4,6 +4,12 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.11.0 — 2026-10-04
+
+Everything new since 0.10.0: what was in 0.11.0-beta.1, and the security fixes
+found since. **Upgrade if you use `hush request`**: see Security, directly
+below.
+
 ### Security
 
 - **`hush request` could return the value it sent.** A value substituted into
@@ -27,11 +33,6 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   the workflows' actions and the dev and docs dependencies current. Every
   action is pinned to a commit.
 - tryhush.dev publishes a `security.txt` saying where to report a vulnerability.
-
-## 0.11.0-beta.1 — 2026-10-04
-
-The first beta: everything below is new since 0.10.0. Install it with
-`npm i -g @omarei/hush@beta`; the stable channel stays on 0.10.0.
 
 ### Setting up, with or without your agent
 
@@ -101,7 +102,7 @@ server-side agent then reach your laptop with no SSH tunnel. hush only reads
 from Tailscale, and never changes a Tailscale setting. [docs/TAILNET.md](docs/TAILNET.md)
 is the design for going further: a hush broker on the tailnet.
 
-### A hush broker on your tailnet (beta)
+### A hush broker on your tailnet
 
 `hush serve --tailnet --sets <set>,…` lets agents on your other tailnet
 machines use credentials that stay on this one. It offers two MCP tools over
@@ -170,6 +171,10 @@ A tag like `v0.11.0-beta.1` publishes to npm's `beta` tag
 (`npm i -g @omarei/hush@beta`) and a GitHub prerelease. The stable channel —
 `npm i -g @omarei/hush`, Homebrew, install.sh and the MCP registry — never
 serves a beta.
+
+## 0.11.0-beta.1 — 2026-10-04
+
+The beta of 0.11.0. Its changes are listed under 0.11.0, above.
 
 ## 0.10.0 — 2026-10-01
 

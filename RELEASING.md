@@ -43,6 +43,14 @@ A release is a signed tag. Nothing is published from anyone's laptop.
    [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — by hand
    (`wingetcreate submit <dir>`) until the package is established there.
 
+## A beta
+
+A tag with a hyphen, `vx.y.z-beta.n`, is a prerelease: the same workflow
+publishes it to npm's `beta` tag and as a GitHub prerelease, and leaves the
+stable channel alone (npm `latest`, Homebrew, install.sh, the MCP registry).
+Cut betas from the `beta` branch; when one is ready, merge `beta` into `main`
+and tag the stable version there. The docs site deploys from `main` only.
+
 ## The binaries, once
 
 Nothing here is needed for a release to work — without it the binaries ship
@@ -84,9 +92,8 @@ under the custom domain `tryhush.dev` (the build writes the `CNAME` file).
    - `CNAME` `www` → `omarei-omoto.github.io`
 3. **The repository**: Settings → Pages → Custom domain `tryhush.dev`, then
    tick *Enforce HTTPS* once the certificate is issued (it can take a while).
-4. If Pages only allows deploys from the default branch, add `beta` under
-   Settings → Environments → github-pages → Deployment branches, until beta is
-   merged into main.
+4. The site deploys from `main` only, so it always describes the stable
+   release.
 
 If you later switch the Cloudflare records to *Proxied*, set SSL/TLS to
 *Full (strict)* so Cloudflare checks GitHub's certificate.

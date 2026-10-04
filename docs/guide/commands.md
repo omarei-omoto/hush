@@ -82,7 +82,7 @@ other
   hush scan --agents [--fix]     plaintext keys in your agents' configs; --fix moves them into hush
   hush scan --transcripts        your secrets in agents' saved conversations (read-only)
   hush root                      the project root hush would act on
-  hush serve --tailnet --sets …  a broker on your tailnet: agents elsewhere call APIs through it (beta)
+  hush serve --tailnet --sets …  a broker on your tailnet: agents elsewhere call APIs through it
   hush lease enroll <broker>     let this machine take leases: hush run --from <broker> -- <cmd>
   hush tailnet grant --to … --sets …  write the broker's grant into your tailnet policy (--apply)
 

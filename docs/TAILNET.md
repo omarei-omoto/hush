@@ -1,9 +1,9 @@
 # hush on a tailnet: design
 
-Status: **steps 1 to 4 are on the beta branch.** Step 5 is a plan, to be argued
+Status: **steps 1 to 4 shipped in 0.11.0.** Step 5 is a plan, to be argued
 with before it is built.
 
-## Using it (step 2, beta)
+## Using it (step 2)
 
 On the machine that keeps the keys, with Tailscale running:
 
@@ -250,12 +250,12 @@ This needs a proper review before anyone puts production keys behind it.
 
 ## Steps
 
-1. **The relay over the tailnet.** *Done (beta).* `hush relay serve` prints
+1. **The relay over the tailnet.** *Done (0.11.0).* `hush relay serve` prints
    the `tailscale serve` line and the pairing URL when Tailscale is running.
    Approvals from server-side agents reach the laptop with no SSH tunnel.
    Checked live: the relay answered through `tailscale serve` with a valid
    certificate.
-2. **`hush serve --tailnet`, request-only.** *Done (beta).* MCP over HTTP on
+2. **`hush serve --tailnet`, request-only.** *Done (0.11.0).* MCP over HTTP on
    the tailnet address, with callers identified by whois and checked against
    `--allow`. Tools: `hush_list_sets` and `hush_request`. No value leaves the
    broker. Checked live: a call over the tailnet reached the stand-in API with
@@ -263,9 +263,9 @@ This needs a proper review before anyone puts production keys behind it.
    rather than sitting behind `tailscale serve`: behind it, every connection
    comes from 127.0.0.1, and identity would have to come from headers that any
    local process could forge.
-3. **Leases.** *Done (beta).* `hush lease enroll`, then `hush run --from
+3. **Leases.** *Done (0.11.0).* `hush lease enroll`, then `hush run --from
    <broker>`: sealed to an enrolled key, approval-gated, logged.
-4. **Teams.** *Done (beta).* Sets granted through tailnet app capabilities.
+4. **Teams.** *Done (0.11.0).* Sets granted through tailnet app capabilities.
    The audit log names each caller.
 5. **Minting**, and **approving from a phone**, built on the same broker.
 

@@ -15,7 +15,7 @@ import { requestApproval } from "../approval.ts";
 import { type Args, bool, repeat, str } from "../cli/args.ts";
 import { ctxLoose, dieNotSetUp, dieOnApproval, interactiveSetup, isSetUp, policyFor, runSetupDialogue } from "../cli/context.ts";
 import { die, dim, info, red, warn } from "../cli/output.ts";
-import { collectExtraSets } from "../cli/sets.ts";
+import { collectExtraSets, confirmLibraryLinks } from "../cli/sets.ts";
 import { findUpward, onPath, packageManagerFor } from "../cli/programs.ts";
 import { leaseRun } from "./lease.ts";
 
@@ -41,7 +41,8 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
   }
 
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing, unreadable, blocked } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const compose = () => composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, unreadable, blocked } = await confirmLibraryLinks(loose.hushDir, compose(), compose, true);
   // A scoped member or CI identity in a project that also uses sets they were
   // never given: skipped, and said, so a missing variable has an explanation.
   if (unreadable.length) process.stderr.write(dim(`hush: not yours to read, skipped: ${unreadable.join(", ")}\n`));

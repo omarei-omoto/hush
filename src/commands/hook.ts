@@ -99,7 +99,7 @@ function _hush_hook --on-variable PWD
   _hush_unload
   test -z "$root"; and return
   set -l keys (hush export --names 2>/dev/null | tr '\\n' ' ')
-  hush export --shell 2>/dev/null | source
+  hush export --format fish 2>/dev/null | source
   or return
   set -gx HUSH_LOADED_DIR $root
   set -gx HUSH_LOADED_KEYS $keys

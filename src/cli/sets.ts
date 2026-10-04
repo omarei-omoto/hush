@@ -12,6 +12,8 @@ import { type Args, bool, list } from "../cli/args.ts";
 import { ctxLoose, dieOnApproval, makeProjectVault, policyFor } from "../cli/context.ts";
 import { die, warn } from "../cli/output.ts";
 import { promptLine } from "../cli/prompts.ts";
+import { consent } from "./consent.ts";
+import { confirmLinks, placeOf, type Composed } from "../library.ts";
 
 /** `--library` is honoured; otherwise a first run writes into this project. */
 export const targetFor = (a: Args): "library" | "project" => (bool(a, "library") ? "library" : "project");
@@ -195,4 +197,38 @@ export function convertLegacyPin(spec: string): string {
   const name = setNameFor(m[1], m[2]);
   warn(`"${spec}" is deprecated (removed in hush 2.0); use "${name}" instead.`);
   return name;
+}
+
+/**
+ * Library sets this project's committed list names but nobody has confirmed
+ * for it on this machine (library.ts, confirmedLinks). Where a person can be
+ * asked — a terminal, or a hush dialog when no terminal — they are asked once
+ * for this project; anywhere else (the shell hook, export) the sets are left
+ * out and the line says how to confirm them.
+ */
+export async function confirmLibraryLinks(
+  hushDir: string,
+  composed: Composed,
+  again: () => Composed,
+  ask: boolean,
+): Promise<Composed> {
+  const names = composed.unconfirmed;
+  if (!names.length) return composed;
+  const what = `${names.length === 1 ? "your library set" : "your library sets"} ${names.join(", ")}`;
+  if (ask) {
+    const yes = await consent(`This project asks to use ${what}. Use ${names.length === 1 ? "it" : "them"} here?`, {
+      hushDir,
+      detail: [
+        `Project:  ${placeOf(hushDir)}`,
+        "Asked once for this project on this machine. A project's list of sets is committed with it,",
+        "so a repository you clone cannot reach your library without this.",
+      ],
+    });
+    if (yes) {
+      confirmLinks(hushDir, names);
+      return again();
+    }
+  }
+  warn(`not using ${what} here: this project's list names ${names.length === 1 ? "it" : "them"}, and that is not confirmed on this machine. To confirm: hush use --confirm`);
+  return composed;
 }

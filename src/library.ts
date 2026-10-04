@@ -201,6 +201,8 @@ export function saveLinks(hushDir: string, use: string[]): void {
   // given — never sorted — and mentioning a set again moves it to the end,
   // which is how "hush use <set>" on an already-used set makes it win.
   writeFileSync(linksPath(hushDir), JSON.stringify({ use: lastMentionWins(use) }, null, 2) + "\n");
+  // Linking a set yourself is confirming it for this project on this machine.
+  if (added.length) confirmLinks(hushDir, added);
 }
 
 /**
@@ -246,6 +248,51 @@ export interface Composed {
    * Skipped and said; one asked for by name is refused outright instead.
    */
   blocked: { name: string; onlyIn: string[] }[];
+  /**
+   * Library sets this project's committed list names that nobody has
+   * confirmed for this project on this machine yet. Skipped, never injected:
+   * see confirmedLinks().
+   */
+  unconfirmed: string[];
+}
+
+// ---------------------------------------------------------- confirmations
+
+/**
+ * Which library sets each project may use, as confirmed on this machine.
+ *
+ * A project's list of sets (.hush/envs.json) is committed, so a teammate who
+ * clones it gets the same list — and so does anyone who clones any repository
+ * that carries one. Your library is yours, so the list alone does not reach
+ * it: the first time a project names a library set here, you confirm it, and
+ * the confirmation lives in ~/.hush, where no repository can write it. Linking
+ * a set yourself (hush use, the app) counts as confirming it.
+ */
+const confirmationsPath = (): string => join(hushHome(), "confirmed-links.json");
+
+function loadConfirmations(): Record<string, string[]> {
+  try {
+    const j = JSON.parse(readFileSync(confirmationsPath(), "utf8"));
+    return j && typeof j === "object" && !Array.isArray(j) ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+export function confirmedLinks(hushDir: string | null): Set<string> {
+  if (!hushDir) return new Set();
+  const list = loadConfirmations()[placeOf(hushDir)];
+  return new Set(Array.isArray(list) ? list.filter((x) => typeof x === "string") : []);
+}
+
+/** Record that the person confirmed these library links for this project, on this machine. */
+export function confirmLinks(hushDir: string, names: string[]): void {
+  if (!names.length) return;
+  const all = loadConfirmations();
+  const place = placeOf(hushDir);
+  all[place] = [...new Set([...(all[place] ?? []), ...names])];
+  mkdirSync(hushHome(), { recursive: true, mode: 0o700 });
+  writeFileSync(confirmationsPath(), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
 }
 
 /**
@@ -273,7 +320,9 @@ export function composeSets(
   const missing: string[] = [];
   const unreadable: string[] = [];
   const blocked: { name: string; onlyIn: string[] }[] = [];
+  const unconfirmed: string[] = [];
   const place = placeOf(hushDir);
+  const confirmed = confirmedLinks(hushDir);
 
   const library = openGlobal();
   /**
@@ -304,6 +353,17 @@ export function composeSets(
     return false;
   };
   const typed = new Set(extra);
+  /**
+   * A library set that reached this run only through the project's committed
+   * list, and that nobody has confirmed for this project here: skipped. A set
+   * named for this run (`--use`, an agent's sets) is the caller's own choice,
+   * and goes through the approval like everything else.
+   */
+  const confirmedHere = (link: string): boolean => {
+    if (typed.has(link) || confirmed.has(link)) return true;
+    unconfirmed.push(link);
+    return false;
+  };
   // Position is precedence: a name the project already uses, named again in
   // `extra`, moves to the end so it wins for this run.
   const names = lastMentionWins([...usedSets(hushDir), ...extra]);
@@ -321,6 +381,7 @@ export function composeSets(
       // An empty library default adds no layer, so the "using …" line stays
       // honest about what was actually injected.
       if (library?.hasSet("default")) {
+        if (!confirmedHere(LIBRARY_DEFAULT)) continue;
         if (!fitsHere(library, "default", LIBRARY_DEFAULT)) continue;
         if (library.sets().some((s) => s.name === "default" && s.keys.length)) {
           Object.assign(secrets, library.materialize(id, "default"));
@@ -336,7 +397,7 @@ export function composeSets(
       Object.assign(secrets, project.materialize(id, name));
       layers.push(name);
     } else if (library?.hasSet(name)) {
-      if (!fitsHere(library, name, name)) continue;
+      if (!confirmedHere(name) || !fitsHere(library, name, name)) continue;
       Object.assign(secrets, library.materialize(id, name));
       layers.push(`${globalVaultName()}:${name}`);
     } else if (typed.has(name)) {
@@ -353,7 +414,7 @@ export function composeSets(
     }
   }
 
-  return { secrets, layers, missing, unreadable, blocked };
+  return { secrets, layers, missing, unreadable, blocked, unconfirmed };
 }
 
 // ---------------------------------------------------------- project files

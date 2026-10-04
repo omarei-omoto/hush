@@ -234,3 +234,22 @@ export function toShellExports(secrets: Record<string, string>): string {
       .join("\n") + "\n"
   );
 }
+
+/**
+ * fish's own single quotes. Unlike POSIX, fish reads two escapes inside them,
+ * \\ and \', so the POSIX form above is wrong for fish: a value with a
+ * backslash in the right place ended its quotes early, and the rest of it was
+ * read as fish code by the shell hook. Here both are escaped, and nothing else
+ * inside the quotes means anything to fish.
+ */
+const fishQuote = (v: string): string => "'" + v.replaceAll("\\", "\\\\").replaceAll("'", "\\'") + "'";
+
+/** `set -gx K V` lines for fish's `source`, with the same name filter as toShellExports. */
+export function toFishExports(secrets: Record<string, string>): string {
+  return (
+    Object.entries(secrets)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => (isValidKeyName(k) ? `set -gx ${k} ${fishQuote(v)}` : `# skipped ${JSON.stringify(k)}: not a valid variable name`))
+      .join("\n") + "\n"
+  );
+}

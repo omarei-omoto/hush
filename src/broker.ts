@@ -229,7 +229,7 @@ export function createBroker(o: BrokerOptions): Server {
     if (refused.length) throw new ValidationError(`Not offered to you by this broker: ${refused.join(", ")}. You may use ${permitted.join(", ")}.`);
     const secrets: Record<string, string> = {};
     for (const n of names) for (const item of vault.list(n)) secrets[item.key] = vault.get(identity, n, item.key);
-    return { secrets, layers: names, missing: [], unreadable: [], blocked: [] };
+    return { secrets, layers: names, missing: [], unreadable: [], blocked: [], unconfirmed: [] };
   };
 
   const listSets = (permitted: string[]) => {

@@ -133,6 +133,9 @@ describe('hush env describe --only-in: "this key is for MODIO projects only"', (
 
   test("linked before the rule existed: skipped and said, and the rest of the run goes ahead", () => {
     writeFileSync(join(w.other, ".hush", "envs.json"), JSON.stringify({ use: ["fal-modio"] }));
+    // It was linked by the person back then, so it was confirmed for this
+    // project; what skips it now is the folder rule, not the confirmation.
+    writeFileSync(join(w.home, "confirmed-links.json"), JSON.stringify({ [realpathSync(w.other)]: ["fal-modio"] }));
     try {
       const r = w.hush(w.other, "run", ...w.printKey);
       assert.equal(r.code, 0, r.out);

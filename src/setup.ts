@@ -237,6 +237,20 @@ export function setupState(cwd: string, env: NodeJS.ProcessEnv = process.env): S
     }
   }
 
+  // 6b. Your floor: rules in ~/.hush/policy.json that a repository's own
+  //     policy.json can tighten but not loosen. Without one, a project's
+  //     committed policy decides whether you are asked at all.
+  const floor = existsSync(join(hushHome(), "policy.json"));
+  add({
+    id: "floor",
+    title: "Your own rules",
+    kind: "auto",
+    status: floor ? "done" : "todo",
+    detail: floor ? "a repository's policy can tighten them, never loosen them" : "without them, a project's own policy.json decides whether you are asked",
+    command: "hush secure --floor",
+    argv: [["secure", "--floor"]],
+  });
+
   // 7. Worth knowing, never required: what past conversations already hold.
   add({
     id: "conversations",

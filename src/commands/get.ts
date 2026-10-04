@@ -10,7 +10,7 @@ import { requestApproval } from "../approval.ts";
 import { type Args, bool } from "../cli/args.ts";
 import { ctxLoose, dieOnApproval, policyFor } from "../cli/context.ts";
 import { bold, die, dim, green, info, out, warn } from "../cli/output.ts";
-import { collectExtraSets } from "../cli/sets.ts";
+import { collectExtraSets, confirmLibraryLinks } from "../cli/sets.ts";
 import { confirm } from "../cli/prompts.ts";
 
 export async function cmdGet(a: Args): Promise<void> {
@@ -23,7 +23,8 @@ export async function cmdGet(a: Args): Promise<void> {
   // library link included — not a single literal env, so a key that only a
   // used library set provides is findable at all in a vault-less folder.
   const extra = collectExtraSets(a);
-  const { secrets, layers, missing, blocked } = composeSets(loose.vault, id, loose.hushDir, extra);
+  const compose = () => composeSets(loose.vault, id, loose.hushDir, extra);
+  const { secrets, layers, missing, blocked } = await confirmLibraryLinks(loose.hushDir, compose(), compose, true);
   if (!Object.prototype.hasOwnProperty.call(secrets, key)) {
     die(
       `No secret "${key}" in any set this project uses.`,

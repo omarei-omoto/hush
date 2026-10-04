@@ -386,7 +386,10 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       // A non-2xx is a real answer the model needs to see rather than a tool
       // failure: returning it as text lets it read the error body and adapt,
       // where an isError result would just look like the call went wrong.
-      const skipped = resolved.blocked.map((b) => `Note: skipped set "${b.name}": it is only for ${b.onlyIn.join(", ")}, not this project.`);
+      const skipped = [
+        ...resolved.blocked.map((b) => `Note: skipped set "${b.name}": it is only for ${b.onlyIn.join(", ")}, not this project.`),
+        ...(resolved.unconfirmed.length ? [`Note:  skipped ${resolved.unconfirmed.join(", ")} from the user's library: this project lists ${resolved.unconfirmed.length > 1 ? "them" : "it"}, but the user has not confirmed that on this machine. Do not work around it; ask the user to run: hush use --confirm`] : []),
+      ];
       return text([renderRequest(result, { includeHeaders: true }), ...skipped].join("\n"));
     }
 
@@ -491,6 +494,7 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       for (const b of resolved.blocked) {
         parts.push(`Note:  skipped set "${b.name}": it is only for ${b.onlyIn.join(", ")}, not this project. Do not try to use it here.`);
       }
+      if (resolved.unconfirmed.length) parts.push(`Note:  skipped ${resolved.unconfirmed.join(", ")} from the user's library: this project lists ${resolved.unconfirmed.length > 1 ? "them" : "it"}, but the user has not confirmed that on this machine. Do not work around it; ask the user to run: hush use --confirm`);
       if (resolved.missing.length) {
         parts.push(`Note:  this project uses ${resolved.missing.join(", ")}, which your library does not have.`);
       }

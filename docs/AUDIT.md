@@ -386,6 +386,24 @@ confirmations at all, that a lease is limited to its command, and the
 setup checklist's commands, which used JSON quoting where a shell expects
 its own.
 
+### Fourteenth pass — the whole codebase, by trust boundary
+
+The same method as the thirteenth pass, over everything rather than the beta
+changes, organised by boundary: the agent, a repository you clone, a vault
+file arriving through git, the browser, the network, shell output, and
+distribution. Earlier passes and the red team covered the agent and browser
+boundaries thoroughly, and those held.
+
+| Severity | Issue | Fix |
+|---|---|---|
+| High | A project's list of sets (`.hush/envs.json`) is committed with it, and nothing asked before that list reached your library. In a repository you cloned, running its commands through hush could give its code your personal library sets; with no personal floor, the repository's own `policy.json` also decided whether you were asked | Library sets named only by a project's committed list are used after you confirm them for that project on this machine, recorded in `~/.hush`. `hush use` and the app count as confirming; `hush use --confirm` covers a cloned project. Agents are told what to ask you. The setup checklist now includes the personal floor |
+| Medium (needs validation) | The fish shell hook read values written with POSIX quoting, which fish interprets differently inside single quotes, so a stored value could end its quotes early | A fish-specific export (`hush export --format fish`) with fish's own escaping; the hook uses it |
+
+Reviewed without new findings: POSIX, PowerShell and Nushell exports, the git
+merge driver, and the vault parsing it uses. Not covered in depth: the relay's
+cryptography (reviewed in the fourth pass), hardware-key paths, Windows
+specifics, timing, and the install script and release pipeline.
+
 ### Mutants that survive on purpose
 
 Four mutations are known to be behaviourally identical, each checked

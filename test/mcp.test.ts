@@ -834,7 +834,16 @@ describe("mcp — the pre-sets argument names still mean what they meant", () =>
     const lib = Vault.create(libPath, "global", { name: "tester", pub: p.id.pub });
     lib.set(p.id, "acme-production", "FAL_KEY", "acme-library-key");
     lib.save();
-    saveLinks(join(p.root, ".hush"), ["acme-production"]);
+    // Linked the way a person links it, so it is confirmed in this test's own
+    // home (library.ts, confirmedLinks), which is the home the server reads.
+    const savedHome = process.env.HUSH_HOME;
+    process.env.HUSH_HOME = p.home;
+    try {
+      saveLinks(join(p.root, ".hush"), ["acme-production"]);
+    } finally {
+      if (savedHome === undefined) delete process.env.HUSH_HOME;
+      else process.env.HUSH_HOME = savedHome;
+    }
 
     const s = await talk(p, [init, call(1, "hush_provision", { tool: "genmedia" })]);
     const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;

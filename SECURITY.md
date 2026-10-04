@@ -149,6 +149,16 @@ team — and what to turn on for each, see [docs/SAFETY.md](./docs/SAFETY.md).
 What has actually been tried against these surfaces, and with what result, is
 in [docs/RED-TEAM.md](./docs/RED-TEAM.md).
 
+### A repository you clone
+
+A project's `.hush/` folder is committed, so it arrives with every clone. Its
+list of sets can name sets from your library, but a library set named only by
+that list is not used until you confirm it for that project on this machine;
+the confirmation lives in `~/.hush`. A repository's `policy.json` can tighten
+your rules but not loosen them once you have a personal floor
+(`~/.hush/policy.json`, `hush secure --floor`); without one, the repository's
+own policy decides whether you are asked, which is why setup now includes it.
+
 ### The tailnet broker (beta)
 
 `hush serve --tailnet` answers other machines on your tailnet

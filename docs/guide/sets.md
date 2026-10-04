@@ -22,6 +22,14 @@ with no `--to` lands there); use it in a folder with
 `.hush/envs.json` records only the *names* — a teammate who clones the repo
 gets "this project uses a set called acme-production" and supplies their own.
 
+Because that list travels with the repository, it does not reach your library
+on its own. The first time a project you did not link yourself names one of
+your library sets, hush asks before using it (on the terminal, or in a dialog),
+once per project on this machine; until then the set is left out and hush says
+so. `hush use <set>` and the app's "Use here" count as confirming, and
+`hush use --confirm` confirms the sets a cloned project already lists. The
+confirmation is kept in `~/.hush`, where no repository can write it.
+
 ```bash
 hush add .env.production --as "Acme Production" --library \
   --description "Live Stripe + Convex" --when "deploys only"

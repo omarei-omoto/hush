@@ -164,3 +164,59 @@ test("NV1: a lease enrollment belongs to the device's stable ID, not to a name a
 test("setup's commands are quoted for a shell: a folder name cannot run anything", () => {
   assert.equal(commandOf([["import", ".env", "--as", "X $(touch pwned) it's"]]), `hush import .env --as 'X $(touch pwned) it'\\''s'`);
 });
+
+// Whole-codebase pass ---------------------------------------------------------
+
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { CLI } from "./helpers/cli.ts";
+import { toFishExports } from "../src/run.ts";
+
+test("library sets named only by a project's committed list are used after the person confirms them here", () => {
+  const base = mkdtempSync(join(dir, "links-"));
+  const home = join(base, "home");
+  const proj = join(base, "proj");
+  mkdirSync(join(proj, ".hush"), { recursive: true });
+  const env = { ...process.env, HOME: home, HUSH_HOME: home, HUSH_NO_KEYCHAIN: "1", HUSH_NO_NUDGE: "1", HUSH_BIOMETRY: "off", HUSH_NO_DIALOG: "1", NO_COLOR: "1" };
+  delete (env as NodeJS.ProcessEnv).HUSH_IDENTITY;
+  const elsewhere = join(base, "elsewhere");
+  mkdirSync(elsewhere);
+  const hush = (args: string[], input?: string, cwd = proj) => {
+    const r = spawnSync(process.execPath, [CLI, ...args], { cwd, env, encoding: "utf8", input, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    return { code: r.status ?? 1, out: (r.stdout ?? "") + (r.stderr ?? "") };
+  };
+  const value = "sk-proj-Example7Tz2Lp9Wx4Mn6Kb3Vc8Hd5";
+  // Set up from another folder: adding a set inside a project also links it there.
+  assert.equal(hush(["id", "--create"], undefined, elsewhere).code, 0);
+  assert.equal(hush(["global", "--create"], undefined, elsewhere).code, 0);
+  assert.equal(hush(["add", "openai", "--as", "my-openai", "--library"], `${value}\n`, elsewhere).code, 0);
+  // The list arrives with the project, as it does in a clone.
+  writeFileSync(join(proj, ".hush", "envs.json"), JSON.stringify({ use: ["my-openai"] }));
+  const show = ["run", "--", process.execPath, "-e", "console.log('length=' + (process.env.OPENAI_API_KEY || '').length)"];
+
+  const before = hush(show);
+  assert.match(before.out, /length=0/, "a library set reached the project without being confirmed");
+  assert.match(before.out, /not confirmed on this machine/);
+  assert.match(before.out, /hush use --confirm/);
+
+  // Linking it yourself is confirming it.
+  assert.equal(hush(["use", "my-openai"]).code, 0);
+  assert.match(hush(show).out, new RegExp(`length=${value.length}`));
+});
+
+test("the fish hook's exports escape what fish reads inside single quotes", () => {
+  const out = toFishExports({ PLAIN: "abc", QUOTED: "it's", SLASHED: "a\\b" });
+  assert.match(out, /^set -gx PLAIN 'abc'$/m);
+  assert.match(out, /^set -gx QUOTED 'it\\'s'$/m);
+  assert.match(out, /^set -gx SLASHED 'a\\\\b'$/m);
+  assert.match(toFishExports({ "not a name": "x" }), /^# skipped/);
+});
+
+test("the setup checklist includes your own rules, the floor a repository's policy cannot loosen", async () => {
+  const { setupState } = await import("../src/setup.ts");
+  const st = setupState(mkdtempSync(join(dir, "floor-")), { HOME: join(dir, "nohome") });
+  const floor = st.steps.find((s) => s.id === "floor");
+  assert.ok(floor, "no floor step");
+  assert.equal(floor!.kind, "auto");
+  assert.equal(floor!.command, "hush secure --floor");
+});

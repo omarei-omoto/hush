@@ -128,6 +128,12 @@ regression test:
   set; without either, an allowed caller could send a key to their own server.
 - Lease enrollments are bound to the device's stable ID, not its name.
 - `hush setup` quotes its commands for a shell.
+- A project's committed list of sets no longer reaches your library on its
+  own: a library set named only by that list is used after you confirm it for
+  the project on this machine (`hush use`, the app, or `hush use --confirm`).
+- The fish shell hook uses fish's own quoting (`hush export --format fish`).
+- The setup checklist includes your personal policy floor, so a repository's
+  `policy.json` cannot decide on its own whether you are asked.
 
 ### Release channels
 

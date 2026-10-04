@@ -15,4 +15,3 @@ dist/
 # Built binaries (scripts/build-binaries.mjs) and their scratch entry point.
 release/
 .build/
-site/

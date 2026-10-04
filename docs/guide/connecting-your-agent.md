@@ -18,7 +18,8 @@ it finds, in the file that agent actually reads:
 | **Zed** | `~/.config/zed/settings.json` (comments kept) | `.agents/skills/hush/SKILL.md` |
 | **Cline** | `~/.cline/mcp.json` (CLI); the extension gets a line to paste | `.clinerules/hush.md` |
 | **Continue** | `.continue/mcpServers/hush.json` | `.continue/rules/hush.md` |
- On a terminal it lists the files first and asks
+
+On a terminal it lists the files first and asks
 (`pick` to choose per agent; `--yes` skips the question). It never rewrites an
 entry you already have, and when it cannot write one it prints the line to
 paste instead of a tick that means nothing. The entry is a plain `hush mcp`

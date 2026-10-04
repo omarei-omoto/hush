@@ -1,6 +1,7 @@
 name: Docs
 
-# The docs site (scripts/build-docs.mjs) on GitHub Pages at tryhush.dev, rebuilt
+# The docs site on GitHub Pages at tryhush.dev: the README and docs/ as a
+# Starlight site (website/, content from scripts/build-docs.mjs), rebuilt
 # whenever the README, the guide or the docs change. Built from beta while beta
 # is where the current docs are; main deploys too, so merging beta changes
 # nothing. One-time setup: Settings → Pages → Source: "GitHub Actions", and
@@ -19,7 +20,9 @@ on:
       - "docs/**"
       - "src/cli/help.ts"
       - "scripts/build-docs.mjs"
-      - "scripts/markdown.mjs"
+      - "scripts/check-site.mjs"
+      - "website/**"
+      - "assets/**"
       - "scripts/gen-commands.mjs"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -43,13 +46,17 @@ jobs:
       # The command reference must match the program, and every link must land.
       - name: the command reference is current
         run: node scripts/gen-commands.mjs --check
+      # The site's own dependencies (Astro, Starlight), pinned by website's
+      # lockfile. They never touch the hush package, which has none.
+      - name: install
+        run: npm ci --prefix website
+      # The content, then astro build, then scripts/check-site.mjs: every link
+      # and anchor resolves and no script comes from another host.
       - name: build
-        run: node scripts/build-docs.mjs --out site --site https://tryhush.dev/
-      - name: every link on the site resolves
-        run: node --test --test-name-pattern "the real site" test/docs-site.test.ts
+        run: npm run build --prefix website
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: website/dist
 
   deploy:
     needs: build

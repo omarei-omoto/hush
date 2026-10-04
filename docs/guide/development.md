@@ -34,3 +34,15 @@ pinned in `.bun-version`), and the whole suite runs against it:
 npm run build:binaries                                  # this machine's; --all for every target
 HUSH_TEST_BINARY=$PWD/release/hush-darwin-arm64 npm run test:binary
 ```
+
+The docs site at [tryhush.dev](https://tryhush.dev/) is these Markdown files,
+built with [Starlight](https://starlight.astro.build) in `website/`. It has its
+own dependencies, so the hush package still has none. Edit the Markdown where it
+is; to see the site as you go:
+
+```bash
+cd website
+npm ci
+npm run dev            # http://localhost:4321, with search and live reload
+npm run build          # what CI deploys, then a check that every link lands
+```

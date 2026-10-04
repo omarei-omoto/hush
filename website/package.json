@@ -1,0 +1,16 @@
+{
+  "name": "hush-docs",
+  "private": true,
+  "type": "module",
+  "description": "tryhush.dev: the README and docs/ as a Starlight site. Not part of the hush package.",
+  "scripts": {
+    "content": "node ../scripts/build-docs.mjs",
+    "dev": "npm run content && astro dev",
+    "build": "npm run content && astro build && node ../scripts/check-site.mjs dist",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.5",
+    "astro": "7.3.5"
+  }
+}

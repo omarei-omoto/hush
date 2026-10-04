@@ -1,0 +1,76 @@
+/* hush's palette (assets/README.md): warm paper and ink, with one green. */
+:root {
+  --sl-color-accent-low: #1c3326;
+  --sl-color-accent: #5fae7e;
+  --sl-color-accent-high: #cdebd7;
+  --sl-color-white: #f2f1ed;
+  --sl-color-gray-1: #e6e4de;
+  --sl-color-gray-2: #c9c7c0;
+  --sl-color-gray-3: #8f8c84;
+  --sl-color-gray-4: #5a5852;
+  --sl-color-gray-5: #2b2a26;
+  --sl-color-gray-6: #1a1a18;
+  --sl-color-black: #111111;
+  /* Notes and tips in the palette's green rather than Starlight's blue and purple. */
+  --sl-color-blue-low: #1c2721;
+  --sl-color-blue: #7fc59a;
+  --sl-color-blue-high: #cdebd7;
+  --sl-color-purple-low: #1c2721;
+  --sl-color-purple: #7fc59a;
+  --sl-color-purple-high: #cdebd7;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #d6e9dc;
+  --sl-color-accent: #2f6b47;
+  --sl-color-accent-high: #1d4630;
+  --sl-color-white: #111111;
+  --sl-color-gray-1: #2b2a26;
+  --sl-color-gray-2: #3b3a36;
+  --sl-color-gray-3: #5a5852;
+  --sl-color-gray-4: #77756e;
+  --sl-color-gray-5: #c9c7c0;
+  --sl-color-gray-6: #e8e6e0;
+  --sl-color-gray-7: #efeee9;
+  --sl-color-black: #f7f6f2;
+  --sl-color-blue-low: #e3efe6;
+  --sl-color-blue: #2f6b47;
+  --sl-color-blue-high: #1d4630;
+  --sl-color-purple-low: #e3efe6;
+  --sl-color-purple: #2f6b47;
+  --sl-color-purple-high: #1d4630;
+}
+
+/* The logo is a wordmark; keep it the size of a title, not a banner. */
+.site-title img {
+  height: 1.4rem;
+  width: auto;
+}
+
+/* The home page: a centred hero, and the README's long prose at reading width. */
+[data-has-hero] .hero {
+  grid-template-columns: 100%;
+  padding-block: clamp(2.5rem, 1rem + 8vmin, 6rem) 1rem;
+  text-align: center;
+}
+[data-has-hero] .hero .stack,
+[data-has-hero] .hero .copy {
+  align-items: center;
+}
+[data-has-hero] .hero .actions {
+  justify-content: center;
+}
+[data-has-hero] .hero h1 {
+  max-width: 18ch;
+  font-size: clamp(2.25rem, 5.5vw, 3.75rem);
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+[data-has-hero] .hero .tagline {
+  max-width: 34rem;
+  text-align: center;
+}
+[data-has-hero] .sl-markdown-content {
+  max-width: 46rem;
+  margin-inline: auto;
+}

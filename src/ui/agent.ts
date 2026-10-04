@@ -35,14 +35,15 @@ function renderAgent(page){
   ];
   const sw=h("div",{class:"card list"});
   ACTIONS.forEach(function(a){
-    const cb=h("input",{type:"checkbox",checked:S.policy.requireApproval.indexOf(a[0])>-1,"aria-label":"Ask first: "+a[1]});
+    const fromRepo=(S.policy.repoRequires||[]).indexOf(a[0])>-1;
+    const cb=h("input",{type:"checkbox",checked:S.policy.requireApproval.indexOf(a[0])>-1,disabled:fromRepo,"aria-label":"Ask first: "+a[1]});
     cb.onchange=async function(){
       const next=new Set(S.policy.requireApproval);
       if(cb.checked)next.add(a[0]);else next.delete(a[0]);
       try{S=await api("/api/policy",{requireApproval:Array.from(next)});render();toast(cb.checked?"asks first now":"no longer asks")}
       catch(e){cb.checked=!cb.checked}
     };
-    sw.append(h("label",{class:"li",style:"cursor:pointer"},h("div",{class:"body"},h("div",{class:"t",text:a[1]}),h("div",{class:"d",text:a[2]})),
+    sw.append(h("label",{class:"li",style:fromRepo?"":"cursor:pointer"},h("div",{class:"body"},h("div",{class:"t",text:a[1]}),h("div",{class:"d",text:fromRepo?a[2]+" This project asks for it, so it stays on.":a[2]})),
       h("span",{class:"switch"},cb,h("i"))));
   });
   const TTL=[[900,"15 minutes"],[1800,"30 minutes"],[3600,"1 hour"],[14400,"4 hours"],[86400,"all day"]];

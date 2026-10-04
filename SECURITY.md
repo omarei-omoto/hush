@@ -155,9 +155,12 @@ A project's `.hush/` folder is committed, so it arrives with every clone. Its
 list of sets can name sets from your library, but a library set named only by
 that list is not used until you confirm it for that project on this machine;
 the confirmation lives in `~/.hush`. A repository's `policy.json` can tighten
-your rules but not loosen them once you have a personal floor
-(`~/.hush/policy.json`, `hush secure --floor`); without one, the repository's
-own policy decides whether you are asked, which is why setup now includes it.
+your rules and never loosen them: approvals, fingerprint approval and what an
+"Allow" covers start from the defaults (or your floor, `~/.hush/policy.json`),
+and a repository can only add to them. Turning approvals off is your choice on
+your machine, for one project (`hush secure approval --off`). A `HUSH_HOME`
+inside the repository you are in is refused, so a project cannot point hush at
+a floor of its own through an agent's MCP configuration.
 
 ### The tailnet broker
 
@@ -194,8 +197,9 @@ shell cannot answer an approval by itself**: it would have to click a dialog on
 your screen or touch the fingerprint reader for you. Where a machine can offer
 neither of those, hush refuses the gated action rather than accepting a file.
 The fingerprint helper is built fresh from hush's own source, per process, into
-a private folder — it is never read from a path anything running as you could
-have written, which is what makes "touch the sensor" mean what it says.
+a private folder, and its bytes are checked against that build before every
+run — a copy something running as you replaced is not believed — which is what
+makes "touch the sensor" mean what it says.
 The policy
 in the repo can only tighten what `~/.hush/policy.json`, your floor outside
 the repo, allows — so an agent editing project files cannot loosen it — but
@@ -229,6 +233,13 @@ If that matters for your threat model, use a hardware identity
 ([docs/BIOMETRY.md](./docs/BIOMETRY.md)): with a Secure Enclave key
 (`hush secure --hardware` on a Mac) or `age-plugin-yubikey`, the key is
 non-extractable and every unwrap needs a touch.
+
+**Vault metadata is advisory.** A vault's values and the header that says
+who can read them are encrypted and signed. What sits beside them is not: a
+set's description and the folders it is kept to (`--only-in`), and each value's
+timestamps and "readable by someone since removed" markers. Anyone who can
+write the vault file can change those without breaking a signature, so treat
+them as notes, not controls. Signing them is planned for the next vault format.
 
 **Redaction is defence in depth, not a boundary.** It masks known values in a
 child's output. It cannot see a value that has been base64'd, encrypted,

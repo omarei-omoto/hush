@@ -1,6 +1,7 @@
 /**
  * `hush secure`: climbing the ladder, and what it refuses to promise.
  */
+import { writePolicies } from "../helpers/policy.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
@@ -48,10 +49,12 @@ describe("hush secure", () => {
 
   test("turning on approval actually rewrites the policy", () => {
     const p = project();
-    writeFileSync(join(p.root, ".hush", "policy.json"), JSON.stringify({ requireApproval: [] }));
+    writePolicies(p.home, p.root, { requireApproval: [] }); // switched off on this machine
     p.run(["secure", "approval"]);
     const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")) as { requireApproval: string[] };
     assert.deepEqual(policy.requireApproval.sort(), ["add", "request", "reveal", "run"]);
+    const floor = JSON.parse(readFileSync(join(p.home, "policy.json"), "utf8"));
+    assert.equal(floor.projects, undefined, "the machine's 'off' for this project survived turning approval on");
     p.cleanup();
   });
 
@@ -94,10 +97,7 @@ describe("hush secure — the gaps mutation testing found", () => {
     // the deny-list additions and the allowEnvs pin — while reporting success.
     const p = project();
     try {
-      writeFileSync(
-        join(p.root, ".hush", "policy.json"),
-        JSON.stringify({ requireApproval: [], allowEnvs: ["default"], unsafeAllowCommands: ["jq"], maxRunMs: 5000 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: [], allowEnvs: ["default"], unsafeAllowCommands: ["jq"], maxRunMs: 5000 });
       assert.equal(p.run(["secure", "approval"]).code, 0);
 
       const policy = JSON.parse(readFileSync(join(p.root, ".hush", "policy.json"), "utf8")) as Record<string, unknown>;

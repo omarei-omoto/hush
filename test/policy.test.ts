@@ -125,8 +125,20 @@ describe("mergePolicies", () => {
     const merged = mergePolicies(base, { requireApproval: ["run"] }, { requireApproval: [] });
     assert.deepEqual(merged.requireApproval, ["run"], "the repo dropped an action the floor requires");
 
+    // With no floor, the defaults are the floor (review F4): a committed
+    // `[]` used to switch every prompt off.
     const noFloor = mergePolicies(base, {}, { requireApproval: [] });
-    assert.deepEqual(noFloor.requireApproval, [], "an absent floor forced the base defaults back on");
+    assert.deepEqual(noFloor.requireApproval.sort(), [...base.requireApproval].sort(), "a repository switched the default approvals off");
+    assert.deepEqual(mergePolicies(base, {}, {}).requireApproval.length, base.requireApproval.length);
+  });
+
+  test("turning approvals off is this machine's choice for a project, kept in the floor (review F4)", () => {
+    const floor = { projects: { "/work/app": { requireApproval: [] as string[] } } };
+    assert.deepEqual(mergePolicies(base, floor, {}, "/work/app").requireApproval, [], "the machine's own choice was ignored");
+    assert.deepEqual(mergePolicies(base, floor, { requireApproval: ["run"] }, "/work/app").requireApproval, ["run"], "the repo could not add one back");
+    assert.deepEqual(mergePolicies(base, floor, {}, "/work/other").requireApproval.sort(), [...base.requireApproval].sort(), "one project's choice leaked to another");
+    // A floor that turns approvals off for every project is the user's to write too.
+    assert.deepEqual(mergePolicies(base, { requireApproval: [] }, {}).requireApproval, []);
   });
 
   test("maxRunMs and approvalTtlSeconds take the smaller of the floor and the repo", () => {
@@ -153,15 +165,14 @@ describe("mergePolicies", () => {
     assert.equal(mergePolicies(base, { approvalScope: "sets" }, { approvalScope: "command" }).approvalScope, "command");
   });
 
-  test("an absent floor reproduces today's plain repo-over-defaults merge", () => {
-    // Every field except unsafeAllowCommands (see its own test above) should
-    // come out exactly as the old two-way `{...DEFAULT_POLICY, ...repo}` did.
-    const repo = { allowEnvs: ["dev"], requireApproval: [], biometry: "off" as const, maxRunMs: 5000 };
+  test("an absent floor: the repo narrows and adds as before, and the safety defaults are its floor (review F4)", () => {
+    const repo = { allowEnvs: ["dev"], requireApproval: [], biometry: "off" as const, approvalScope: "sets" as const, maxRunMs: 5000 };
     const merged = mergePolicies(base, {}, repo);
     assert.deepEqual(merged.allowEnvs, ["dev"]);
-    assert.deepEqual(merged.requireApproval, []);
-    assert.equal(merged.biometry, "off");
     assert.equal(merged.maxRunMs, 5000);
+    assert.deepEqual(merged.requireApproval.sort(), [...base.requireApproval].sort());
+    assert.equal(merged.biometry, base.biometry, "a repository turned fingerprint approval below the default");
+    assert.equal(merged.approvalScope, base.approvalScope, "a repository widened approval scope below the default");
   });
 });
 
@@ -183,7 +194,9 @@ describe("policyWeakenings", () => {
 
   test("names a requireApproval action the repo tried to drop", () => {
     const lines = policyWeakenings({ requireApproval: ["run"] }, { requireApproval: [] });
-    assert.match(lines.join("\n"), /requireApproval: run — ignored, your floor requires it/);
+    assert.match(lines.join("\n"), /requireApproval: run — ignored: a repository can add approvals, not remove them/);
+    // With no floor at all, the defaults are what it tried to drop.
+    assert.match(policyWeakenings({}, { requireApproval: [] }, DEFAULT_POLICY).join("\n"), /leaves out requireApproval: run, add, reveal, request/);
   });
 
   test("names a biometry downgrade attempt", () => {

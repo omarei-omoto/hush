@@ -13,7 +13,7 @@ import { createInterface } from "node:readline";
 import { Vault, ValidationError } from "./vault.ts";
 import { assess, shouldNudge, recordNudge, snooze, type Posture } from "./posture.ts";
 import { loadIdentity, migrateIdentityToKeychain, publicKeyOf, hushHome, storeLabel } from "./identity.ts";
-import { ensureFloor } from "./policy.ts";
+import { ensureFloor, setLocalApprovals } from "./policy.ts";
 import { ensureHelper, biometryStatus, type BiometryDeps } from "./biometry.ts";
 import { ageAvailable, ageIdentityPath, identityPlugin, recipientsForIdentity } from "./age.ts";
 import { createEnclaveIdentity, enclaveAvailable, loadEnclaveIdentity } from "./enclave.ts";
@@ -247,6 +247,8 @@ export async function runSecure(ctx: SecureCtx, want?: string, ttlSeconds?: numb
         requireApproval: DEFAULT_POLICY.requireApproval,
         approvalTtlSeconds: ttl,
       });
+      // And forget any "off" this machine chose for the project.
+      setLocalApprovals(hushHome(), ctx.hushDir, null);
       out(`  ${green("✓")} approval is now required to run, add, reveal, or send a request`);
       out(`  ${dim("You will see a dialog naming the command, the sets and the variables.")}`);
       out(

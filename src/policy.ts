@@ -12,12 +12,58 @@
  * checks that read an already-loaded Policy, the merge that builds one, and
  * the approval-scope helpers both surfaces share.
  */
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { ttlLabel } from "./dialogs.ts";
 import { ValidationError } from "./vault.ts";
 import type { Policy } from "./mcp.ts";
 import { parseJson } from "./json.ts";
+import { writeFileAtomic } from "./vault-files.ts";
+
+/**
+ * The floor file, `~/.hush/policy.json`: a policy of its own, plus this
+ * machine's choices for particular projects. Turning an approval off is one
+ * of those choices, and it lives here — on the machine, per project — because
+ * a repository's policy.json is written by whoever wrote the repository.
+ */
+export type FloorFile = Partial<Policy> & { projects?: Record<string, { requireApproval?: string[] }> };
+
+/** A project's key in the floor's `projects`: its root, with links resolved. */
+export function projectKey(hushDir: string): string {
+  const root = dirname(resolve(hushDir));
+  try {
+    return realpathSync(root);
+  } catch {
+    return root;
+  }
+}
+
+const stringList = (x: unknown): string[] | undefined =>
+  Array.isArray(x) && x.every((v) => typeof v === "string") ? (x as string[]) : undefined;
+
+/** What this machine requires approval for in the project `here` (a projectKey), before the repo adds to it. */
+function approvalsFloor(base: Policy, floor: FloorFile, here?: string): string[] {
+  const local = here && floor.projects && typeof floor.projects === "object" && Object.hasOwn(floor.projects, here)
+    ? stringList(floor.projects[here]?.requireApproval)
+    : undefined;
+  return local ?? stringList(floor.requireApproval) ?? base.requireApproval;
+}
+
+/**
+ * Record this machine's own choice of approvals for one project, in the floor
+ * file. `null` forgets it, so the defaults (and the floor) apply again.
+ */
+export function setLocalApprovals(home: string, hushDir: string, requireApproval: string[] | null): void {
+  const path = join(home, "policy.json");
+  const current = (existsSync(path) ? parseJson(readFileSync(path, "utf8")) : {}) as FloorFile;
+  const projects: Record<string, { requireApproval?: string[] }> = { ...(current.projects ?? {}) };
+  const key = projectKey(hushDir);
+  if (requireApproval === null) delete projects[key];
+  else projects[key] = { requireApproval: [...new Set(requireApproval)] };
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const { projects: _old, ...rest } = current;
+  writeFileAtomic(path, JSON.stringify({ ...rest, ...(Object.keys(projects).length ? { projects } : {}) }, null, 2) + "\n");
+}
 
 export function checkEnv(policy: Policy, env: string): void {
   if (policy.allowEnvs.length && !policy.allowEnvs.includes(env)) {
@@ -193,7 +239,7 @@ const SCOPE_RANK: Record<Policy["approvalScope"], number> = { sets: 0, command: 
  * merge for every field except `unsafeAllowCommands` — see its own comment
  * for why that one field is deliberately not "empty floor means no opinion".
  */
-export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partial<Policy>): Policy {
+export function mergePolicies(base: Policy, floor: FloorFile, repo: Partial<Policy>, here?: string): Policy {
   // "Narrow, not widen" fields: allowCommands/allowEnvs have always treated an
   // empty list as "no restriction", so a floor that does not set one leaves
   // the repo's own choice untouched — exactly today's behaviour.
@@ -231,12 +277,16 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
   const ceiling = (field: "maxRunMs" | "approvalTtlSeconds"): number =>
     Math.min(repo[field] ?? base[field], floor[field] ?? Infinity);
 
-  const biometryRepo = repo.biometry ?? base.biometry;
-  const biometryFloor = floor.biometry ?? "off";
+  // The safety settings take their floor from the defaults when the floor file
+  // is silent: a repository can ask for more (a fingerprint, a narrower grant)
+  // and never for less. An empty floor used to contribute the weakest value of
+  // each, so a committed `"biometry": "off"` went through unopposed.
+  const biometryFloor = floor.biometry && floor.biometry in BIOMETRY_RANK ? floor.biometry : base.biometry;
+  const biometryRepo = repo.biometry && repo.biometry in BIOMETRY_RANK ? repo.biometry : biometryFloor;
   const biometry = BIOMETRY_RANK[biometryFloor] > BIOMETRY_RANK[biometryRepo] ? biometryFloor : biometryRepo;
 
-  const scopeRepo = repo.approvalScope ?? base.approvalScope;
-  const scopeFloor = floor.approvalScope ?? "sets";
+  const scopeFloor = floor.approvalScope && floor.approvalScope in SCOPE_RANK ? floor.approvalScope : base.approvalScope;
+  const scopeRepo = repo.approvalScope && repo.approvalScope in SCOPE_RANK ? repo.approvalScope : scopeFloor;
   const approvalScope = SCOPE_RANK[scopeFloor] > SCOPE_RANK[scopeRepo] ? scopeFloor : scopeRepo;
 
   return {
@@ -247,11 +297,11 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
     allowEnvs: narrow("allowEnvs"),
     denyKeys: union(base.denyKeys, floor.denyKeys, repo.denyKeys),
     maxRunMs: ceiling("maxRunMs"),
-    // Union of floor and repo, with repo falling back to the base default when
-    // unset — the same "repo can override the default outright" behaviour
-    // loadPolicy has always had, except the floor's own requirements are never
-    // among the things an unset-vs-empty repo value can drop.
-    requireApproval: union(floor.requireApproval, repo.requireApproval ?? base.requireApproval),
+    // What this machine requires (its choice for this project, else its
+    // floor, else the defaults), plus anything the repository adds. A
+    // repository can add an approval and never remove one: `[]` in a
+    // committed policy.json used to switch every prompt off.
+    requireApproval: union(approvalsFloor(base, floor, here), stringList(repo.requireApproval)),
     approvalTtlSeconds: ceiling("approvalTtlSeconds"),
     // A longer wait is not a weakening, so the repo's own choice always wins.
     approvalTimeoutSeconds: repo.approvalTimeoutSeconds ?? floor.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
@@ -273,7 +323,7 @@ export function mergePolicies(base: Policy, floor: Partial<Policy>, repo: Partia
  * repo asks for nothing wider than the floor allows (including when there is
  * no floor at all, in which case nothing is ever refused).
  */
-export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>): string[] {
+export function policyWeakenings(floor: FloorFile, repo: Partial<Policy>, base?: Policy, here?: string): string[] {
   const lines: string[] = [];
 
   const droppedFromUnsafe = (repo.unsafeAllowCommands ?? []).filter((c) => !(floor.unsafeAllowCommands ?? []).includes(c));
@@ -306,9 +356,16 @@ export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>):
     }
   }
 
-  if (repo.requireApproval) {
-    const dropped = (floor.requireApproval ?? []).filter((a) => !repo.requireApproval!.includes(a));
-    if (dropped.length) lines.push(`policy.json drops requireApproval: ${dropped.join(", ")} — ignored, your floor requires it`);
+  const repoApprovals = stringList(repo.requireApproval);
+  if (repoApprovals) {
+    const required = base ? approvalsFloor(base, floor, here) : (stringList(floor.requireApproval) ?? []);
+    const dropped = required.filter((a) => !repoApprovals.includes(a));
+    if (dropped.length) {
+      lines.push(
+        `policy.json leaves out requireApproval: ${dropped.join(", ")} — ignored: a repository can add approvals, not remove them ` +
+          `(only you can, on this machine: hush secure approval --off)`,
+      );
+    }
   }
 
   if (repo.denyKeys) {
@@ -324,12 +381,16 @@ export function policyWeakenings(floor: Partial<Policy>, repo: Partial<Policy>):
     }
   }
 
-  if (floor.biometry && repo.biometry && BIOMETRY_RANK[repo.biometry] < BIOMETRY_RANK[floor.biometry]) {
-    lines.push(`policy.json asks for biometry: ${repo.biometry} — ignored, below your floor of ${floor.biometry}`);
+  const bioFloor = floor.biometry ?? base?.biometry;
+  if (bioFloor && repo.biometry && BIOMETRY_RANK[repo.biometry] < BIOMETRY_RANK[bioFloor]) {
+    lines.push(`policy.json asks for biometry: ${repo.biometry} — ignored, below ${floor.biometry ? "your floor" : "the default"} of ${bioFloor}`);
   }
 
-  if (floor.approvalScope && repo.approvalScope && SCOPE_RANK[repo.approvalScope] < SCOPE_RANK[floor.approvalScope]) {
-    lines.push(`policy.json asks for approvalScope: ${repo.approvalScope} — ignored, below your floor of ${floor.approvalScope}`);
+  const scopeFloorShown = floor.approvalScope ?? base?.approvalScope;
+  if (scopeFloorShown && repo.approvalScope && SCOPE_RANK[repo.approvalScope] < SCOPE_RANK[scopeFloorShown]) {
+    lines.push(
+      `policy.json asks for approvalScope: ${repo.approvalScope} — ignored, below ${floor.approvalScope ? "your floor" : "the default"} of ${scopeFloorShown}`,
+    );
   }
 
   return lines;

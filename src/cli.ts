@@ -2,8 +2,8 @@
 /**
  * hush — envelope-encrypted team secrets your agent can use but never read.
  */
-import { existsSync } from "node:fs";
-import { join, resolve as resolvePath } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve as resolvePath, sep } from "node:path";
 import { resolveVaultPath, namedVaultPath, setTrustHook, withoutControls } from "./vault.ts";
 import { serveMcp } from "./mcp.ts";
 import { serveUi } from "./ui.ts";
@@ -98,6 +98,32 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   "merge-driver": cmdMergeDriver,
 };
 
+/** The repository containing `start` (the nearest folder with a .git), and HUSH_HOME when it lies inside it. */
+function hushHomeInsideRepo(start: string): { home: string; repo: string } | null {
+  if (!process.env.HUSH_HOME) return null;
+  // Links resolved, including for a HUSH_HOME not made yet: its nearest
+  // existing folder is resolved and the rest appended (/var and
+  // /private/var are one place on macOS).
+  const real = (p: string): string => {
+    const abs = resolvePath(p);
+    try {
+      return realpathSync(abs);
+    } catch {
+      const up = dirname(abs);
+      return up === abs ? abs : join(real(up), abs.slice(up.length + (up.endsWith(sep) ? 0 : 1)));
+    }
+  };
+  let dir = real(start);
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) break;
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+  const home = real(process.env.HUSH_HOME);
+  return home === dir || home.startsWith(dir + sep) ? { home, repo: dir } : null;
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const command = argv[0];
@@ -110,6 +136,19 @@ async function main(): Promise<void> {
     },
     record: (view) => recordTrusted(view),
   });
+
+  // HUSH_HOME holds your key, your library and your policy floor, so it can
+  // never be a folder inside the repository you are working in: a cloned
+  // project could set it for the MCP server through a committed .mcp.json and
+  // hand hush a floor of its own choosing.
+  const homeInRepo = hushHomeInsideRepo(process.cwd());
+  if (homeInRepo) {
+    process.stderr.write(
+      red(`hush: HUSH_HOME (${withoutControls(homeInRepo.home)}) is inside the repository at ${withoutControls(homeInRepo.repo)}.`) +
+        "\n  It holds your key and your policy floor, so it has to live outside any project. Unset it, or point it elsewhere.\n",
+    );
+    process.exit(1);
+  }
 
   if (!command || command === "--help" || command === "-h") {
     // In a folder nobody has set up, the eight-command screen is still a wall

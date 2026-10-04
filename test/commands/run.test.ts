@@ -1,6 +1,7 @@
 /**
  * `hush run`, `hush dev`, pass-through and `--materialize`.
  */
+import { writePolicies } from "../helpers/policy.ts";
 import { test, describe } from "node:test";
 import { join, dirname } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
@@ -81,7 +82,7 @@ describe("hush run and .env.schema", () => {
       writeFileSync(join(p.home, "policy.json"), JSON.stringify({ unmaskKeys: ["STRIPE_SECRET_KEY"] }));
       // The project asks for no approvals, so the run itself is not gated; the
       // floor's unmaskKeys is the thing under test, not the approval path.
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      writePolicies(p.home, p.root, { requireApproval: [] });
       const r = p.run(["run", "--", echoScript(p)]);
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /val=sk_live_cli/, "the user's own unmaskKeys entry was ignored");
@@ -344,10 +345,7 @@ describe("hush run --materialize", () => {
     // needs. A policy that gates only `run` must not be enough.
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["reveal"], approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["reveal"], approvalTimeoutSeconds: 1 });
       const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
       assert.equal(r.code, 1, `a reveal-gated materialise ran unattended:\n${r.out}`);
       assert.doesNotMatch(r.out, /path=/, "the command ran despite the reveal gate");
@@ -361,7 +359,7 @@ describe("hush run --materialize", () => {
     // become "everything" or "nothing".
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      writePolicies(p.home, p.root, { requireApproval: [] });
       const r = p.run(["run", "--materialize", "STRIPE_SECRET_KEY", "--", script(p)]);
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /path=/);
@@ -378,7 +376,7 @@ describe("hush run --no-redact (review F7)", () => {
       const path = join(p.root, "show.sh");
       writeFileSync(path, '#!/bin/sh\necho "value=$STRIPE_SECRET_KEY"\n');
       chmodSync(path, 0o755);
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["reveal"], approvalTimeoutSeconds: 1 }));
+      writePolicies(p.home, p.root, { requireApproval: ["reveal"], approvalTimeoutSeconds: 1 });
       const masked = p.run(["run", "--", "./show.sh"]);
       assert.equal(masked.code, 0, masked.out);
       assert.match(masked.out, /value=\[redacted:STRIPE_SECRET_KEY\]/);

@@ -191,7 +191,7 @@ export function assess(vault: Vault | null, hushDir: string | null, projectRoot:
       gap: "credentials can be used without your approval",
       label: "using a credential needs your approval",
       pass: Boolean(policy?.requireApproval.includes("run")),
-      command: 'set "requireApproval": ["run","add","reveal","request"] in .hush/policy.json',
+      command: "hush secure approval",
       why: "otherwise an agent can use your keys without you seeing it happen",
     },
     {

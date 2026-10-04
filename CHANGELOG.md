@@ -4,6 +4,55 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+## 0.12.0 — 2026-10-04
+
+Fixes from a deep review of 0.11.1 (docs/AUDIT.md, sixteenth pass): 33 findings,
+each checked against the code and fixed with a test.
+
+### Breaking
+
+- **A repository can no longer switch your approvals off.** A committed
+  `.hush/policy.json` can add approvals, ask for a fingerprint or narrow what an
+  "Allow" covers, but `"requireApproval": []`, `"biometry": "off"` or
+  `"approvalScope": "sets"` in a repository no longer lowers anything below the
+  defaults. To stop being asked in a project, on your machine:
+  `hush secure approval --off` (it asks you first), or the switches in the
+  app's Agent section. Both are kept in `~/.hush/policy.json`.
+- **`HUSH_HOME` inside the repository you are in is refused.**
+
+### Security
+
+- A plain member's signature is no longer trusted to change who can read a
+  vault this machine pinned before it was signed.
+- The Touch ID helper is checked before every run, not only when built.
+- `HUSH_NO_DIALOG` and `HUSH_BIOMETRY=off` only ever refuse: they no longer send
+  a request to a paired approver, or let `--yes` answer for you.
+- On Windows, `SystemRoot` no longer chooses the `powershell.exe` that handles
+  your key or the program that draws the dialog.
+- Vault files: names that are properties of every JavaScript object are refused
+  as fingerprints too; folder patterns and exposure lists are checked on load.
+- `hush merge`: writes under the vault lock, atomically; refuses to give the new
+  key back to someone this branch removed; checks the conflict file it reads;
+  scrubs names before printing them.
+- A changed data key cannot be accepted with `hush team accept`.
+- `hush request` shows `http://` and `--insecure` in the prompt; `hush run
+  --no-redact` is gated like a reveal; `hush run --from` applies this machine's
+  policy first.
+- An approver's "Allow for a while" covers what you were shown, not an id the
+  other machine chose; a fingerprint for a one-shot request is one-shot.
+- The audit log caps its fields, keeps five generations linked to each other,
+  and says when earlier history is gone.
+- `.env.schema` patterns are capped and time-limited.
+- Writers of files in a repository (`policy.json`, agent configs and skills)
+  refuse a link; temp files have random names and are created exclusively; the
+  vault lock knows its owner.
+- Parse errors no longer quote any of the file they failed on.
+
+### Documented
+
+- Set descriptions, `--only-in` folders, timestamps and exposure markers are
+  outside the vault's signature; SECURITY.md now says they are advisory.
+
 ## 0.11.1 — 2026-10-04
 
 ### Security

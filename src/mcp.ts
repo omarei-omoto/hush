@@ -9,8 +9,8 @@
  * short enough to implement here rather than take an SDK for.
  */
 import { createInterface } from "node:readline";
-import { join } from "node:path";
-import { readPolicyFile, mergePolicies } from "./policy.ts";
+import { join, resolve } from "node:path";
+import { readPolicyFile, mergePolicies, projectKey } from "./policy.ts";
 import { hushHome } from "./identity.ts";
 import { VERSION } from "./version.ts";
 import { callTool, errText } from "./mcp-tools.ts";
@@ -146,8 +146,10 @@ export const DEFAULT_POLICY: Policy = {
  */
 export function loadPolicy(hushDir: string): Policy {
   const floor = readPolicyFile(join(hushHome(), "policy.json"));
-  const repo = readPolicyFile(join(hushDir, "policy.json"));
-  return mergePolicies(DEFAULT_POLICY, floor, repo);
+  // ~/.hush itself (no project): its own policy file is the floor, read once.
+  const inProject = resolve(hushDir) !== resolve(hushHome());
+  const repo = inProject ? readPolicyFile(join(hushDir, "policy.json")) : {};
+  return mergePolicies(DEFAULT_POLICY, floor, repo, inProject ? projectKey(hushDir) : undefined);
 }
 
 // --------------------------------------------------------------- JSON-RPC

@@ -1,15 +1,17 @@
 /**
  * The CLI enforces .hush/policy.json — an agent's shell must not bypass what the MCP server enforces.
  */
+import { writePolicies } from "../helpers/policy.ts";
 import { test, describe } from "node:test";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { runScope } from "../../src/policy.ts";
 import { DEFAULT_POLICY } from "../../src/mcp.ts";
 import { requestApproval, clearApprovalCache } from "../../src/approval.ts";
 import { tmpdir } from "node:os";
-import { clickingAllow, project } from "../helpers/cli.ts";
+import { CLI, clickingAllow, project } from "../helpers/cli.ts";
+import { spawnSync } from "node:child_process";
 
 describe("the CLI enforces .hush/policy.json — an agent's shell must not bypass what the MCP server enforces", () => {
   // The project fixture runs with HUSH_NO_DIALOG=1, so an enforced approval has
@@ -20,10 +22,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("reveal denied by biometry: `hush get --yes` still refuses", () => {
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 });
       const r = p.run(["get", "STRIPE_SECRET_KEY", "--yes"]);
       assert.equal(r.code, 1, r.out);
       assert.ok(!r.out.includes("sk_live_cli"), `a credential leaked past a denied approval:\n${r.out}`);
@@ -46,10 +45,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("a forged reveal grant on disk is never honoured, even with biometry required", () => {
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 });
       // Exactly the scope string cmdGet computes for this key and env.
       writeFileSync(
         join(p.hushDir, "grants.local.json"),
@@ -68,10 +64,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("with biometry required, a forged run grant on disk is never honoured either", () => {
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["run"], biometry: "required", approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["run"], biometry: "required", approvalTimeoutSeconds: 1 });
       // Exactly the scope runScope() computes for this command and this project's sets.
       writeFileSync(
         join(p.hushDir, "grants.local.json"),
@@ -87,10 +80,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("a forged add grant on disk is never honoured — an agent cannot pre-approve planting its own secret", () => {
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["add"], biometry: "required", approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["add"], biometry: "required", approvalTimeoutSeconds: 1 });
       // Exactly the scope string cmdAddKeyValue computes for this key and set.
       writeFileSync(
         join(p.hushDir, "grants.local.json"),
@@ -109,10 +99,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("export is gated as reveal; --names is not, because it reveals nothing", () => {
     const p = project();
     try {
-      writeFileSync(
-        join(p.hushDir, "policy.json"),
-        JSON.stringify({ requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 }),
-      );
+      writePolicies(p.home, p.root, { requireApproval: ["reveal"], biometry: "required", approvalTimeoutSeconds: 1 });
       const exported = p.run(["export"]);
       assert.equal(exported.code, 1, exported.out);
       assert.ok(!exported.out.includes("sk_live_cli"), `export leaked a value past a denied approval:\n${exported.out}`);
@@ -132,7 +119,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     // can only be allowCommands doing its job.
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowCommands: ["npm"] }));
+      writePolicies(p.home, p.root, { requireApproval: [], allowCommands: ["npm"] });
 
       const refused = p.run(["run", "--", "git", "--version"]);
       assert.equal(refused.code, 1, refused.out);
@@ -151,7 +138,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     // agent's other tools were already refused by.
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowCommands: ["npm"] }));
+      writePolicies(p.home, p.root, { requireApproval: [], allowCommands: ["npm"] });
 
       const refused = p.run(["echo", "hi"]);
       assert.equal(refused.code, 1, refused.out);
@@ -169,7 +156,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("an interpreter goes to the approval prompt, not a flat refusal", () => {
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      writePolicies(p.home, p.root, { requireApproval: ["run"], approvalTimeoutSeconds: 1 });
       const gated = p.run(["run", "--", "sh", "-c", "echo RAN"]);
       assert.equal(gated.code, 1, gated.out);
       assert.match(gated.out, /Approval denied/, "not routed through the approval gate");
@@ -177,7 +164,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
       assert.ok(!gated.out.includes("RAN"), "ran without an approval");
 
       // No approval asked for: the person opted out, and their command runs.
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [] }));
+      writePolicies(p.home, p.root, { requireApproval: [] });
       const open = p.run(["run", "--quiet", "--", "sh", "-c", "echo RAN"]);
       assert.equal(open.code, 0, open.out);
       assert.match(open.out, /RAN/);
@@ -189,7 +176,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("allowEnvs restricts `hush run` to the environments named", () => {
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], allowEnvs: ["default"] }));
+      writePolicies(p.home, p.root, { requireApproval: [], allowEnvs: ["default"] });
       assert.equal(p.run(["set", "K", "--env", "prod"], "secret_value_1234\n").code, 0);
 
       const r = p.run(["run", "--env", "prod", "--", "npm", "--version"]);
@@ -203,7 +190,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("run gated by requireApproval times out with nothing spawned", () => {
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      writePolicies(p.home, p.root, { requireApproval: ["run"], approvalTimeoutSeconds: 1 });
       const r = p.run(["run", "--", "echo", "RAN"]);
       assert.equal(r.code, 1, r.out);
       assert.ok(!r.out.includes("RAN"), `the command ran despite a timed-out approval:\n${r.out}`);
@@ -220,7 +207,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     // it changes nothing.
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"], approvalTimeoutSeconds: 1 }));
+      writePolicies(p.home, p.root, { requireApproval: ["run"], approvalTimeoutSeconds: 1 });
       const grantsPath = join(p.hushDir, "grants.local.json");
 
       // Exactly what runScope() computes for a plain, default-env `echo` run
@@ -270,10 +257,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
     for (const approvalScope of ["command", "sets"] as const) {
       const p = project();
       try {
-        writeFileSync(
-          join(p.hushDir, "policy.json"),
-          JSON.stringify({ requireApproval: ["run"], approvalScope, approvalTimeoutSeconds: 1 }),
-        );
+        writePolicies(p.home, p.root, { requireApproval: ["run"], approvalScope, approvalTimeoutSeconds: 1 });
         writeFileSync(
           join(p.hushDir, "grants.local.json"),
           JSON.stringify({
@@ -291,7 +275,7 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
   test("a run with requireApproval on and nothing to answer it does not run", () => {
     const p = project();
     try {
-      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: ["run"] }));
+      writePolicies(p.home, p.root, { requireApproval: ["run"] });
       const r = p.run(["run", "--", "echo", "RAN"]);
       assert.equal(r.code, 1, r.out);
       assert.ok(!r.out.includes("RAN"), `the command ran without an approval:\n${r.out}`);
@@ -371,6 +355,45 @@ describe("the CLI enforces .hush/policy.json — an agent's shell must not bypas
       delete process.env.FAKE_EXIT;
       delete process.env.FAKE_STDOUT;
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a repository cannot switch approvals off (review F4)", () => {
+  test("a committed requireApproval: [] still asks; only this machine's choice turns it off", () => {
+    const p = project();
+    try {
+      const script = join(p.root, "show.sh");
+      writeFileSync(script, '#!/bin/sh\necho "ran"\n');
+      chmodSync(script, 0o755);
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ requireApproval: [], biometry: "off", approvalScope: "sets" }));
+      const gated = p.run(["run", "--", "./show.sh"]);
+      assert.notEqual(gated.code, 0, `a repository's policy.json switched the approval off:\n${gated.out}`);
+      assert.doesNotMatch(gated.out, /^ran$/m);
+      writePolicies(p.home, p.root, { requireApproval: [] });
+      const mine = p.run(["run", "--", "./show.sh"]);
+      assert.equal(mine.code, 0, mine.out);
+      assert.match(mine.out, /^ran$/m);
+    } finally {
+      p.cleanup();
+    }
+  });
+});
+
+describe("HUSH_HOME inside the repository (review F8)", () => {
+  test("is refused, so a cloned project cannot hand hush a floor of its own", () => {
+    const p = project();
+    try {
+      spawnSync("git", ["init", "-q"], { cwd: p.root });
+      const inside = join(p.root, ".evil-home");
+      const refused = spawnSync(process.execPath, [CLI, "ls"], { cwd: p.root, env: { ...p.env, HUSH_HOME: inside }, encoding: "utf8" });
+      assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+      assert.match(refused.stderr, /HUSH_HOME .* is inside the repository/);
+      assert.ok(!existsSync(inside), "hush wrote into a HUSH_HOME inside the repository");
+      // Outside the repository it is honoured as ever.
+      assert.equal(p.run(["ls"]).code, 0);
+    } finally {
+      p.cleanup();
     }
   });
 });

@@ -11,7 +11,8 @@ import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor } from "./library.ts";
-import { requireIdentity } from "./identity.ts";
+import { hushHome, requireIdentity } from "./identity.ts";
+import { setLocalApprovals } from "./policy.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 import { withoutChain } from "./audit.ts";
@@ -704,35 +705,29 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
           return json(res, 400, { error: "approvalTtlSeconds must be a whole number of seconds, from 60 to 86400" });
         }
       }
-      const policyPath = join(ctx.hushDir, "policy.json");
-      let existing: Record<string, unknown> = {};
-      if (existsSync(policyPath)) {
-        try {
-          existing = parseJson(readFileSync(policyPath, "utf8"));
-        } catch {
-          return json(res, 400, {
-            error: ".hush/policy.json is not valid JSON — fix it by hand before the page can change it",
-          });
-        }
-      }
+      // Which approvals apply here is this machine's choice, kept in your own
+      // ~/.hush (policy.ts setLocalApprovals) — never the repository's file,
+      // which a repository can only add approvals to.
       assertProjectHushDir(ctx.hushDir);
-      mkdirSync(ctx.hushDir, { recursive: true });
-      const badPolicyPath = symlinkRefusal(policyPath);
-      if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
-      writeFileSync(
-        policyPath,
-        JSON.stringify(
-          {
-            ...existing,
-            requireApproval: [...new Set(requireApproval)],
-            // Only when the page sent one, so a caller that knows nothing about
-            // this field cannot reset it by leaving it out.
-            ...(approvalTtlSeconds === undefined ? {} : { approvalTtlSeconds }),
-          },
-          null,
-          2,
-        ) + "\n",
-      );
+      setLocalApprovals(hushHome(), ctx.hushDir, [...new Set(requireApproval as string[])]);
+      if (approvalTtlSeconds !== undefined) {
+        // How long an Allow lasts is the project's setting (capped by your floor).
+        const policyPath = join(ctx.hushDir, "policy.json");
+        let existing: Record<string, unknown> = {};
+        if (existsSync(policyPath)) {
+          try {
+            existing = parseJson(readFileSync(policyPath, "utf8"));
+          } catch {
+            return json(res, 400, {
+              error: ".hush/policy.json is not valid JSON — fix it by hand before the page can change it",
+            });
+          }
+        }
+        mkdirSync(ctx.hushDir, { recursive: true });
+        const badPolicyPath = symlinkRefusal(policyPath);
+        if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
+        writeFileSync(policyPath, JSON.stringify({ ...existing, approvalTtlSeconds }, null, 2) + "\n");
+      }
       audit(ctx.hushDir, {
         actor: "ui",
         action: "policy.update",

@@ -8,6 +8,7 @@
  * linked into a project before the rule existed — rather than trusting a
  * note the agent may or may not follow.
  */
+import { writePolicies } from "./helpers/policy.ts";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -80,7 +81,7 @@ function world() {
     const v = Vault.create(join(root, ".hush", "vault.json"), name, { name: "me", pub: id.pub, priv: id.priv });
     v.set(id, "default", "APP_NAME", name);
     v.save();
-    writeFileSync(join(root, ".hush", "policy.json"), JSON.stringify({ requireApproval: [], biometry: "off" }));
+    writePolicies(home, root, { requireApproval: [], biometry: "off" });
     return root;
   };
   const modio = mkProject("modio-app");

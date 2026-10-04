@@ -37,7 +37,13 @@ lapses: you get a refusal, not a quiet yes.
 }
 ```
 
-Set `"requireApproval": []` to turn it off. On a Linux desktop the dialog is
+A repository's `policy.json` can add to that list but never remove from it, so
+a project you clone cannot switch your prompts off. Turning them off is your
+choice, on your machine, for one project at a time: `hush secure approval --off`
+(it asks you first), or the switches in the app's Agent section. Either is kept
+in `~/.hush/policy.json`, and `hush secure approval` turns them back on.
+
+On a Linux desktop the dialog is
 `zenity` or `kdialog`, whichever is installed. With no desktop at all — a
 server, CI — there is nothing to put the request in front of you, so an
 approval-gated action is refused rather than waved through — unless you pair

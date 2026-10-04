@@ -338,10 +338,8 @@ export function state(ctx: UiCtx) {
   // vault.memberName() with no vault to ask.
   const meName = vault ? vault.memberName(id) : libraryVault ? libraryVault.memberName(id) : (process.env.USER || process.env.USERNAME || "me");
 
-  // The repo's own requireApproval, read raw rather than through the merged
-  // floor+repo+base policy: the switches on the page are asking "what does
-  // .hush/policy.json say", not "what does the floor force" — a floor
-  // requirement the repo cannot turn off regardless of what the switch shows.
+  // The repo's own file, read raw: its requireApproval is what this project
+  // adds on top of this machine's choice, and its TTL is the project's own.
   const repoPolicy = readPolicyFile(join(ctx.hushDir, "policy.json"));
   const effectivePolicy = loadPolicy(ctx.hushDir);
   const posture = assess(vault, ctx.hushDir, ctx.root);
@@ -379,7 +377,10 @@ export function state(ctx: UiCtx) {
     // the "This folder" section. Value-blind: see resolutionLines().
     resolution: resolutionLines(vault, libraryVault, used),
     policy: {
-      requireApproval: repoPolicy.requireApproval ?? DEFAULT_POLICY.requireApproval,
+      // What applies here: this machine's choice (or the defaults), plus what
+      // the repository adds — which the page shows and cannot switch off.
+      requireApproval: effectivePolicy.requireApproval,
+      repoRequires: Array.isArray(repoPolicy.requireApproval) ? repoPolicy.requireApproval.filter((x) => typeof x === "string") : [],
       // The repo's own value when it has one, so the page shows the number the
       // dialog's button is actually built from.
       approvalTtlSeconds: repoPolicy.approvalTtlSeconds ?? DEFAULT_POLICY.approvalTtlSeconds,

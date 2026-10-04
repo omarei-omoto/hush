@@ -4,6 +4,7 @@
  * The unit tests never exercised the transport, which is where a self-inflicted
  * unhandled rejection was taking the whole server down on the first tool error.
  */
+import { writePolicies } from "./helpers/policy.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -54,10 +55,8 @@ function project(policy: Record<string, unknown> = {}) {
   vault.set(id, "work-fal", "FAL_KEY", "work-fal-key-value");
   vault.save();
 
-  writeFileSync(
-    join(hushDir, "policy.json"),
-    JSON.stringify({ requireApproval: [], biometry: "off", ...policy }),
-  );
+  // No prompts unless a test asks for them: this machine's choice (review F4).
+  writePolicies(home, root, { requireApproval: [], biometry: "off", ...policy });
   return { home, root, id, secret: encodeSecret(id), cleanup: () => {
     for (const d of [home, root]) rmSync(d, { recursive: true, force: true });
   } };
@@ -249,7 +248,8 @@ describe("mcp policy — the command deny list", () => {
     // (outside the repo, at ~/.hush/policy.json) also names the command — a
     // repo file alone can no longer reopen a denied command by itself. See
     // policy.test.ts's mergePolicies tests for the rule in isolation.
-    writeFileSync(join(p.home, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
+    const floor = JSON.parse(readFileSync(join(p.home, "policy.json"), "utf8"));
+    writeFileSync(join(p.home, "policy.json"), JSON.stringify({ ...floor, unsafeAllowCommands: ["node"] }));
     return talk(p, [
       init,
       call(1, "hush_run", { command: "node", args: ["-e", "console.log('allowed')"] }),

@@ -56,6 +56,7 @@ hardening
   hush level                    where you are on the security ladder
   hush secure                   climb the next rung
   hush secure approval --for 30m  ask before anything uses a key; 30m is how long an "Allow" lasts
+  hush secure approval --off    stop asking in this project, on this machine (asks you first)
   hush biometry [setup|test]    gate approvals behind Touch ID
   hush age                      use a YubiKey / Secure Enclave / TPM via age
   hush approvals pair --relay <url>   no one at this machine? send its approvals to your laptop

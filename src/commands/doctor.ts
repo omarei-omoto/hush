@@ -5,8 +5,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Vault, locateProject } from "../vault.ts";
 import { loadIdentity, publicKeyOf, hushHome } from "../identity.ts";
-import { loadPolicy } from "../mcp.ts";
-import { readPolicyFile, policyWeakenings } from "../policy.ts";
+import { DEFAULT_POLICY, loadPolicy } from "../mcp.ts";
+import { readPolicyFile, policyWeakenings, projectKey } from "../policy.ts";
 import { loadSchema, validate, describeProblems } from "../schema.ts";
 import { AGENTS, mcpRegistrations } from "../agents.ts";
 import { usedSets, composeSets, librarySets, linkNameFor } from "../library.ts";
@@ -123,7 +123,7 @@ export async function cmdDoctor(_a: Args): Promise<void> {
   // refused rather than leaving that invisible.
   const floorPath = join(hushHome(), "policy.json");
   check(existsSync(floorPath), "policy floor", existsSync(floorPath) ? floorPath : "none — hush secure floor makes one (a copy of the vault opened elsewhere has no policy without it)");
-  const weakenings = policyWeakenings(readPolicyFile(floorPath), readPolicyFile(join(loc.hushDir, "policy.json")));
+  const weakenings = policyWeakenings(readPolicyFile(floorPath), readPolicyFile(join(loc.hushDir, "policy.json")), DEFAULT_POLICY, projectKey(loc.hushDir));
   for (const w of weakenings) info(`    ${dim(w)}`);
 
   // `.env.schema`, when the project has one. This is the only check anywhere

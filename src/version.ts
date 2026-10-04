@@ -5,4 +5,4 @@
  * them together, so `hush --version` and the version the MCP server reports to
  * a client could quietly disagree with what was actually published.
  */
-export const VERSION = "0.11.1";
+export const VERSION = "0.12.0";

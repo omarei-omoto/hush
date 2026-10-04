@@ -53,8 +53,11 @@ narrows both:
 - **`allowCommands`**, if non-empty, is an allowlist — the only command control
   that actually holds. Prefer it for anything sensitive.
 - **`requireApproval`** lists what a human must approve on screen: `run`, `add`,
-  `reveal`, and `request`. `--materialize` is gated by `reveal`, not `run`,
-  because it writes plaintext to a path the caller chose.
+  `reveal`, and `request` — all four by default. A repository's file can add to
+  them, not remove any: turning one off is your choice on your machine
+  (`hush secure approval --off`, or the app's Agent section). `--materialize` is
+  gated by `reveal`, not `run`, because it writes plaintext to a path the caller
+  chose.
 - **`approvalScope`** is what "Allow 15 min" covers: `"command"` (the default)
   means that command with those sets; `"sets"` means any allowed command with
   those sets, if you find the prompts too frequent.
@@ -66,7 +69,9 @@ narrows both:
 
 **Your floor.** `policy.json` is a file in the repo, so an agent with write
 access can edit it. `~/.hush/policy.json` — same shape, outside every repo —
-is your floor: a repo's policy can only *tighten* relative to it. `allowCommands`,
+is your floor: a repo's policy can only *tighten* relative to it. Where your
+floor says nothing about approvals, fingerprints or what an "Allow" covers, the
+defaults are the floor — an empty file is not "no opinion". `allowCommands`,
 `allowEnvs` and `allowHosts` can only narrow, `requireApproval` and `denyKeys`
 can only grow, `biometry` and `approvalScope` can only get stricter, and
 `unsafeAllowCommands` only takes effect when your floor lists the same command

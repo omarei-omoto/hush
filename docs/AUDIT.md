@@ -429,6 +429,49 @@ Not covered by that review, and still for the external one: the broker and
 leases, storage and file permissions, the agent end to end, transcript
 scanning, platform-specific behaviour, and the release pipeline.
 
+### Sixteenth pass — a deep review against 0.11.1
+
+A second review, by several AI models working through the codebase by module,
+reported 33 findings against `928f86a` (v0.11.1). Each was checked against the
+code before anything changed; each confirmed one has a test that fails without
+its fix. Fixed in 0.12.0.
+
+| Severity | Finding | Fix |
+|---|---|---|
+| High | F4: a repository's `policy.json` could switch every approval off (`"requireApproval": []`), and lower fingerprint approval and approval scope: an empty floor contributed the weakest value of each | The defaults are the floor where the user's says nothing; a repository can only add. Turning approvals off is the user's per-project choice on their machine (`hush secure approval --off`, the app's switches), kept in `~/.hush` |
+| High | F1: on a vault pinned before it was signed, any pinned member's signature was trusted for a membership change | Roles are pinned; the first signature is trusted only from a member this machine accepted as an admin |
+| High | F12: the Touch ID helper was trusted by path for a process's life; anything running as the user could replace it with one that exits 0 | Its hash is recorded at build and checked before every run |
+| High | F13: `HUSH_NO_DIALOG` and `HUSH_BIOMETRY=off` could route a request to a paired approver instead of this screen | They only ever refuse |
+| High | F18: fingerprints named after Object properties passed the shape check and read as present in every membership lookup | Refused on load; lookups check own properties |
+| High | F19: `merge-conflicts.json` names were used as object keys unchecked | Parsed strictly; names checked before a pick |
+| High | F20: `hush merge` wrote the vault without the lock or an atomic rename | Under the lock, atomically |
+| High | F33, F15 (Windows): `SystemRoot` chose the `powershell.exe` that handles the private key and draws the dialog | `C:\Windows` wherever it exists |
+| Medium | F2: a changed data key behind a seen generation could be accepted, overwriting the evidence | Refused |
+| Medium | F5: a tailnet peer could flood the audit log until its one older generation was gone | Fields capped; five generations, linked; verify says when history is gone |
+| Medium | F6: the request prompt hid `http://` and `--insecure` | Shown, granted separately, audited |
+| Medium | F7: `hush run --no-redact` looked like an ordinary run | Gated like a reveal, said in the dialog, audited |
+| Medium | F14: an approver's session grant was keyed on a requester-chosen id | Keyed on what the person was shown, per device |
+| Medium | F21: three writers of `.hush/policy.json` followed a committed link | Refused |
+| Medium | F22: `hush run --from` skipped the local policy | Applied before asking the broker |
+| Medium | F23: the vault lock could be reclaimed from a live holder, and released by the wrong one | Owner-aware reclaim; move-aside-and-check reclaim and release |
+| Medium | F25: set and key names from merged files reached the terminal raw | Scrubbed |
+| Medium | F26: `onlyIn` patterns and exposure lists from a vault file were unchecked | Checked on load |
+| Medium | F27: a merge could hand the new key to a member the rotating branch removed, when the base could not show them | Refused |
+| Medium | F28: an agent-named library set skipped confirmation, reaching personal sets through a repo policy with approvals off | Closed by F4: approvals cannot be switched off by the repository |
+| Medium | F31: `.env.schema @pattern` could hang every value-using command | Capped at 500 characters, 100ms per test |
+| Medium | F32: merge inputs reportedly unchecked | Already closed in 0.11.0 (`mergeVaults` validates each side); now checked at the door too |
+| Medium | F3, F24: set metadata and value metadata are outside the signed header | Disclosed in SECURITY.md as advisory; signing planned for the next vault format |
+| Low | F8: `HUSH_HOME` relocates the floor, including to a folder in the repository via an agent's MCP config | A `HUSH_HOME` inside the current repository is refused; with F4 an absent floor no longer drops approvals |
+| Low | F9: install-mcp and install-skill wrote through committed links | Refused inside the project |
+| Low | F10, F11: predictable temp names opened without `wx` | One atomic writer with a random, exclusive temp name |
+| Low | F16: `--yes` answered for a person when the prompt was switched off by the environment | Refused then |
+| Low | F17: a fingerprint for a one-shot request was cached for the full TTL | One-shot |
+| Low | F29: a save never shape-checked what it wrote; `/api/team` took a non-text name | Both checked |
+| Low | F30: an agent config's parse error quoted the file | Scrubbed — and the scrubber itself paired quotes inside V8's excerpt, letting the text after a quoted key through; it now drops the whole excerpt |
+
+The review's open leads (L3, L11, L13, L15–L26) stay open for the external
+review; L11 is the F8 case and is closed with it.
+
 ### Mutants that survive on purpose
 
 Four mutations are known to be behaviourally identical, each checked

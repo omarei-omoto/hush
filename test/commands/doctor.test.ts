@@ -1,6 +1,7 @@
 /**
  * `hush doctor`.
  */
+import { writePolicies } from "../helpers/policy.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, rmSync } from "node:fs";
@@ -29,7 +30,11 @@ describe("hush doctor reports the whole setup", () => {
   test("it reports the policy actually in force", () => {
     const p = project();
     assert.match(p.run(["doctor"]).out, /approval required\s+run, add, reveal, request/);
+    // A repository cannot switch them off (review F4)...
     writeFileSync(join(p.root, ".hush", "policy.json"), JSON.stringify({ requireApproval: [] }));
+    assert.match(p.run(["doctor"]).out, /approval required\s+run, add, reveal, request/);
+    // ...only this machine can, for this project.
+    writePolicies(p.home, p.root, { requireApproval: [] });
     assert.match(p.run(["doctor"]).out, /nothing is gated/);
     p.cleanup();
   });

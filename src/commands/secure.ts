@@ -5,6 +5,9 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Vault, resolveVaultPath } from "../vault.ts";
 import { hushHome } from "../identity.ts";
+import { loadPolicy } from "../mcp.ts";
+import { setLocalApprovals } from "../policy.ts";
+import { consent } from "../cli/consent.ts";
 import { assess } from "../posture.ts";
 import { renderLevel, runSecure, snooze, parseDuration } from "../secure.ts";
 import { biometryStatus, ensureHelper, authenticate } from "../biometry.ts";
@@ -34,6 +37,24 @@ export async function cmdSecure(a: Args): Promise<void> {
 
   const explicit = ["biometry", "hardware", "approval", "keychain", "no-plaintext", "floor"]
     .find((id) => bool(a, id)) ?? a._[0];
+
+  // Turning approvals off is this machine's choice for this project, kept in
+  // ~/.hush — a repository's policy.json can add approvals, never remove them.
+  // A person says so: on the terminal, or in a dialog an agent cannot answer.
+  if (explicit === "approval" && bool(a, "off")) {
+    if (!loc) die("No hush project here.", "Run it inside the project to stop asking in.");
+    const ok = await consent(`Stop asking before hush uses a key in ${root}? (this machine only)`, {
+      hushDir: loc.hushDir,
+      detail: ["Runs, adds, reveals and requests here will no longer ask first."],
+    });
+    if (!ok) die("Nothing changed.");
+    setLocalApprovals(hushHome(), loc.hushDir, []);
+    const still = loadPolicy(loc.hushDir).requireApproval;
+    info(`${green("✓")} approvals off for this project, on this machine`);
+    if (still.length) info(dim(`  this project's policy.json still asks for: ${still.join(", ")}`));
+    info(dim("  Turn them back on: hush secure approval"));
+    return;
+  }
   // `--for 30m` sets how long an "Allow" lasts, which is also how someone with
   // approvals already on asks for a longer window.
   const forRaw = str(a, "for");

@@ -215,16 +215,19 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
     if (flDeny.some((x) => !effective.denyCommands.includes(x) && !effective.unsafeAllowCommands.includes(x))) {
       bad.push("denyCommands");
     }
-    for (const field of ["denyKeys", "requireApproval"] as const) {
-      const fl = floor[field] ?? [];
-      if (fl.some((x) => !effective[field].includes(x))) bad.push(field);
-    }
+    const fd = floor.denyKeys ?? [];
+    if (fd.some((x) => !effective.denyKeys.includes(x))) bad.push("denyKeys");
+    // A silent floor means the defaults (review F4): never fewer approvals than those.
+    const fa = floor.requireApproval ?? DEFAULT_POLICY.requireApproval;
+    if (fa.some((x) => !effective.requireApproval.includes(x))) bad.push("requireApproval");
     for (const field of ["maxRunMs", "approvalTtlSeconds"] as const) {
       const fl = floor[field];
       if (fl !== undefined && effective[field] > fl) bad.push(field);
     }
-    if (floor.biometry && BIOMETRY_RANK[effective.biometry] < BIOMETRY_RANK[floor.biometry]) bad.push("biometry");
-    if (floor.approvalScope && SCOPE_RANK[effective.approvalScope] < SCOPE_RANK[floor.approvalScope]) bad.push("approvalScope");
+    const fb = floor.biometry ?? DEFAULT_POLICY.biometry;
+    if (BIOMETRY_RANK[effective.biometry] < BIOMETRY_RANK[fb]) bad.push("biometry");
+    const fs = floor.approvalScope ?? DEFAULT_POLICY.approvalScope;
+    if (SCOPE_RANK[effective.approvalScope] < SCOPE_RANK[fs]) bad.push("approvalScope");
     return bad;
   }
 
@@ -238,11 +241,12 @@ describe("fuzz: mergePolicies / policyWeakenings", () => {
       allowHosts: repo.allowHosts ?? base.allowHosts,
       denyKeys: uniq([...base.denyKeys, ...(repo.denyKeys ?? [])]),
       maxRunMs: repo.maxRunMs ?? base.maxRunMs,
-      requireApproval: repo.requireApproval ?? base.requireApproval,
+      // The safety settings: the defaults are the floor, the repo may only add (review F4).
+      requireApproval: uniq([...base.requireApproval, ...(repo.requireApproval ?? [])]),
       approvalTtlSeconds: repo.approvalTtlSeconds ?? base.approvalTtlSeconds,
       approvalTimeoutSeconds: repo.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
-      biometry: repo.biometry ?? base.biometry,
-      approvalScope: repo.approvalScope ?? base.approvalScope,
+      biometry: repo.biometry && BIOMETRY_RANK[repo.biometry] > BIOMETRY_RANK[base.biometry] ? repo.biometry : base.biometry,
+      approvalScope: repo.approvalScope && SCOPE_RANK[repo.approvalScope] > SCOPE_RANK[base.approvalScope] ? repo.approvalScope : base.approvalScope,
       unmaskKeys: base.unmaskKeys ?? [],
     };
   }

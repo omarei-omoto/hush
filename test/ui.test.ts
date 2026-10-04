@@ -2,6 +2,7 @@
  * The local UI server. It had no automated coverage at all, which is a poor
  * place to have none: it is an HTTP server that can hand out every key you own.
  */
+import { localApprovals, localApprovalsOf, writePolicies } from "./helpers/policy.ts";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -36,7 +37,7 @@ before(async () => {
   vault.set(id, "fal/personal", "FAL_KEY", "fal_ui_value");
   vault.save();
   // Reveal is gated by policy; switch it off so the API is testable unattended.
-  writeFileSync(join(hushDir, "policy.json"), JSON.stringify({ requireApproval: [], biometry: "off" }));
+  writePolicies(home, root, { requireApproval: [], biometry: "off" });
 
   child = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
     cwd: root,
@@ -920,7 +921,7 @@ describe("ui server — staged plaintext expires", () => {
     const vault = Vault.create(join(hushDir, "vault.json"), "ttltest", { name: "tester", pub: id.pub });
     vault.set(id, "default", "SEED", "seed_value_for_ttl_test");
     vault.save();
-    writeFileSync(join(hushDir, "policy.json"), JSON.stringify({ requireApproval: [], biometry: "off" }));
+    writePolicies(ttlHome, ttlRoot, { requireApproval: [], biometry: "off" });
 
     ttlChild = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
       cwd: ttlRoot,
@@ -1060,7 +1061,7 @@ describe("ui server — named env sets", () => {
     const vault = Vault.create(join(hushDir, "vault.json"), "libtest", { name: "tester", pub: id.pub });
     vault.set(id, "default", "PROJECT_ONLY", "project_only_value_1234");
     vault.save();
-    writeFileSync(join(hushDir, "policy.json"), JSON.stringify({ requireApproval: [], biometry: "off" }));
+    writePolicies(libHome, libRoot, { requireApproval: [], biometry: "off" });
 
     libChild = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
       cwd: libRoot,
@@ -1301,6 +1302,8 @@ describe("ui server — any folder", () => {
     bareHome = mkdtempSync(join(tmpdir(), "hush-bare-home-"));
     bareRoot = mkdtempSync(join(tmpdir(), "hush-bare-proj-"));
     // No .hush anywhere in bareRoot — that absence is the point of this fixture.
+    // Approvals off for it on this machine (the floor), so the page is testable unattended.
+    localApprovals(bareHome, bareRoot, []);
     writeFileSync(
       join(bareRoot, "index.js"),
       "console.log(process.env.FAL_KEY, process.env.DATABASE_URL);\n",
@@ -1490,13 +1493,12 @@ describe("ui server — the Agent section's endpoints", () => {
     assert.equal(JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8")).approvalTtlSeconds, 1800);
   });
 
-  test("/api/policy writes only requireApproval, never touching a sibling field", async () => {
-    // The fixture's policy.json starts as {requireApproval: [], biometry: "off"}.
+  test("/api/policy keeps the approvals as this machine's choice, and leaves the repository's file alone (review F4)", async () => {
+    const repoBefore = readFileSync(join(hushDir(), "policy.json"), "utf8");
     const r = await api("/api/policy", { requireApproval: ["run", "reveal"] });
     assert.equal(r.status, 200, JSON.stringify(await r.json()));
-    const written = JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8"));
-    assert.deepEqual(written.requireApproval.sort(), ["reveal", "run"]);
-    assert.equal(written.biometry, "off", "a sibling field was clobbered");
+    assert.deepEqual([...(localApprovalsOf(home, root) ?? [])].sort(), ["reveal", "run"], "the choice was not kept on this machine");
+    assert.equal(readFileSync(join(hushDir(), "policy.json"), "utf8"), repoBefore, "the repository's policy.json was written");
 
     const state = (await (await api("/api/state")).json()) as { policy: { requireApproval: string[] } };
     assert.deepEqual(state.policy.requireApproval.sort(), ["reveal", "run"], "/api/state does not reflect the write");
@@ -1511,8 +1513,7 @@ describe("ui server — the Agent section's endpoints", () => {
       assert.equal(r.status, 400, `accepted ${JSON.stringify(body)}`);
     }
     // The rejected writes must not have landed.
-    const written = JSON.parse(readFileSync(join(hushDir(), "policy.json"), "utf8"));
-    assert.deepEqual(written.requireApproval, []);
+    assert.deepEqual(localApprovalsOf(home, root), []);
   });
 
   test("/api/policy 400s on a repo policy.json that is not valid JSON, rather than guessing at the rest of the file", async () => {
@@ -1520,7 +1521,8 @@ describe("ui server — the Agent section's endpoints", () => {
     const before = readFileSync(policyPath, "utf8");
     writeFileSync(policyPath, "{ not json");
     try {
-      const r = await api("/api/policy", { requireApproval: ["run"] });
+      // Only a change to how long an Allow lasts touches the repository's file.
+      const r = await api("/api/policy", { requireApproval: [], approvalTtlSeconds: 1800 });
       assert.equal(r.status, 400);
       assert.match(((await r.json()) as { error: string }).error, /not valid JSON/);
       // Refused, not silently overwritten with a fresh file.

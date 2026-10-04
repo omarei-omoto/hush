@@ -149,12 +149,17 @@ test("the file list covers user-wide and project files, each path once", () => {
 
 // ------------------------------------------------------------------ the command
 
+/** HOME, and XDG_CONFIG_HOME under it, so a CI runner's own XDG settings cannot move the files. */
+const agentEnv = (home: string) => ({ HOME: home, XDG_CONFIG_HOME: join(home, ".config") });
+
 function agentHome() {
   const home = mkdtempSync(join(tmpdir(), "hush-agent-home-"));
   const server = join(home, "fake-server.sh");
   writeFileSync(server, '#!/bin/sh\necho "len=${#GITHUB_TOKEN} log=$LOG args=$*"\n');
   chmodSync(server, 0o755);
-  const desktop = join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  // Wherever Claude Desktop keeps it on this platform (~/Library/… on macOS,
+  // ~/.config/… on Linux): the same answer hush itself will look for.
+  const desktop = agentConfigFiles(home, agentEnv(home)).find((f) => f.agent === "Claude Desktop")!.path;
   mkdirSync(join(desktop, ".."), { recursive: true });
   writeFileSync(desktop, JSON.stringify({
     mcpServers: { github: { command: server, args: ["--stdio"], env: { GITHUB_TOKEN: GH, LOG: "debug" } } },
@@ -167,7 +172,7 @@ function agentHome() {
 
 test("hush scan --agents reports where, never what", { skip: process.platform === "win32" }, () => {
   const h = agentHome();
-  const b = bareFolder({ HOME: h.home });
+  const b = bareFolder(agentEnv(h.home));
   try {
     const r = b.run(["scan", "--agents"]);
     assert.equal(r.code, 0, r.out);
@@ -186,7 +191,7 @@ test("hush scan --agents reports where, never what", { skip: process.platform ==
 
 test("hush scan --agents --fix moves the keys, rewrites the files, and the server still gets its key", { skip: process.platform === "win32" }, () => {
   const h = agentHome();
-  const b = bareFolder({ HOME: h.home });
+  const b = bareFolder(agentEnv(h.home));
   try {
     const r = b.run(["scan", "--agents", "--fix", "--yes"]);
     assert.equal(r.code, 0, r.out);
@@ -214,7 +219,7 @@ test("hush scan --agents --fix moves the keys, rewrites the files, and the serve
 
 test("--fix with no terminal and no --yes changes nothing", { skip: process.platform === "win32" }, () => {
   const h = agentHome();
-  const b = bareFolder({ HOME: h.home });
+  const b = bareFolder(agentEnv(h.home));
   try {
     const before = readFileSync(h.desktop, "utf8");
     const r = b.run(["scan", "--agents", "--fix"]);

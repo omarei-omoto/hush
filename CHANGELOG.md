@@ -4,6 +4,30 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### Security
+
+- **`hush request` could return the value it sent.** A value substituted into
+  the URL's query came back in the result and in the status line, and so did
+  one repeated in a same-host redirect or in the status text. The audit log
+  recorded the URL with the value in it. All of these are now masked, and the
+  audit log records the URL as you wrote it, with `$NAME` placeholders.
+  **If you used `--substitute query`** (or `substitute: ["query"]` from an
+  agent), rotate the keys you sent that way, and delete `.hush/audit.log` and
+  `.hush/audit.log.1` from the machines that made those requests.
+- **Values are masked in their encoded forms too:** percent-encoded,
+  form-encoded, and escaped inside a JSON string, in `hush request` and
+  `hush run`.
+- **A value substituted into the query is now percent-encoded,** so one
+  containing `&`, `+` or `#` reaches the server intact, as one parameter.
+- **The request timeout now covers the whole response,** not just the headers.
+
+### Project
+
+- CodeQL (security-extended) and OpenSSF Scorecard run in CI; Dependabot keeps
+  the workflows' actions and the dev and docs dependencies current. Every
+  action is pinned to a commit.
+- tryhush.dev publishes a `security.txt` saying where to report a vulnerability.
+
 ## 0.11.0-beta.1 — 2026-10-04
 
 The first beta: everything below is new since 0.10.0. Install it with

@@ -231,7 +231,7 @@ export function sidebar(published, titles, dir = root) {
  * Writes the site's content into a Starlight project: the pages, the
  * sidebar, the images the pages show, the favicon and the logos.
  */
-export function buildContent(site, { dir = root, branch = "main", siteUrl = "https://tryhush.dev/" } = {}) {
+export function buildContent(site, { dir = root, branch = "main", siteUrl = "https://tryhush.dev/", now = Date.now() } = {}) {
   const sources = pageSources(dir);
   const published = new Set(sources);
   const content = join(site, "src", "content", "docs");
@@ -268,6 +268,22 @@ export function buildContent(site, { dir = root, branch = "main", siteUrl = "htt
   }
   mkdirSync(join(site, "src", "assets"), { recursive: true });
   for (const f of ["logo-light.svg", "logo-dark.svg"]) if (asset(f)) cpSync(join(dir, "assets", f), join(site, "src", "assets", f));
+  // security.txt (RFC 9116): where to report a vulnerability, for anyone who
+  // looks for it on the site rather than in the repository. Expires a year
+  // from each build, so a site that is still deployed is never stale.
+  mkdirSync(join(pub, ".well-known"), { recursive: true });
+  const expires = new Date(now + 365 * 86400e3).toISOString().replace(/\.\d+Z$/, "Z");
+  writeFileSync(
+    join(pub, ".well-known", "security.txt"),
+    [
+      `Contact: ${REPO}/security/advisories/new`,
+      `Expires: ${expires}`,
+      `Policy: ${siteUrl}security/`,
+      `Canonical: ${siteUrl}.well-known/security.txt`,
+      "Preferred-Languages: en",
+      "",
+    ].join("\n"),
+  );
   // A custom domain needs a CNAME file at the root of what GitHub Pages serves.
   const host = new URL(siteUrl).host;
   if (!host.endsWith(".github.io")) writeFileSync(join(pub, "CNAME"), host + "\n");

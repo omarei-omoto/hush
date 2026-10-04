@@ -16,12 +16,35 @@ export const MIN_REDACTABLE = 5;
 /** Values this short or this common are not worth masking — masking them is noise. */
 const SKIP_VALUES = new Set(["true", "false", "null", "undefined", "0", "1", "localhost"]);
 
+/**
+ * The ways a value is commonly written back by whatever received it: as is,
+ * percent-encoded the way a URL carries it (either case of hex digits, `+` for
+ * a space as a form does, and encodeURI's lighter touch), and escaped inside a
+ * JSON string. A server that echoes the query string or the JSON it was sent
+ * hands back one of these, and matching only the literal value let it through.
+ */
+export function encodedForms(value: string): string[] {
+  const forms = new Set([value]);
+  try {
+    const pct = encodeURIComponent(value);
+    forms.add(pct);
+    forms.add(pct.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
+    forms.add(pct.replace(/%20/g, "+"));
+    forms.add(encodeURI(value));
+  } catch {
+    // A lone surrogate cannot be percent-encoded, so it is never sent that way either.
+  }
+  forms.add(JSON.stringify(value).slice(1, -1));
+  return [...forms];
+}
+
 export class Redactor {
   /** Longest secret we track, so we know how much tail to hold back. */
   private maxLen = 0;
   /** value -> label used in the replacement. */
   private readonly targets: [string, string][] = [];
   private carry = "";
+  private count = 0;
 
   constructor(secrets: Record<string, string> = {}) {
     for (const [key, value] of Object.entries(secrets)) this.add(key, value);
@@ -30,14 +53,19 @@ export class Redactor {
   add(key: string, value: string): void {
     if (!value || value.length < MIN_REDACTABLE) return;
     if (SKIP_VALUES.has(value.toLowerCase())) return;
-    this.targets.push([value, `[redacted:${key}]`]);
-    this.maxLen = Math.max(this.maxLen, value.length);
+    const label = `[redacted:${key}]`;
+    for (const form of encodedForms(value)) {
+      this.targets.push([form, label]);
+      this.maxLen = Math.max(this.maxLen, form.length);
+    }
+    this.count++;
     // Longest first, so a value that contains another is masked whole.
     this.targets.sort((a, b) => b[0].length - a[0].length);
   }
 
+  /** How many values are masked (each in all of its encoded forms). */
   get size(): number {
-    return this.targets.length;
+    return this.count;
   }
 
   private mask(s: string): string {

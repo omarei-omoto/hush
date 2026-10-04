@@ -1,0 +1,26 @@
+# hush has no runtime dependencies. What can still go stale: the actions the
+# workflows run (pinned to commits, so this is how they move), the two dev
+# dependencies, and the docs site's own dependencies in website/.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: monthly
+    groups:
+      docs-site:
+        patterns: ["*"]

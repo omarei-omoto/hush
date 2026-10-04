@@ -374,7 +374,10 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       audit(ctx.hushDir, {
         actor: "mcp",
         action: "request",
-        url: result.url,
+        // What the caller wrote, placeholders and all: never the URL after
+        // substitution, which has the value in its query.
+        url: result.requested,
+        ...(result.redirects ? { landed: result.url } : {}),
         method: result.method,
         status: result.status,
         layers: resolved.layers,

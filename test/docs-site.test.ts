@@ -87,6 +87,11 @@ describe("the site's content", () => {
         ],
       });
       assert.equal(readFileSync(join(site, "public", "CNAME"), "utf8"), "tryhush.dev\n");
+      // Where to report a vulnerability, for anyone who looks on the site (RFC 9116).
+      const txt = readFileSync(join(site, "public", ".well-known", "security.txt"), "utf8");
+      assert.match(txt, /^Contact: https:\/\/github\.com\/omarei-omoto\/hush\/security\/advisories\/new$/m);
+      assert.match(txt, /^Expires: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/m);
+      assert.match(txt, /^Policy: https:\/\/tryhush\.dev\/security\/$/m);
     } finally {
       r.cleanup();
     }

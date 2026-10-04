@@ -962,6 +962,26 @@ describe("hush_request", () => {
     );
   });
 
+  test("a value in the query, a redirect or the status text reaches neither the tool result nor the audit log", async () => {
+    await withServer(
+      (req) => ({ status: 200, body: `got ${req.url}` }),
+      async (base, hits) => {
+        const p = project();
+        const s = await talk(p, [
+          init,
+          call(1, "hush_request", { url: `${base}/v1/thing?key=$API_KEY`, substitute: ["query"] }),
+        ]);
+        const body = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+        assert.match(hits()[0], /key=super-secret-value-here/, "the value did not reach the server");
+        assert.doesNotMatch(body, /super-secret-value-here/, "the value came back to the model");
+        const log = readFileSync(join(p.root, ".hush", "audit.log"), "utf8");
+        assert.match(log, /"url":"[^"]*\?key=\$API_KEY"/, "the audit line should name the URL as the caller wrote it");
+        assert.doesNotMatch(log, /super-secret-value-here/, "the value was written to the audit log");
+        p.cleanup();
+      },
+    );
+  });
+
   test("a non-2xx comes back as text the model can read, not as a tool error", async () => {
     await withServer(
       () => ({ status: 404, body: "no such refund" }),

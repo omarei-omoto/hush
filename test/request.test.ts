@@ -262,6 +262,29 @@ before(async () => {
       } else if (u.pathname === "/same-redirect") {
         res.writeHead(302, { location: "/echo-auth" });
         res.end();
+      } else if (u.pathname === "/echo-query") {
+        // The query exactly as it arrived on the wire: percent-encoded.
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`query=${u.search}`);
+      } else if (u.pathname === "/query-intact") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`params=${[...u.searchParams.keys()].join(",")} intact=${u.searchParams.get("key") === "Ab3 d/e+f&g=h\"q\\Z9"}`);
+      } else if (u.pathname === "/reflect-json") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ youSent: body }));
+      } else if (u.pathname === "/status-echo") {
+        // A status text that repeats the credential, as a careless error page might.
+        const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+        res.writeHead(401, `Bad token ${token}`, { "content-type": "text/plain" });
+        res.end("no");
+      } else if (u.pathname === "/redirect-with-token") {
+        const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+        res.writeHead(302, { location: `/echo-auth?token=${encodeURIComponent(token)}` });
+        res.end();
+      } else if (u.pathname === "/slow-body") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.write("first part");
+        setTimeout(() => res.end(" and the rest"), 600);
       } else if (u.pathname === "/away-redirect") {
         res.writeHead(302, { location: "https://example.invalid/steal" });
         res.end();
@@ -373,5 +396,63 @@ describe("requestWithSecrets", () => {
     const rendered = renderRequest(r, { includeHeaders: true });
     assert.match(rendered, /content-type: text\/plain/);
     assert.match(rendered, /\[redacted:API_KEY\]/);
+  });
+});
+
+describe("nothing that comes back carries a value (the 2026-10-04 report)", () => {
+  /** A value with characters a URL or a JSON string has to escape. */
+  const ODD = "Ab3 d/e+f&g=h\"q\\Z9";
+  const odd = { ...secrets, ODD };
+
+  test("a secret substituted into the query is masked in the returned URL; the caller's own URL is kept", async () => {
+    const r = await requestWithSecrets({ url: `${base}/echo-query?key=$API_KEY`, substitute: ["query"], secrets });
+    assert.ok(!r.url.includes(SECRET), r.url);
+    assert.match(r.url, /key=\[redacted:API_KEY\]/);
+    assert.equal(r.requested, `${base}/echo-query?key=$API_KEY`);
+    assert.ok(!statusLine(r).includes(SECRET), statusLine(r));
+  });
+
+  test("a value the URL had to percent-encode is masked in the URL and in an echoed body", async () => {
+    const r = await requestWithSecrets({ url: `${base}/echo-query?key=$ODD`, substitute: ["query"], secrets: odd });
+    for (const shown of [r.url, r.body, statusLine(r)]) {
+      assert.ok(!shown.includes(encodeURIComponent(ODD)) && !shown.includes(ODD), shown);
+      assert.ok(!decodeURIComponent(shown.replace(/\+/g, "%20")).includes(ODD), `still there once decoded: ${shown}`);
+    }
+    assert.match(r.body, /\[redacted:ODD\]/);
+  });
+
+  test("a value substituted into the query arrives as one parameter, byte for byte", async () => {
+    const r = await requestWithSecrets({ url: `${base}/query-intact?key=$ODD&page=2`, substitute: ["query"], secrets: odd });
+    assert.equal(r.body, "params=key,page intact=true");
+  });
+
+  test("a value echoed back inside a JSON string is masked", async () => {
+    const r = await requestWithSecrets({ url: `${base}/reflect-json`, method: "POST", body: "$ODD", substitute: ["body"], secrets: odd });
+    assert.ok(!r.body.includes(JSON.stringify(ODD).slice(1, -1)), r.body);
+    assert.match(r.body, /\[redacted:ODD\]/);
+  });
+
+  test("a same-host redirect whose Location carries the value is masked in the URL and the headers", async () => {
+    const r = await requestWithSecrets({ url: `${base}/redirect-with-token`, headers: [["authorization", "Bearer $API_KEY"]], secrets });
+    assert.equal(r.redirects, 1);
+    assert.ok(!r.url.includes(SECRET), r.url);
+    assert.match(r.url, /token=\[redacted:API_KEY\]/);
+    assert.ok(!renderRequest(r, { includeHeaders: true }).includes(SECRET));
+  });
+
+  test("a status text that repeats the value is masked", async () => {
+    const r = await requestWithSecrets({ url: `${base}/status-echo`, headers: [["authorization", "Bearer $API_KEY"]], secrets });
+    assert.equal(r.status, 401);
+    assert.equal(r.statusText, "Bad token [redacted:API_KEY]");
+    assert.ok(!statusLine(r).includes(SECRET));
+  });
+
+  test("the timeout covers reading the body, not just the headers", async () => {
+    const started = Date.now();
+    await assert.rejects(
+      () => requestWithSecrets({ url: `${base}/slow-body`, secrets, timeoutMs: 100 }),
+      /No complete response from 127\.0\.0\.1:\d+ within 100ms/,
+    );
+    assert.ok(Date.now() - started < 500, `took ${Date.now() - started}ms`);
   });
 });

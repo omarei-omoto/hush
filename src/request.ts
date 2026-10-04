@@ -71,12 +71,19 @@ export interface RequestInput {
 }
 
 export interface RequestResult {
+  /** Where the response came from, masked: a query can carry a secret, and so can a Location. */
   url: string;
+  /**
+   * The URL as the caller wrote it, `$NAME` placeholders and all, masked in
+   * case a value was typed in literally. What the audit log records.
+   */
+  requested: string;
   method: string;
   status: number;
-  statusText: string;
   headers: [string, string][];
   body: string;
+  /** Masked, like everything else that came back. */
+  statusText: string;
   /** True when the body was longer than maxBytes and was cut. */
   truncated: boolean;
   /** How many secret occurrences the response had, which were masked. */
@@ -101,7 +108,11 @@ export interface Substitution {
  */
 const VAR = /\$(\$|\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
-export function substitute(text: string, secrets: Record<string, string>): Substitution {
+export function substitute(
+  text: string,
+  secrets: Record<string, string>,
+  encode: (value: string) => string = (v) => v,
+): Substitution {
   const used: string[] = [];
   const missing: string[] = [];
   const out = text.replace(VAR, (whole, flag, braced, bare) => {
@@ -113,7 +124,7 @@ export function substitute(text: string, secrets: Record<string, string>): Subst
       return whole;
     }
     if (!used.includes(name)) used.push(name);
-    return value;
+    return encode(value);
   });
   return { out, used, missing };
 }
@@ -248,8 +259,11 @@ export function prepare(input: RequestInput): Prepared {
     );
   }
 
+  // Percent-encoded, so the server receives the value as one parameter, byte
+  // for byte: raw, a value containing `&` split into two parameters, `+` read
+  // as a space, and `#` cut the query short.
   if (targets.has("query") && url.search) {
-    url.search = absorb(substitute(url.search, secrets));
+    url.search = absorb(substitute(url.search, secrets, encodeURIComponent));
   }
 
   const headers: [string, string][] = (input.headers ?? []).map(([name, value]) => [
@@ -364,14 +378,36 @@ export async function requestWithSecrets(input: RequestInput): Promise<RequestRe
   const redactable = omit.length
     ? Object.fromEntries(Object.entries(input.secrets).filter(([k]) => !omit.includes(k)))
     : input.secrets;
-  const redactor = new Redactor(redactable);
   const redactText = (s: string): string => {
     const r = new Redactor(redactable);
     return r.push(s) + r.flush();
   };
+  /**
+   * For the short strings that came back (the URL, the status text, headers,
+   * an error): masked as written, and if a value is still there once
+   * percent-decoded — encoded some way the redactor's list does not cover —
+   * the decoded form is shown masked instead.
+   */
+  const redactShown = (s: string): string => {
+    const masked = redactText(s);
+    // `+` is a space in a form-encoded query and a plus anywhere else, so both readings are tried.
+    for (const plus of [false, true]) {
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(plus ? masked.replace(/\+/g, "%20") : masked);
+      } catch {
+        continue;
+      }
+      const again = redactText(decoded);
+      if (again !== decoded) return again;
+    }
+    return masked;
+  };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const timedOut = () => new ValidationError(`No complete response from ${started} within ${timeoutMs}ms.`);
 
   let current = url;
   let currentMethod = method;
@@ -414,9 +450,8 @@ export async function requestWithSecrets(input: RequestInput): Promise<RequestRe
       current = next;
     }
   } catch (err) {
-    if (controller.signal.aborted) {
-      throw new ValidationError(`No response from ${started} within ${timeoutMs}ms.`);
-    }
+    clearTimeout(timer);
+    if (controller.signal.aborted) throw timedOut();
     const code = causeCode(err);
     // undici refuses a port on its blocked list before it ever tries to
     // connect, and reports it as a bare "bad port" with no errno at all.
@@ -435,14 +470,25 @@ export async function requestWithSecrets(input: RequestInput): Promise<RequestRe
     if (code) throw new ValidationError(`Request to ${started} failed (${code}).`);
     // Last stop before the caller sees it: no error text leaves this function
     // without going through the same redactor the response body does.
-    if (err instanceof Error) err.message = redactText(err.message);
+    if (err instanceof Error) err.message = redactShown(err.message);
+    throw err;
+  }
+
+  // The timeout runs until the body is read, not just until the headers
+  // arrive: a server that sends headers and then trickles the body would
+  // otherwise hold the call open for as long as it liked.
+  const maxBytes = input.maxBytes ?? DEFAULT_MAX_BYTES;
+  let text: string;
+  let truncated: boolean;
+  try {
+    ({ text, truncated } = await readCapped(res, maxBytes));
+  } catch (err) {
+    if (controller.signal.aborted) throw timedOut();
+    if (err instanceof Error) err.message = redactShown(err.message);
     throw err;
   } finally {
     clearTimeout(timer);
   }
-
-  const maxBytes = input.maxBytes ?? DEFAULT_MAX_BYTES;
-  const { text, truncated } = await readCapped(res, maxBytes);
 
   // Scanned as one string rather than streamed: the body is already bounded
   // above, and a reflected secret is only visible once the whole thing is read.
@@ -455,13 +501,16 @@ export async function requestWithSecrets(input: RequestInput): Promise<RequestRe
   // X-Client-Key, a request-id, a Location, a Set-Cookie) would otherwise put
   // the plaintext into the caller's output, which is the one thing this
   // feature promises never to do.
-  res.headers.forEach((value, name) => outHeaders.push([redactor.redact(name), redactor.redact(value)]));
+  res.headers.forEach((value, name) => outHeaders.push([redactShown(name), redactShown(value)]));
 
   return {
-    url: current.href,
+    // The URL after substitution has the value in its query, and a redirect's
+    // Location can carry one too; both are masked like the body.
+    url: redactShown(current.href),
+    requested: redactShown(input.url),
     method: currentMethod,
     status: res.status,
-    statusText: res.statusText,
+    statusText: redactShown(res.statusText),
     headers: outHeaders,
     body: safe,
     truncated,

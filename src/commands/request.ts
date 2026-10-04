@@ -190,7 +190,10 @@ export async function cmdRequest(a: Args): Promise<void> {
   audit(loose.hushDir, {
     actor: "cli",
     action: "request",
-    url: result.url,
+    // What the caller wrote, placeholders and all: never the URL after
+    // substitution, which has the value in its query.
+    url: result.requested,
+    ...(result.redirects ? { landed: result.url } : {}),
     method: result.method,
     status: result.status,
     layers,

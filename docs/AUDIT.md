@@ -403,6 +403,29 @@ merge driver, and the vault parsing it uses. Not covered in depth: the relay's
 cryptography (reviewed in the fourth pass), hardware-key paths, Windows
 specifics, timing, and the install script and release pipeline.
 
+### Fifteenth pass — an outside review of `hush request`
+
+A partial outside review (an automated audit the maintainer ran on
+4 October 2026, which stopped before it finished) reproduced three ways a
+value came back from `hush request`, and one timeout that did not hold. Each
+was confirmed in the code, fixed, and has a test that fails without the fix.
+Looking at the same code turned up the encoding problems.
+
+| Severity | Issue | Fix |
+|---|---|---|
+| High | **A request's result could carry the value it sent.** The result named the URL after substitution, so a value substituted into the query came back in the tool result and the status line. A same-host redirect whose `Location` repeated the value, and a status text that did, came back unmasked too. The audit log recorded the same URL | The URL, the status text and every header are masked, and checked again once percent-decoded. The audit log records the URL as the caller wrote it, with its `$NAME` placeholders, and where a redirect landed, masked |
+| Medium | **The redactor only matched a value exactly as stored.** A server that echoed it percent-encoded, or escaped inside a JSON string, got it past the mask, in `hush request` and `hush run` alike | Each value is also masked in its percent-encoded, form-encoded and JSON-escaped forms |
+| Medium | **A value substituted into the query was not encoded.** One containing `&`, `+` or `#` reached the server as two parameters, a space, or a query cut short | Substituted values are percent-encoded, so the server receives the value as one parameter, byte for byte |
+| Low | **The timeout stopped at the headers.** A server could send its headers and then trickle the body for as long as it liked | The timeout runs until the body has been read |
+
+The review's test run also failed in its sandbox, where listing network
+interfaces is refused: the test that the app is not reachable from the network
+now skips, saying why, when there is no interface to try.
+
+Not covered by that review, and still for the external one: the broker and
+leases, storage and file permissions, the agent end to end, transcript
+scanning, platform-specific behaviour, and the release pipeline.
+
 ### Mutants that survive on purpose
 
 Four mutations are known to be behaviourally identical, each checked

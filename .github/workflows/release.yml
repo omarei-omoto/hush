@@ -37,9 +37,8 @@ jobs:
     name: the tagged commit passes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
 
@@ -73,13 +72,12 @@ jobs:
       # The OIDC token trusted publishing exchanges for a one-time publish credential.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Deliberately no `registry-url`: with it, setup-node writes an
       # `_authToken=${NODE_AUTH_TOKEN}` line that expands to empty, npm treats
       # that as "already authenticated", never attempts the OIDC exchange, and
       # the publish fails with a misleading 404.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.x"
 
@@ -130,11 +128,11 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
       - run: npm ci
@@ -148,7 +146,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y age
       - name: the suite against the Linux binary
         run: HUSH_TEST_BINARY="$PWD/release/hush-linux-x64" npm run test:binary
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaries
           path: release/hush-*
@@ -168,8 +166,8 @@ jobs:
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: binaries
           path: release
@@ -218,7 +216,7 @@ jobs:
           "$GITHUB_WORKSPACE/release/hush-darwin-arm64" init smoke --no-agent
           "$GITHUB_WORKSPACE/release/hush-darwin-arm64" set K=smoke_value_123456
           "$GITHUB_WORKSPACE/release/hush-darwin-arm64" run --quiet -- sh -c 'echo "$K"' | grep -q 'redacted:K'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaries-final
           path: release/hush-*
@@ -233,11 +231,11 @@ jobs:
       id-token: write        # the OIDC token the attestation is signed with
       attestations: write    # store the attestation on the repository
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.x"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: binaries-final
           path: release
@@ -256,7 +254,7 @@ jobs:
       # Sigstore-signed build provenance: `gh attestation verify <file> --repo
       # omarei-omoto/hush` proves which workflow and commit produced a binary.
       # scripts/install.sh checks it when gh is available.
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
             release/hush-*

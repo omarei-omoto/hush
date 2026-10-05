@@ -135,7 +135,7 @@ function checkMerge(
     assert.match(r.structural!, /both branches changed the vault key/);
     return;
   }
-  assert.equal(r.structural, undefined, r.structural);
+  assert.equal(r.structural, undefined, r.structural ?? "");
   const expected = modelMerge(base.model, mA, mB);
 
   const merged = Vault.fromData("merged", r.data!);

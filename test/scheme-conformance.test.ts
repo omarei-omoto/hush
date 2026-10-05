@@ -27,14 +27,16 @@ import {
 const subtle = globalThis.crypto.subtle;
 const b64 = (s: string) => Buffer.from(s, "base64");
 const b64u = (b: Buffer) => b.toString("base64url");
+/** WebCrypto takes bytes over a plain ArrayBuffer, which a Buffer's may not be. */
+const bytes = (b: Buffer): Uint8Array<ArrayBuffer> => new Uint8Array(b);
 
 /** Independent AES-256-GCM open, built from the spec above. */
 async function openGcm(key: Buffer, iv: Buffer, ct: Buffer, tag: Buffer, aad: Buffer): Promise<Buffer> {
-  const k = await subtle.importKey("raw", key, "AES-GCM", false, ["decrypt"]);
+  const k = await subtle.importKey("raw", bytes(key), "AES-GCM", false, ["decrypt"]);
   const plain = await subtle.decrypt(
-    { name: "AES-GCM", iv, additionalData: aad, tagLength: 128 },
+    { name: "AES-GCM", iv: bytes(iv), additionalData: bytes(aad), tagLength: 128 },
     k,
-    Buffer.concat([ct, tag]),
+    bytes(Buffer.concat([ct, tag])),
   );
   return Buffer.from(plain);
 }
@@ -213,8 +215,8 @@ describe("hush/v3 signed header conformance (independent WebCrypto implementatio
   };
 
   async function hkdf(ikm: Buffer, salt: Buffer, info: string, len: number): Promise<Buffer> {
-    const k = await subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
-    return Buffer.from(await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info: Buffer.from(info) }, k, len * 8));
+    const k = await subtle.importKey("raw", bytes(ikm), "HKDF", false, ["deriveBits"]);
+    return Buffer.from(await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: bytes(salt), info: bytes(Buffer.from(info)) }, k, len * 8));
   }
 
   test("a vault hush signed verifies under an independent Ed25519 and header encoding", async () => {

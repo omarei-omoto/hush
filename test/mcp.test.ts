@@ -877,7 +877,7 @@ describe("mcp — policy names sets the way the user does", () => {
       call(2, "hush_run", { command: "npm", args: ["--version"], sets: ["other-lib-set"] }),
     ]);
     const allowed = s.replies.find((r) => r.id === 1)!.result!;
-    assert.notEqual(allowed.isError, true, allowed.content![0].text);
+    assert.notEqual(allowed.isError, true, allowed.content![0].text ?? "");
     assert.match(allowed.content![0].text!, /exit 0/);
     const refused = s.replies.find((r) => r.id === 2)!.result!;
     assert.equal(refused.isError, true, "a library set the policy does not name was injected");

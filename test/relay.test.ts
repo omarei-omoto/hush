@@ -276,7 +276,7 @@ describe("requestApproval through the relay", () => {
     try {
       assert.ok(approvalPromptAvailable(), "a paired machine still says nothing can ask");
       const r = await requestApproval(p.requesterHome, req(), headless);
-      assert.equal(r.decision, "once", r.note);
+      assert.equal(r.decision, "once", r.note ?? "");
       assert.equal(r.via, "relay");
       assert.match(r.note ?? "", /laptop/);
       assert.deepEqual(a.seen, ["run npm test"]);

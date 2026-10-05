@@ -2,8 +2,7 @@ name: CI
 
 on:
   push:
-    # beta too, where prereleases are cut from (RELEASING.md).
-    branches: [main, beta]
+    branches: [main]
   pull_request:
 
 # A read-only token is all this needs.

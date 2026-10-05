@@ -2,8 +2,8 @@ name: Docs
 
 # The docs site on GitHub Pages at tryhush.dev: the README and docs/ as a
 # Starlight site (website/, content from scripts/build-docs.mjs), rebuilt
-# whenever the README, the guide or the docs change on main. A beta branch
-# does not deploy: the site describes what `npm i -g @omarei/hush` installs.
+# whenever the README, the guide or the docs change on main. No other branch
+# deploys: the site describes what `npm i -g @omarei/hush` installs.
 # One-time setup: Settings → Pages → Source: "GitHub Actions", and
 # Custom domain: tryhush.dev (the DNS records are in RELEASING.md).
 on:

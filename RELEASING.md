@@ -48,8 +48,9 @@ A release is a signed tag. Nothing is published from anyone's laptop.
 A tag with a hyphen, `vx.y.z-beta.n`, is a prerelease: the same workflow
 publishes it to npm's `beta` tag and as a GitHub prerelease, and leaves the
 stable channel alone (npm `latest`, Homebrew, install.sh, the MCP registry).
-Cut betas from the `beta` branch; when one is ready, merge `beta` into `main`
-and tag the stable version there. The docs site deploys from `main` only.
+There is no standing beta branch: tag a prerelease from `main`, or from a
+short-lived branch when it needs to wait, and tag the stable version on `main`
+once it is ready. The docs site deploys from `main` only.
 
 ## The binaries, once
 

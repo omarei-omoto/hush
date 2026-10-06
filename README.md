@@ -7,6 +7,7 @@
 [![node](https://img.shields.io/node/v/@omarei/hush.svg)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![runtime deps](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](./package.json)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15249/badge)](https://www.bestpractices.dev/projects/15249)
 
 You keep your API keys in a `.env` file. It is plaintext, every process you
 launch can read it, and the day you pointed an AI coding agent at the repo it

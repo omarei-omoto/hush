@@ -4,7 +4,7 @@
  */
 import { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseEnvFile } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
@@ -19,6 +19,7 @@ import { withoutChain } from "./audit.ts";
 import { type UiCtx, forgetOnboarding, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
 import { setSkip, setupState } from "./setup.ts";
 import { parseJson } from "./json.ts";
+import { writeRepoFile } from "./vault-files.ts";
 
 /**
  * Never let a repo-supplied symlink redirect a write hush performs.
@@ -669,7 +670,7 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
           assertProjectHushDir(ctx.hushDir);
           const bad = symlinkRefusal(policyPath);
           if (bad) return json(res, 400, { error: bad });
-          writeFileSync(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
+          writeRepoFile(policyPath, JSON.stringify({ requireApproval: DEFAULT_POLICY.requireApproval }, null, 2) + "\n");
         }
       }
 
@@ -726,7 +727,7 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
         mkdirSync(ctx.hushDir, { recursive: true });
         const badPolicyPath = symlinkRefusal(policyPath);
         if (badPolicyPath) return json(res, 400, { error: badPolicyPath });
-        writeFileSync(policyPath, JSON.stringify({ ...existing, approvalTtlSeconds }, null, 2) + "\n");
+        writeRepoFile(policyPath, JSON.stringify({ ...existing, approvalTtlSeconds }, null, 2) + "\n");
       }
       audit(ctx.hushDir, {
         actor: "ui",

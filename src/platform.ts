@@ -13,7 +13,7 @@
  *   uses, reproduced here because hush has no dependencies.
  */
 import { spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { constants, lstatSync, openSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export const isWindows = (platform: string = process.platform): boolean => platform === "win32";
@@ -69,6 +69,29 @@ export function restrictToOwner(path: string, platform: string = process.platfor
   const domain = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${user}` : user;
   const r = spawnSync(icacls, [path, "/inheritance:r", "/grant:r", `${domain}:F`], { stdio: "ignore", windowsHide: true });
   return r.status === 0;
+}
+
+/**
+ * Open `path` for writing or appending, refusing a link at that path in the
+ * same call (O_NOFOLLOW) rather than checking first and opening after — a
+ * check and an open are two moments, and a link swapped in between them
+ * would send the write wherever it points. Where the platform has no
+ * O_NOFOLLOW (Windows), the check-then-open is the best there is.
+ */
+export function openNoFollow(path: string, how: "write" | "append", mode = 0o600): number {
+  const base = constants.O_WRONLY | constants.O_CREAT | (how === "write" ? constants.O_TRUNC : constants.O_APPEND);
+  const refuse = () => new Error(`${path} is not a regular file — it is a link or a device. Remove it and try again.`);
+  if (constants.O_NOFOLLOW === undefined) {
+    const st = lstatSync(path, { throwIfNoEntry: false });
+    if (st && !st.isFile()) throw refuse();
+    return openSync(path, base, mode);
+  }
+  try {
+    return openSync(path, base | constants.O_NOFOLLOW, mode);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ELOOP") throw refuse();
+    throw e;
+  }
 }
 
 // ------------------------------------------------------ spawning on Windows

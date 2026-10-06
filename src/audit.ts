@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
+import { openNoFollow } from "./platform.ts";
 
 /** Rotate at this size so a long-lived machine cannot fill the disk. */
 const AUDIT_MAX_BYTES = 2 * 1024 * 1024;
@@ -145,7 +146,9 @@ export function audit(hushDir: string, event: Record<string, unknown>): void {
           entry.prev = lineHash(before);
         }
       }
-      const fd = openSync(path, "a", 0o600);
+      // Not through a link: audit.log is gitignored, but a repository can
+      // still commit one, and the log would then be appended to wherever it points.
+      const fd = openNoFollow(path, "append");
       try {
         writeSync(fd, JSON.stringify(entry) + "\n");
       } finally {

@@ -1,8 +1,8 @@
 /**
  * `hush export` — plaintext out, as a last resort (and the names the shell hook needs).
  */
-import { restrictToOwner } from "../platform.ts";
-import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, lstatSync } from "node:fs";
+import { openNoFollow, restrictToOwner } from "../platform.ts";
+import { existsSync, readFileSync, writeSync, closeSync, chmodSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { audit } from "../vault.ts";
 import { requireIdentity } from "../identity.ts";
@@ -90,7 +90,19 @@ export async function cmdExport(a: Args): Promise<void> {
           `symlink or special file placed at that path.`,
       );
     }
-    writeFileSync(outFile, body, { mode: 0o600 });
+    // The check above names the problem; this open is what enforces it, in
+    // one step, so a link swapped in after the check is still refused.
+    let fd: number;
+    try {
+      fd = openNoFollow(outFile, "write");
+    } catch (e) {
+      die((e as Error).message);
+    }
+    try {
+      writeSync(fd, body);
+    } finally {
+      closeSync(fd);
+    }
     // writeFileSync only applies mode on creation; an existing file keeps its
     // old permissions, which for a stray .env is usually 0644.
     chmodSync(outFile, 0o600);
@@ -99,8 +111,17 @@ export async function cmdExport(a: Args): Promise<void> {
     const entry = outFile.replace(/^\.\//, "");
     const current = existsSync(gi) ? readFileSync(gi, "utf8") : "";
     if (!current.split(/\r?\n/).includes(entry)) {
-      appendFileSync(gi, (current.endsWith("\n") || !current ? "" : "\n") + entry + "\n");
-      info(dim(`  added ${entry} to .gitignore`));
+      try {
+        const gfd = openNoFollow(gi, "append", 0o644);
+        try {
+          writeSync(gfd, (current.endsWith("\n") || !current ? "" : "\n") + entry + "\n");
+        } finally {
+          closeSync(gfd);
+        }
+        info(dim(`  added ${entry} to .gitignore`));
+      } catch (e) {
+        warn(`did not add ${entry} to .gitignore: ${(e as Error).message}`);
+      }
     }
     warn(`Wrote ${Object.keys(secrets).length} plaintext secret(s) to ${outFile} (mode 0600).`);
     // A .env is a format to be *parsed*. Its quoting is dotenv's, not a shell's,

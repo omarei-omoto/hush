@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -168,6 +168,32 @@ test("an atomic write never goes through a link waiting at a temp name (review F
     assert.equal(readFileSync(path, "utf8"), "new");
     assert.equal(readFileSync(target, "utf8"), "untouched");
     assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".tmp") && !f.includes(String(process.pid) + ".tmp") && !f.includes("hush-")), [], "a temp file was left behind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("files hush appends to or creates in a repository are never reached through a committed link", async () => {
+  const { symlinkSync, existsSync } = await import("node:fs");
+  const { audit } = await import("../src/audit.ts");
+  const { writeProjectDotfiles } = await import("../src/library.ts");
+  const dir = mkdtempSync(join(tmpdir(), "hush-links-"));
+  try {
+    const hushDir = join(dir, ".hush");
+    mkdirSync(hushDir);
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    // audit.log: a link to a file elsewhere stays untouched; hush's own log is not written through it.
+    const victim = join(outside, "rc");
+    writeFileSync(victim, "untouched\n");
+    symlinkSync(victim, join(hushDir, "audit.log"));
+    audit(hushDir, { actor: "test", action: "probe" });
+    assert.equal(readFileSync(victim, "utf8"), "untouched\n", "the audit line went through the link");
+    // .gitignore and .gitattributes: a dangling link's target is never created.
+    symlinkSync(join(outside, "made-by-ignore"), join(hushDir, ".gitignore"));
+    symlinkSync(join(outside, "made-by-attrs"), join(hushDir, ".gitattributes"));
+    writeProjectDotfiles(hushDir);
+    assert.ok(!existsSync(join(outside, "made-by-ignore")) && !existsSync(join(outside, "made-by-attrs")), "a dangling link's target was created");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

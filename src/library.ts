@@ -431,13 +431,16 @@ export function writeProjectDotfiles(hushDir: string): void {
   assertProjectHushDir(hushDir);
   mkdirSync(hushDir, { recursive: true });
   const gitignore = join(hushDir, ".gitignore");
-  if (!existsSync(gitignore)) {
-    writeFileSync(gitignore, ["audit.log", "audit.log.*", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", "merge-conflicts.json", ""].join("\n"));
-  }
-  const attrs = join(hushDir, ".gitattributes");
-  if (!existsSync(attrs)) {
-    writeFileSync(attrs, ["vault.json -merge", "use.json -merge", ""].join("\n"));
-  }
+  // "wx": only ever created, never written through something already there —
+  // a dangling link a repository committed at the name reads as "missing" to
+  // existsSync, and an ordinary write would create its target.
+  const createOnly = (path: string, text: string) => {
+    try {
+      writeFileSync(path, text, { flag: "wx" });
+    } catch { /* there already, or not ours to write */ }
+  };
+  createOnly(gitignore, ["audit.log", "audit.log.*", "pending/", "*.local.json", "identity", "*.lock", "*.tmp", "merge-conflicts.json", ""].join("\n"));
+  createOnly(join(hushDir, ".gitattributes"), ["vault.json -merge", "use.json -merge", ""].join("\n"));
 }
 
 /**

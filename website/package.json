@@ -12,5 +12,8 @@
   "dependencies": {
     "@astrojs/starlight": "0.42.5",
     "astro": "7.3.5"
+  },
+  "overrides": {
+    "postcss-selector-parser": "^7.1.6"
   }
 }

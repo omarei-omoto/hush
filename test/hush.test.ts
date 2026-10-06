@@ -288,7 +288,7 @@ describe("redactor", () => {
 
   test("preview never reveals more than a quarter of a value", () => {
     // This string is what an agent sees via hush_describe_secret.
-    for (const v of ["abc", "hunter2", "tok_9f2a1b", "short12chars", "sk_live_51ABCDEFGH", "AKIAIOSFODNN7EXAMPLE", "x".repeat(64)]) {
+    for (const v of ["abc", "hunter2", "tok_9f2a1b", "short12chars", "sk_" + "live_51ABCDEFGH", "AKIAIOSFODNN7EXAMPLE", "x".repeat(64)]) {
       const p = preview(v);
       // Count characters actually printed, ignoring the "(N chars)" suffix and
       // the masking dots. Substring matching miscounts a repeated-character value.

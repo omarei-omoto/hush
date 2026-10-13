@@ -21,6 +21,10 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   already have, and a warning for a plaintext `.env`. The crawl runs in the
   background; **Look again** repeats it. Dropping a global key on a codebase
   that is not set up sets it up with that key.
+- **Pick folders with your system's folder picker.** **Choose a folder…** (on
+  Home) and **Add a folder** open Finder's picker on a Mac, the desktop's on
+  Linux, and Windows' own; it comes up in front of the browser. A pasted path
+  still works.
 - **Library is now Global keys**, with **Save a global key** on Home and there.
 - **Fewer false "missing" warnings.** Only variables that look like credentials,
   or that you already keep, are flagged; `NODE_ENV`, `PORT` and the like are

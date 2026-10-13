@@ -16,8 +16,11 @@ machine, not just the folder you started it in.
   was last worked on, which credentials its code reads and how many of those
   your global keys already have, and a warning when a plaintext `.env` sits in
   it. That is a names-only scan: no value, and nothing from a `.env`, is read.
-  **Look again** re-crawls in the background. Dropping a global key on a
-  codebase that is not set up sets it up with that key.
+  **Choose a folder…** opens your system's folder picker (Finder's on a Mac)
+  to add one to the folders hush looks in, and **Add a folder** takes a single
+  codebase the same way; either also takes a pasted path. **Look again**
+  re-crawls in the background. Dropping a global key on a codebase that is not
+  set up sets it up with that key.
 - **Global keys** are yours, kept once, never in a repository. **Drag a key onto
   a project** — in the sidebar or on Home — and it is part of that project: it
   gets the key whenever it runs. Nothing goes into the project's repository, and

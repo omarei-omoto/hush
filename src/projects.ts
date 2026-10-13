@@ -32,6 +32,8 @@ interface Registry {
   projects: KnownProject[];
   /** When the one-time search of the usual code folders ran (ISO). */
   searched?: string;
+  /** When the crawl for codebases last ran (ISO): its own mark, so an older search never stands in for it. */
+  crawled?: string;
   /** The folders the person chose for hush to look in for codebases. */
   roots?: string[];
 }
@@ -57,7 +59,12 @@ function load(): Registry {
       ? j.projects.filter((p) => p && typeof p.root === "string" && typeof p.seen === "string")
       : [];
     const roots = Array.isArray(j?.roots) ? j.roots.filter((x) => typeof x === "string") : undefined;
-    return { projects, ...(typeof j?.searched === "string" ? { searched: j.searched } : {}), ...(roots ? { roots } : {}) };
+    return {
+      projects,
+      ...(typeof j?.searched === "string" ? { searched: j.searched } : {}),
+      ...(typeof j?.crawled === "string" ? { crawled: j.crawled } : {}),
+      ...(roots ? { roots } : {}),
+    };
   } catch {
     return { projects: [] };
   }
@@ -267,6 +274,7 @@ export function startCrawl(): CrawlStatus {
   const now = new Date().toISOString();
   for (const root of found) if (!r.projects.some((p) => p.root === root)) r.projects.push({ root, seen: now });
   r.searched = now;
+  r.crawled = now;
   save(r);
   // Every listed project gets described, not only the ones found this time.
   const todo = [...new Set([...found, ...r.projects.filter((p) => !p.hidden).map((p) => p.root)])].filter(listable);
@@ -298,5 +306,5 @@ export function startCrawl(): CrawlStatus {
 
 /** The first time the app opens: crawl once, in the background. */
 export function crawlOnce(): void {
-  if (!load().searched) startCrawl();
+  if (!load().crawled) startCrawl();
 }

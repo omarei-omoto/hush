@@ -5,13 +5,15 @@
 import { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseEnvFile } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
-import { addProject, hideProject, isKnownProject, isListedRoot, setCrawlRoots, startCrawl } from "./projects.ts";
+import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, setCrawlRoots, startCrawl } from "./projects.ts";
+import { chooseFolder } from "./dialogs.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
 import { setLocalApprovals } from "./policy.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
@@ -229,6 +231,18 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
       if (Array.isArray(body.roots)) setCrawlRoots(body.roots.map(String));
       startCrawl();
       return json(res, 200, hubState(startedRoot));
+    }
+
+    /**
+     * The system's folder picker, for "Choose a folder…": a browser page cannot
+     * give a server a folder's path, so hush opens the picker itself. Answers
+     * with the folder picked, or null when cancelled or no picker can be shown.
+     */
+    case "/api/pick-folder": {
+      const prompt = body.purpose === "project" ? "Choose a project folder for hush" : "Choose a folder for hush to look in for codebases";
+      // Four minutes: inside Node's own five-minute limit on one request.
+      const path = await chooseFolder(prompt, crawlRoots().roots[0] ?? homedir(), { env: process.env, platform: () => process.platform, timeoutMs: 240_000 });
+      return json(res, 200, { path });
     }
 
     /** The project list: add a folder by hand, or take one off the list. */

@@ -1328,6 +1328,13 @@ test("/api/move carves one pile into named sets", async () => {
     }
   });
 
+  test("/api/pick-folder answers null, without a window, where no folder picker can be shown (hub)", async () => {
+    // This server runs with HUSH_NO_DIALOG=1: the picker is never opened in a test.
+    const r = await libApi("/api/pick-folder", { purpose: "roots" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { path: null });
+  });
+
   test("the hub acts only on projects it knows: an unknown folder is refused by header and by body (hub)", async () => {
     const other = realpathSync(mkdtempSync(join(tmpdir(), "hush-hub-other-")));
     mkdirSync(join(other, ".hush"), { recursive: true });

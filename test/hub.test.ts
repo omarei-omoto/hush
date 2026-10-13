@@ -216,3 +216,70 @@ describe("codebases, found and described", () => {
     rmSync(code, { recursive: true, force: true });
   });
 });
+
+test("the first crawl for codebases runs even where the older one-time search already ran", async () => {
+  const { crawlOnce, crawlStatus } = await import("../src/projects.ts");
+  const home = scratch("hush-hub-home-");
+  const code = scratch("hush-hub-code-");
+  const saved = process.env.HUSH_HOME;
+  // Set by hand rather than with withHome: the crawl finishes in the
+  // background, and every write it makes must land in this home.
+  process.env.HUSH_HOME = home;
+  try {
+    const plain = join(code, "site");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "package.json"), "{}");
+    // What the first version of the hub left behind: searched, never crawled.
+    writeFileSync(join(home, "projects.json"), JSON.stringify({ projects: [], searched: "2026-10-01T00:00:00.000Z", roots: [code] }));
+    crawlOnce();
+    assert.ok(listProjects().some((p) => p.root === plain), "the crawl did not run");
+    for (let i = 0; i < 100 && crawlStatus().running; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(!crawlStatus().running, "the crawl did not finish");
+  } finally {
+    if (saved === undefined) delete process.env.HUSH_HOME;
+    else process.env.HUSH_HOME = saved;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(code, { recursive: true, force: true });
+  }
+});
+
+describe("choosing a folder with the system's picker", () => {
+  test("each desktop's picker is asked for a folder, starting where hush already looks", async () => {
+    const { folderPickerArgs, powershellFolderScript } = await import("../src/dialogs.ts");
+    const mac = folderPickerArgs("osascript", 'Pick "one"', "/Users/me/code");
+    assert.deepEqual(mac.slice(0, 3), ["-l", "JavaScript", "-e"]);
+    assert.match(mac[3], /NSOpenPanel/);
+    assert.match(mac[3], /activateIgnoringOtherApps/, "the picker would open behind the browser");
+    assert.deepEqual(mac.slice(4), ['Pick "one"', "/Users/me/code"], "the prompt and folder were not passed as arguments");
+    assert.ok(!mac[3].includes("Pick"), "the prompt was quoted into the script");
+    assert.deepEqual(folderPickerArgs("zenity", "p", "/home/me"), ["--file-selection", "--directory", "--title", "p", "--filename", "/home/me/"]);
+    assert.deepEqual(folderPickerArgs("kdialog", "p", "/home/me"), ["--title", "p", "--getexistingdirectory", "/home/me"]);
+    assert.ok(!powershellFolderScript("a 'quoted' prompt").includes("quoted"), "the prompt was quoted into the script instead of carried as data");
+  });
+
+  test("the folder picked comes back without its trailing slash; a cancel, or no desktop, is null", { skip: process.platform === "win32" }, async () => {
+    const { chooseFolder } = await import("../src/dialogs.ts");
+    const { chmodSync } = await import("node:fs");
+    const dir = scratch("hush-pick-");
+    try {
+      let n = 0;
+      const picker = (script: string) => {
+        const path = join(dir, `picker-${n++}`);
+        writeFileSync(path, "#!/bin/sh\n" + script + "\n");
+        chmodSync(path, 0o755);
+        return { env: {}, platform: () => "darwin", resolveProgram: () => path };
+      };
+      assert.equal(await chooseFolder("p", "/", picker("echo /Users/me/code/")), "/Users/me/code");
+      assert.equal(await chooseFolder("p", "/", picker("echo /")), "/");
+      // osascript's own exit for "User canceled." (-128) is non-zero.
+      assert.equal(await chooseFolder("p", "/", picker("echo 'execution error: User canceled. (-128)' >&2; exit 1")), null);
+      assert.equal(await chooseFolder("p", "/", { env: { HUSH_NO_DIALOG: "1" }, platform: () => "darwin", resolveProgram: () => "/bin/false" }), null);
+      // One picker at a time: a second ask while one is open shares its answer.
+      const slow = picker("sleep 0.3; echo /Users/me/one/");
+      const [a, b] = await Promise.all([chooseFolder("p", "/", slow), chooseFolder("p", "/", picker("echo /Users/me/two/"))]);
+      assert.deepEqual([a, b], ["/Users/me/one", "/Users/me/one"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

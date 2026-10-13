@@ -286,10 +286,27 @@ function renderShell(){
 
 /* --------------------------------------------------------------- home */
 
+/* The system's own folder picker (Finder on a Mac), opened by the hush server:
+   a browser page cannot hand a server a folder's path. Null when cancelled. */
+async function pickFolder(purpose){
+  const r=await api("/api/pick-folder",{purpose:purpose});
+  return r.path||null;
+}
+function chooseButton(purpose,label,then,cls){
+  const b=h("button",{type:"button",class:"btn "+(cls||"sm")},icon("folder"),label||"Choose a folder…");
+  b.onclick=async function(){
+    b.disabled=true;
+    try{const p=await pickFolder(purpose);if(p)await then(p)}
+    finally{b.disabled=false}
+  };
+  return b;
+}
+
 function addFolderDialog(){
-  const path=h("input",{class:"input mono",placeholder:"/Users/you/code/my-app",autocomplete:"off",spellcheck:"false"});
-  dialog({title:"Add a project",lead:"A folder hush already works in (it has a .hush folder). To start hush in a new one, run hush in it once.",
-    submit:"Add",body:[field("Folder",path)],
+  const path=h("input",{class:"input mono",placeholder:"/Users/you/code/my-app",autocomplete:"off",spellcheck:"false",style:"flex:1;min-width:0"});
+  const choose=chooseButton("project","Choose…",function(p){path.value=p});
+  dialog({title:"Add a project",lead:"Any codebase: a git repository, or a folder with a package.json, pyproject.toml or the like. Pick it, or paste its path.",
+    submit:"Add",body:[field("Folder",h("div",{class:"row",style:"gap:8px;align-items:center;flex-wrap:nowrap"},path,choose))],
     onSubmit:async function(){
       if(!path.value.trim()){path.focus();return false}
       HUB=await api("/api/projects",{action:"add",root:path.value.trim()});
@@ -337,12 +354,14 @@ function foldersCard(){
         HUB=await api("/api/crawl",{roots:HUB.roots.filter(function(x){return x!==r})});render();watchCrawl();
       }},icon("x"))));
   });
-  const input=h("input",{class:"input mono",placeholder:"~/code",autocomplete:"off",spellcheck:"false",style:"max-width:260px"});
-  const f=h("form",{class:"row",style:"margin-top:10px;gap:8px;align-items:center"},input,h("button",{type:"submit",class:"btn sm"},icon("plus"),"Look in this folder too"));
+  const lookIn=async function(p){HUB=await api("/api/crawl",{roots:(HUB.roots||[]).concat([p])});render();watchCrawl()};
+  const input=h("input",{class:"input mono",placeholder:"or paste a path: ~/code",autocomplete:"off",spellcheck:"false",style:"max-width:260px"});
+  const f=h("form",{class:"row",style:"margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap"},
+    chooseButton("roots","Choose a folder…",lookIn,"sm primary"),input,h("button",{type:"submit",class:"btn sm"},icon("plus"),"Look in this folder too"));
   f.onsubmit=async function(ev){
     ev.preventDefault();
     if(!input.value.trim()){input.focus();return}
-    HUB=await api("/api/crawl",{roots:(HUB.roots||[]).concat([input.value.trim()])});render();watchCrawl();
+    await lookIn(input.value.trim());
   };
   card.append(list,f);
   return card;

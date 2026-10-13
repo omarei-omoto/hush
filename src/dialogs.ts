@@ -446,6 +446,84 @@ export function detectBackend(opts: DialogEnv): DialogBackend | null {
   return null;
 }
 
+// ---------------------------------------------------------- choose a folder
+//
+// The app's "Choose a folder…": the system's own folder picker (Finder's on
+// macOS), opened by the hush process for the browser page, which cannot hand
+// a server a folder's path itself. Only a path the person picked comes back;
+// nothing is read from the folder here.
+
+/** The folder picker script for Windows. Prints the chosen path, or nothing. Exported for tests. */
+export function powershellFolderScript(prompt: string): string {
+  const payload = psPayload({ prompt });
+  return `$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$r = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json
+$o = New-Object Windows.Forms.Form -Property @{ TopMost=$true; ShowInTaskbar=$false; WindowState='Minimized' }
+$d = New-Object Windows.Forms.FolderBrowserDialog -Property @{ Description=$r.prompt; ShowNewFolderButton=$false }
+if ($d.ShowDialog($o) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }`;
+}
+
+/**
+ * The macOS picker: Finder's open panel, shown by osascript as a small app of
+ * its own that comes to the front. AppleScript's `choose folder` belongs to
+ * whichever app started hush, so it opens behind the browser it was asked
+ * from. The prompt and start folder arrive as arguments, never in the script.
+ */
+const MAC_FOLDER_PANEL = `function run(argv) {
+  ObjC.import("AppKit");
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  app.activateIgnoringOtherApps(true);
+  var p = $.NSOpenPanel.openPanel;
+  p.canChooseDirectories = true;
+  p.canChooseFiles = false;
+  p.allowsMultipleSelection = false;
+  p.message = argv[0];
+  p.prompt = "Choose";
+  p.directoryURL = $.NSURL.fileURLWithPath(argv[1]);
+  p.level = $.NSModalPanelWindowLevel;
+  return p.runModal == $.NSModalResponseOK ? ObjC.unwrap(p.URLs.objectAtIndex(0).path) : "";
+}`;
+
+/** The arguments that open the folder picker with each backend. Exported for tests. */
+export function folderPickerArgs(name: BackendName, prompt: string, start: string): string[] {
+  switch (name) {
+    case "osascript":
+      return ["-l", "JavaScript", "-e", MAC_FOLDER_PANEL, prompt, start];
+    case "zenity":
+      return ["--file-selection", "--directory", "--title", prompt, "--filename", start.endsWith("/") ? start : start + "/"];
+    case "kdialog":
+      return ["--title", prompt, "--getexistingdirectory", start];
+    case "powershell":
+      return psArgs(powershellFolderScript(prompt));
+  }
+}
+
+let picking: Promise<string | null> | null = null;
+
+/**
+ * Show the system's folder picker and return the folder chosen, or null when
+ * the person cancels, nothing can show one (no desktop, HUSH_NO_DIALOG), or
+ * the picker stays unanswered for `timeoutMs`. One picker at a time: a second
+ * request while one is open waits for that one's answer.
+ */
+export function chooseFolder(prompt: string, start: string, opts: DialogEnv & { timeoutMs?: number }): Promise<string | null> {
+  if (picking) return picking;
+  const backend = detectBackend(opts);
+  if (!backend) return Promise.resolve(null);
+  picking = (async () => {
+    const { ok, out } = await run(backend.program, folderPickerArgs(backend.name, prompt, start), opts.timeoutMs ?? 300_000);
+    if (!ok || !out) return null;
+    // A picker may end the path with a separator; the root stays "/".
+    const path = out.split(/\r?\n/)[0];
+    return path.length > 1 ? path.replace(/[\\/]+$/, "") : path;
+  })().finally(() => {
+    picking = null;
+  });
+  return picking;
+}
+
 /** "900 seconds" -> "Allow 15 min", the button text a backend shows for a session grant, computed from the policy's actual TTL rather than a hardcoded guess. */
 export function ttlLabel(ttlSeconds: number): string {
   if (ttlSeconds > 0 && ttlSeconds % 3600 === 0) {

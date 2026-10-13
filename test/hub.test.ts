@@ -254,7 +254,30 @@ describe("choosing a folder with the system's picker", () => {
     assert.ok(!mac[3].includes("Pick"), "the prompt was quoted into the script");
     assert.deepEqual(folderPickerArgs("zenity", "p", "/home/me"), ["--file-selection", "--directory", "--title", "p", "--filename", "/home/me/"]);
     assert.deepEqual(folderPickerArgs("kdialog", "p", "/home/me"), ["--title", "p", "--getexistingdirectory", "/home/me"]);
-    assert.ok(!powershellFolderScript("a 'quoted' prompt").includes("quoted"), "the prompt was quoted into the script instead of carried as data");
+    const win = powershellFolderScript("a 'quoted' prompt", "C:\\Users\\me\\Ünïcode");
+    assert.ok(!win.includes("quoted") && !win.includes("Ünïcode"), "the prompt or folder was quoted into the script instead of carried as data");
+    assert.match(win, /OpenStandardOutput\(\)/, "the path would go through the console's code page, garbling a name outside ASCII");
+    assert.match(win, /UTF8Encoding \$false/, "the path would start with a byte-order mark");
+    assert.match(win, /SetOptions\(options \| 0x20/, "the Explorer-style picker is not in folder mode");
+    assert.match(win, /catch \{\s*\$d = New-Object Windows\.Forms\.FolderBrowserDialog/, "no picker where Add-Type is not allowed");
+    assert.match(win, /^'@$/m, "the C# shim's here-string is not closed at the start of a line");
+  });
+
+  test("a picked path is tidied the same way on every system", async () => {
+    const { pickedPath } = await import("../src/dialogs.ts");
+    const cases: [string, string | null][] = [
+      ["/Users/me/code/\n", "/Users/me/code"],
+      ["/", "/"],
+      ["/home/me/Ünïcode 文件\n", "/home/me/Ünïcode 文件"],
+      ["\uFEFFC:\\Users\\me\\code", "C:\\Users\\me\\code"],
+      ["C:\\Users\\me\\code\\", "C:\\Users\\me\\code"],
+      ["C:\\", "C:\\"],
+      ["D:", "D:\\"],
+      ["\\\\server\\share\\proj\\", "\\\\server\\share\\proj"],
+      ["", null],
+      ["\n", null],
+    ];
+    for (const [out, want] of cases) assert.equal(pickedPath(out), want, JSON.stringify(out));
   });
 
   test("the folder picked comes back without its trailing slash; a cancel, or no desktop, is null", { skip: process.platform === "win32" }, async () => {

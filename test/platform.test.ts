@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { escapeCmdArgument, spawnPlan, restrictToOwner } from "../src/platform.ts";
 import { onPath } from "../src/which.ts";
-import { detectBackend, powershellApprovalScript, powershellSecretScript } from "../src/dialogs.ts";
+import { detectBackend, folderPickerArgs, powershellApprovalScript, powershellFolderScript, powershellSecretScript } from "../src/dialogs.ts";
 import { clipboardCandidates } from "../src/clipboard.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
@@ -147,4 +147,37 @@ test("the Windows folder is never one the environment points at (review F33, F15
     else process.env.SystemRoot = saved;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("the app's folder picker on Windows", () => {
+  test("Windows runs it through Windows PowerShell, -STA, with the request as data", () => {
+    const args = folderPickerArgs("powershell", "Pick one", "C:\\Users\\me\\Ünïcode");
+    assert.ok(args.includes("-STA"), "a COM dialog needs a single-threaded apartment");
+    const script = Buffer.from(args[args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
+    assert.equal(script, powershellFolderScript("Pick one", "C:\\Users\\me\\Ünïcode"));
+  });
+
+  // The real thing: Windows PowerShell 5.1 compiles the picker's C# (C# 5, the
+  // compiler Add-Type uses there) and parses the whole script. No window opens.
+  test("Windows PowerShell 5.1 compiles the picker and parses its script", { skip: process.platform !== "win32" }, async () => {
+    const { powershellPath } = await import("../src/platform.ts");
+    const script = powershellFolderScript("Pick one", "C:\\");
+    const shim = /@'\r?\n([\s\S]*?)\r?\n'@/.exec(script)?.[1];
+    assert.ok(shim, "no C# shim in the script");
+    const b64 = Buffer.from(script, "utf8").toString("base64");
+    const check = [
+      "$ErrorActionPreference='Stop'",
+      `$s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))`,
+      "$errs = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($s, [ref]$null, [ref]$errs)",
+      "if ($errs.Count) { throw ($errs | Out-String) }",
+      "Add-Type -TypeDefinition @'",
+      shim,
+      "'@",
+      "[Console]::Out.Write([HushFolderPicker].GetMethod('Pick').Name)",
+    ].join("\r\n");
+    const ps = powershellPath();
+    assert.ok(ps, "no Windows PowerShell in System32");
+    const r = spawnSync(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(check, "utf16le").toString("base64")], { encoding: "utf8" });
+    assert.equal(r.stdout.trim(), "Pick", r.stderr);
+  });
 });

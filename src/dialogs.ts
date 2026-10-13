@@ -453,15 +453,78 @@ export function detectBackend(opts: DialogEnv): DialogBackend | null {
 // a server a folder's path itself. Only a path the person picked comes back;
 // nothing is read from the folder here.
 
-/** The folder picker script for Windows. Prints the chosen path, or nothing. Exported for tests. */
-export function powershellFolderScript(prompt: string): string {
-  const payload = psPayload({ prompt });
+/**
+ * Windows' Explorer-style folder picker (the common item dialog, IFileOpenDialog
+ * in folder mode), reached from PowerShell 5.1 through a small C# shim that
+ * Add-Type compiles. Where that is not allowed (constrained language mode,
+ * no compiler) the older FolderBrowserDialog stands in. Both hang off a
+ * top-most window of their own, so they open in front of the browser.
+ */
+const WINDOWS_FOLDER_SHIM = `using System;
+using System.Runtime.InteropServices;
+public static class HushFolderPicker {
+  [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")] class FileOpenDialog {}
+  // IFileDialog, in vtable order up to GetResult: the only methods used.
+  [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IFileDialog {
+    [PreserveSig] int Show(IntPtr owner);
+    void SetFileTypes(uint n, IntPtr specs); void SetFileTypeIndex(uint i); void GetFileTypeIndex(out uint i);
+    void Advise(IntPtr events, out uint cookie); void Unadvise(uint cookie);
+    void SetOptions(uint fos); void GetOptions(out uint fos);
+    void SetDefaultFolder(IShellItem item); void SetFolder(IShellItem item); void GetFolder(out IShellItem item);
+    void GetCurrentSelection(out IShellItem item);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name); void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title); void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+    void GetResult(out IShellItem item);
+  }
+  [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellItem {
+    void BindToHandler(IntPtr bc, ref Guid bhid, ref Guid riid, out IntPtr ppv); void GetParent(out IShellItem item);
+    void GetDisplayName(uint sigdn, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+  }
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+  static extern void SHCreateItemFromParsingName(string path, IntPtr bc, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IShellItem item);
+  public static string Pick(string title, string start, IntPtr owner) {
+    IFileDialog d = (IFileDialog)new FileOpenDialog();
+    uint options; d.GetOptions(out options);
+    d.SetOptions(options | 0x20 | 0x40 | 0x800); // pick folders, file-system only, path must exist
+    d.SetTitle(title);
+    d.SetOkButtonLabel("Choose");
+    try { IShellItem at; SHCreateItemFromParsingName(start, IntPtr.Zero, typeof(IShellItem).GUID, out at); d.SetFolder(at); } catch { }
+    if (d.Show(owner) != 0) return null;
+    IShellItem picked; d.GetResult(out picked);
+    string path; picked.GetDisplayName(0x80058000, out path); // its file-system path
+    return path;
+  }
+}`;
+
+/**
+ * The folder picker script for Windows. Writes the chosen path to stdout as
+ * UTF-8 bytes (no console code page, no byte-order mark), or nothing. Exported for tests.
+ */
+export function powershellFolderScript(prompt: string, start: string): string {
+  const payload = psPayload({ prompt, start });
   return `$ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Windows.Forms
 $r = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json
-$o = New-Object Windows.Forms.Form -Property @{ TopMost=$true; ShowInTaskbar=$false; WindowState='Minimized' }
-$d = New-Object Windows.Forms.FolderBrowserDialog -Property @{ Description=$r.prompt; ShowNewFolderButton=$false }
-if ($d.ShowDialog($o) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }`;
+$o = New-Object Windows.Forms.Form -Property @{ TopMost=$true; ShowInTaskbar=$false; FormBorderStyle='None'; Opacity=0; StartPosition='CenterScreen'; Size=(New-Object Drawing.Size 1,1) }
+$o.Show(); $o.Activate()
+$path = $null
+try {
+  Add-Type -TypeDefinition @'
+${WINDOWS_FOLDER_SHIM}
+'@
+  $path = [HushFolderPicker]::Pick($r.prompt, $r.start, $o.Handle)
+} catch {
+  $d = New-Object Windows.Forms.FolderBrowserDialog -Property @{ Description=$r.prompt; SelectedPath=$r.start; ShowNewFolderButton=$false }
+  if ($d.ShowDialog($o) -eq 'OK') { $path = $d.SelectedPath }
+}
+$o.Close()
+if ($path) {
+  $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($path)
+  $out = [Console]::OpenStandardOutput(); $out.Write($bytes, 0, $bytes.Length); $out.Flush()
+}`;
 }
 
 /**
@@ -496,8 +559,21 @@ export function folderPickerArgs(name: BackendName, prompt: string, start: strin
     case "kdialog":
       return ["--title", prompt, "--getexistingdirectory", start];
     case "powershell":
-      return psArgs(powershellFolderScript(prompt));
+      return psArgs(powershellFolderScript(prompt, start));
   }
+}
+
+/**
+ * The path a picker printed, tidied: its first line, without a byte-order
+ * mark or a trailing separator — except for a root ("/", "C:\\"), where the
+ * separator is the path ("C:" alone means the current folder on drive C).
+ * Null for nothing. Exported for tests.
+ */
+export function pickedPath(out: string): string | null {
+  const line = out.replace(/^\uFEFF/, "").split(/\r?\n/)[0].trim();
+  if (!line) return null;
+  if (/^[A-Za-z]:[\\/]*$/.test(line)) return line.slice(0, 2) + "\\";
+  return line.replace(/(?<=.)[\\/]+$/, "");
 }
 
 let picking: Promise<string | null> | null = null;
@@ -514,10 +590,7 @@ export function chooseFolder(prompt: string, start: string, opts: DialogEnv & { 
   if (!backend) return Promise.resolve(null);
   picking = (async () => {
     const { ok, out } = await run(backend.program, folderPickerArgs(backend.name, prompt, start), opts.timeoutMs ?? 300_000);
-    if (!ok || !out) return null;
-    // A picker may end the path with a separator; the root stays "/".
-    const path = out.split(/\r?\n/)[0];
-    return path.length > 1 ? path.replace(/[\\/]+$/, "") : path;
+    return ok ? pickedPath(out) : null;
   })().finally(() => {
     picking = null;
   });

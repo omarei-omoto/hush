@@ -16,8 +16,9 @@ machine, not just the folder you started it in.
   was last worked on, which credentials its code reads and how many of those
   your global keys already have, and a warning when a plaintext `.env` sits in
   it. That is a names-only scan: no value, and nothing from a `.env`, is read.
-  **Choose a folder…** opens your system's folder picker (Finder's on a Mac)
-  to add one to the folders hush looks in, and **Add a folder** takes a single
+  **Choose a folder…** opens your system's folder picker (Finder's on a Mac,
+  Explorer's on Windows, zenity's or kdialog's on Linux) to add one to the
+  folders hush looks in, and **Add a folder** takes a single
   codebase the same way; either also takes a pasted path. **Look again**
   re-crawls in the background. Dropping a global key on a codebase that is not
   set up sets it up with that key.

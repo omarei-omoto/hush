@@ -13,7 +13,7 @@ import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
 import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, setCrawlRoots, startCrawl } from "./projects.ts";
-import { chooseFolder } from "./dialogs.ts";
+import { chooseFolder, detectBackend } from "./dialogs.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
 import { setLocalApprovals } from "./policy.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
@@ -236,13 +236,16 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
     /**
      * The system's folder picker, for "Choose a folder…": a browser page cannot
      * give a server a folder's path, so hush opens the picker itself. Answers
-     * with the folder picked, or null when cancelled or no picker can be shown.
+     * with the folder picked (null when cancelled), and whether a picker could be shown at all.
      */
     case "/api/pick-folder": {
       const prompt = body.purpose === "project" ? "Choose a project folder for hush" : "Choose a folder for hush to look in for codebases";
+      const where = { env: process.env, platform: () => process.platform };
+      // No picker on this system (Linux without zenity or kdialog, HUSH_NO_DIALOG): the page asks for a path instead.
+      if (!detectBackend(where)) return json(res, 200, { path: null, picker: false });
       // Four minutes: inside Node's own five-minute limit on one request.
-      const path = await chooseFolder(prompt, crawlRoots().roots[0] ?? homedir(), { env: process.env, platform: () => process.platform, timeoutMs: 240_000 });
-      return json(res, 200, { path });
+      const path = await chooseFolder(prompt, crawlRoots().roots[0] ?? homedir(), { ...where, timeoutMs: 240_000 });
+      return json(res, 200, { path, picker: true });
     }
 
     /** The project list: add a folder by hand, or take one off the list. */

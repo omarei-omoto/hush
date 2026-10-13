@@ -1332,7 +1332,7 @@ test("/api/move carves one pile into named sets", async () => {
     // This server runs with HUSH_NO_DIALOG=1: the picker is never opened in a test.
     const r = await libApi("/api/pick-folder", { purpose: "roots" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual(r.body, { path: null });
+    assert.deepEqual(r.body, { path: null, picker: false });
   });
 
   test("the hub acts only on projects it knows: an unknown folder is refused by header and by body (hub)", async () => {

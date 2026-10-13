@@ -289,14 +289,21 @@ function renderShell(){
 /* The system's own folder picker (Finder on a Mac), opened by the hush server:
    a browser page cannot hand a server a folder's path. Null when cancelled. */
 async function pickFolder(purpose){
-  const r=await api("/api/pick-folder",{purpose:purpose});
-  return r.path||null;
+  return await api("/api/pick-folder",{purpose:purpose});
 }
-function chooseButton(purpose,label,then,cls){
+/* field is the path box beside it: where to type when there is no picker. */
+function chooseButton(purpose,label,then,cls,field){
   const b=h("button",{type:"button",class:"btn "+(cls||"sm")},icon("folder"),label||"Choose a folder…");
   b.onclick=async function(){
     b.disabled=true;
-    try{const p=await pickFolder(purpose);if(p)await then(p)}
+    try{
+      const r=await pickFolder(purpose);
+      if(r.path)await then(r.path);
+      else if(r.picker===false){
+        toast("No folder picker on this system (on Linux, install zenity or kdialog) — paste the path instead",{error:true});
+        if(field)field.focus();
+      }
+    }
     finally{b.disabled=false}
   };
   return b;
@@ -304,7 +311,7 @@ function chooseButton(purpose,label,then,cls){
 
 function addFolderDialog(){
   const path=h("input",{class:"input mono",placeholder:"/Users/you/code/my-app",autocomplete:"off",spellcheck:"false",style:"flex:1;min-width:0"});
-  const choose=chooseButton("project","Choose…",function(p){path.value=p});
+  const choose=chooseButton("project","Choose…",function(p){path.value=p},"sm",path);
   dialog({title:"Add a project",lead:"Any codebase: a git repository, or a folder with a package.json, pyproject.toml or the like. Pick it, or paste its path.",
     submit:"Add",body:[field("Folder",h("div",{class:"row",style:"gap:8px;align-items:center;flex-wrap:nowrap"},path,choose))],
     onSubmit:async function(){
@@ -357,7 +364,7 @@ function foldersCard(){
   const lookIn=async function(p){HUB=await api("/api/crawl",{roots:(HUB.roots||[]).concat([p])});render();watchCrawl()};
   const input=h("input",{class:"input mono",placeholder:"or paste a path: ~/code",autocomplete:"off",spellcheck:"false",style:"max-width:260px"});
   const f=h("form",{class:"row",style:"margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap"},
-    chooseButton("roots","Choose a folder…",lookIn,"sm primary"),input,h("button",{type:"submit",class:"btn sm"},icon("plus"),"Look in this folder too"));
+    chooseButton("roots","Choose a folder…",lookIn,"sm primary",input),input,h("button",{type:"submit",class:"btn sm"},icon("plus"),"Look in this folder too"));
   f.onsubmit=async function(ev){
     ev.preventDefault();
     if(!input.value.trim()){input.focus();return}

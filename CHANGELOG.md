@@ -22,9 +22,12 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   background; **Look again** repeats it. Dropping a global key on a codebase
   that is not set up sets it up with that key.
 - **Pick folders with your system's folder picker.** **Choose a folder…** (on
-  Home) and **Add a folder** open Finder's picker on a Mac, the desktop's on
-  Linux, and Windows' own; it comes up in front of the browser. A pasted path
-  still works.
+  Home) and **Add a folder** open Finder's picker on a Mac, zenity's or
+  kdialog's on Linux, and Explorer's on Windows; it comes up in front of the
+  browser. A pasted path still works, and is what the app asks for where no
+  picker can be shown.
+- **The first crawl for codebases now runs** on a machine where an earlier
+  build of the app had already searched for hush projects.
 - **Library is now Global keys**, with **Save a global key** on Home and there.
 - **Fewer false "missing" warnings.** Only variables that look like credentials,
   or that you already keep, are flagged; `NODE_ENV`, `PORT` and the like are

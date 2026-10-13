@@ -236,3 +236,19 @@ export function reconcile(usages: Usage[], vaultKeys: string[]): Reconciliation 
   const unused = vaultKeys.filter((k) => !referenced.has(k));
   return { needed: usages, satisfied, missing, unused };
 }
+
+/** Read by nearly every program, and never kept in a secrets manager. */
+const ORDINARY_VARS = new Set([
+  "NODE_ENV", "PORT", "HOST", "HOSTNAME", "CI", "HOME", "PATH", "PWD", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "TZ",
+  "DEBUG", "VERBOSE", "LOG_LEVEL", "ENV", "ENVIRONMENT", "APP_ENV", "TMPDIR", "EDITOR", "BASE_URL", "PUBLIC_URL",
+  "SITE_URL", "APP_URL", "VERCEL", "VERCEL_ENV", "VERCEL_URL", "NEXT_RUNTIME", "GITHUB_ACTIONS", "RUNNER_OS",
+  "PYTHONPATH", "JAVA_HOME", "NODE_OPTIONS",
+]);
+const SECRET_WORDS = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|DSN|PRIVATE|CERT|SALT|SIGNING|WEBHOOK)/;
+const CONNECTION_STRING = /^((DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|KAFKA|SUPABASE|NEON|TURSO|ELASTIC|CLICKHOUSE)(_[A-Z0-9]+)?_(URL|URI))$|_DATABASE_URL$/;
+
+/** Does a variable's name say it holds a credential? Names only: nothing here looks at a value. */
+export function looksLikeSecret(name: string): boolean {
+  if (ORDINARY_VARS.has(name) || name.startsWith("npm_")) return false;
+  return SECRET_WORDS.test(name) || CONNECTION_STRING.test(name);
+}

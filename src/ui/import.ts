@@ -256,13 +256,16 @@ function renderShell(){
   // Every project hush knows. Click to open; drop a global key on one to give it that key.
   nav.append(h("div",{class:"navhead",text:"Projects"}));
   const here2=currentRoot();
-  (HUB?HUB.projects:[]).forEach(function(p){
+  const all=HUB?HUB.projects:[];
+  all.filter(function(p){return p.state!=="codebase"}).forEach(function(p){
     const a=h("a",{href:"#project","aria-current":cur==="project"&&p.root===here2?"page":null,title:p.root,class:"proj",
       onclick:function(ev){ev.preventDefault();openProject(p.root)}},
       icon("folder"),h("span",{class:"pname",text:p.name}),h("span",{class:"count",text:String(p.keys)}));
     dropTarget(a,p);
     nav.append(a);
   });
+  const found=all.filter(function(p){return p.state==="codebase"}).length;
+  if(found)nav.append(h("a",{href:"#home",class:"navmore"},plural(found,"more codebase")+" on Home"));
   nav.append(h("button",{type:"button",class:"navadd",onclick:addFolderDialog},icon("plus"),"Add a folder"));
 
   // What the rest applies to: the project on screen.
@@ -294,33 +297,102 @@ function addFolderDialog(){
     }});
 }
 
+function ago(iso){
+  if(!iso)return "";
+  const d=(Date.now()-Date.parse(iso))/1000;
+  if(d<3600)return Math.max(1,Math.round(d/60))+"m ago";
+  if(d<86400)return Math.round(d/3600)+"h ago";
+  if(d<86400*45)return Math.round(d/86400)+"d ago";
+  return Math.round(d/86400/30)+"mo ago";
+}
+
+/* While a crawl runs, Home refreshes itself so the list fills in as it goes. */
+let CRAWL_TIMER=null;
+function watchCrawl(){
+  clearTimeout(CRAWL_TIMER);
+  if(!HUB||!HUB.crawl||!HUB.crawl.running)return;
+  CRAWL_TIMER=setTimeout(async function(){
+    try{await reloadHub()}catch(e){return}
+    if(route()==="home")render();else renderShell();
+    watchCrawl();
+  },1200);
+}
+
+function foldersCard(){
+  const c=HUB.crawl||{};
+  const card=h("section",{class:"card pad section","aria-label":"Folders hush looks in"});
+  card.append(h("div",{class:"sechead",style:"margin:0"},
+    h("div",null,h("h3",{text:"Folders hush looks in"}),
+      h("p",{class:"lead",text:c.running
+        ?"Looking… "+c.done+" of "+c.total+(c.current?" — "+c.current:"")
+        :(HUB.rootsChosen?"":"Your usual code folders, until you choose. ")+"Every codebase in them is listed below with its stack and the credentials its code reads — names only, never a value."+(c.finished?" Last looked "+ago(c.finished)+".":"")})),
+    h("button",{type:"button",class:"btn sm",disabled:!!c.running,onclick:async function(){HUB=await api("/api/crawl",{});render();watchCrawl()}},icon("activity"),c.running?"Looking…":"Look again")));
+  if(c.running&&c.total){
+    card.append(h("div",{class:"progress"},h("i",{style:"width:"+Math.round(100*c.done/c.total)+"%"})));
+  }
+  const list=h("div",{class:"chips",style:"margin-top:12px"});
+  (HUB.roots||[]).forEach(function(r){
+    list.append(h("span",{class:"chip"},icon("folder"),h("span",{class:"mono",text:tildePath(r)}),
+      h("button",{type:"button",class:"iconbtn","aria-label":"Stop looking in "+r,onclick:async function(){
+        HUB=await api("/api/crawl",{roots:HUB.roots.filter(function(x){return x!==r})});render();watchCrawl();
+      }},icon("x"))));
+  });
+  const input=h("input",{class:"input mono",placeholder:"~/code",autocomplete:"off",spellcheck:"false",style:"max-width:260px"});
+  const f=h("form",{class:"row",style:"margin-top:10px;gap:8px;align-items:center"},input,h("button",{type:"submit",class:"btn sm"},icon("plus"),"Look in this folder too"));
+  f.onsubmit=async function(ev){
+    ev.preventDefault();
+    if(!input.value.trim()){input.focus();return}
+    HUB=await api("/api/crawl",{roots:(HUB.roots||[]).concat([input.value.trim()])});render();watchCrawl();
+  };
+  card.append(list,f);
+  return card;
+}
+
+function projectCard(p){
+  const lacking=p.lacking||[];
+  const card=h("button",{type:"button",class:"pcard"+(p.state==="codebase"?" fresh":""),onclick:function(){openProject(p.root)},title:p.root},
+    h("div",{class:"ptop"},icon("folder"),h("b",{text:p.name}),
+      p.state==="codebase"?h("span",{class:"badge",text:"not set up"}):null,
+      p.active?h("span",{class:"muted ago",text:ago(p.active)}):null),
+    (p.stack&&p.stack.length)?h("div",{class:"techs"},p.stack.slice(0,3).map(function(t){return h("span",{class:"tech",text:t})})):null,
+    h("div",{class:"mono pdir",text:tildePath(p.root)+(p.branch?" · "+p.branch:"")}),
+    h("div",{class:"pmeta"},
+      p.state==="codebase"
+        ?h("span",{class:"muted",text:p.credentials&&p.credentials.length?"reads "+plural(p.credentials.length,"credential"):"no credentials found in its code"})
+        :h("span",{class:"badge"+(p.keys?" ok":""),text:plural(p.keys,"key")}),
+      lacking.length&&p.state!=="codebase"?h("span",{class:"badge warn",title:lacking.join(", "),text:lacking.length+" missing"}):null,
+      p.inGlobal&&p.inGlobal.length?h("span",{class:"muted",title:p.inGlobal.join(", "),text:p.inGlobal.length+" in your global keys — drag here"}):null,
+      p.plaintextEnv?h("span",{class:"badge warn",title:"A .env with values in it sits in this folder",text:".env in plain text"}):null));
+  dropTarget(card,p);
+  return card;
+}
+
 function renderHome(page){
   page.append(h("header",{class:"head"},
     h("div",null,h("h1",null,"Your projects"),
-      h("p",{text:"Every project hush knows on this machine. Drag a global key onto a project — here or in the sidebar — to make it part of that project. It stays yours: nothing goes into the project's repository."})),
+      h("p",{text:"Every codebase in the folders hush looks in, and every project it's used in. Drag a global key onto one to make it part of it — it stays yours, and nothing goes into the repository."})),
     h("div",{class:"actions"},
       h("button",{type:"button",class:"btn",onclick:addFolderDialog},icon("plus"),"Add a folder"),
       h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog({target:"library|default"})}},icon("key"),"Save a global key"))));
 
+  page.append(foldersCard());
   const projects=HUB?HUB.projects:[];
+  const setUp=projects.filter(function(p){return p.state!=="codebase"});
+  const fresh=projects.filter(function(p){return p.state==="codebase"});
   if(!projects.length){
-    page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,"No projects yet"),
-      h("p",{text:"Run hush in a project once (hush setup, hush run, anything) and it shows up here. Or add a folder that already has a .hush folder."}),
-      h("div",{class:"actions"},h("button",{type:"button",class:"btn primary",onclick:addFolderDialog},icon("plus"),"Add a folder")))));
-  }else{
+    page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,HUB&&HUB.crawl&&HUB.crawl.running?"Looking for codebases…":"No codebases found yet"),
+      h("p",{text:"Add the folders you keep code in above, or add one project by hand."}))));
+  }
+  if(setUp.length){
     const grid=h("div",{class:"pgrid"});
-    projects.forEach(function(p){
-      const card=h("button",{type:"button",class:"pcard",onclick:function(){openProject(p.root)}},
-        h("div",{class:"ptop"},icon("folder"),h("b",{text:p.name})),
-        h("div",{class:"mono pdir",text:tildePath(p.root)}),
-        h("div",{class:"pmeta"},
-          h("span",{class:"badge"+(p.keys?" ok":""),text:plural(p.keys,"key")}),
-          p.fromGlobal?h("span",{class:"muted",text:p.fromGlobal+" from your global keys"}):null,
-          h("span",{class:"muted",text:p.state==="vault"?"· own vault":"· global keys only"})));
-      dropTarget(card,p);
-      grid.append(card);
-    });
-    page.append(grid);
+    setUp.forEach(function(p){grid.append(projectCard(p))});
+    page.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Using hush"}))),grid));
+  }
+  if(fresh.length){
+    const grid=h("div",{class:"pgrid"});
+    fresh.forEach(function(p){grid.append(projectCard(p))});
+    page.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Other codebases"}),
+      h("p",{text:"Found in your folders, not set up for hush yet. Drop a global key on one to set it up with that key, or open it to choose."}))),grid));
   }
 
   // Your global keys, ready to drag, without leaving the page.
@@ -337,6 +409,7 @@ function renderHome(page){
     h("div",{class:"sechead"},h("div",null,h("h2",{text:"Global keys"}),
       h("p",{text:S.library.length?"Drag any of these onto a project.":"Keys you keep once and use in any project. Save one to start."}))),
     S.library.length?chips:null));
+  watchCrawl();
 }
 
 function render(){

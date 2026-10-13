@@ -1302,6 +1302,32 @@ test("/api/move carves one pile into named sets", async () => {
     assert.equal(taken.body.projects.find((p: any) => p.root === root).keys, before);
   });
 
+  test("/api/crawl looks in the folders chosen and describes each codebase, names only (hub)", async () => {
+    const code = realpathSync(mkdtempSync(join(tmpdir(), "hush-crawl-")));
+    const site = join(code, "site");
+    mkdirSync(join(site, "app"), { recursive: true });
+    writeFileSync(join(site, "package.json"), JSON.stringify({ dependencies: { next: "15" } }));
+    writeFileSync(join(site, "app", "page.js"), "process.env.HUB_ONE; process.env.SECRET_TOKEN_X; process.env.NODE_ENV;\n");
+    try {
+      let hub = (await libApi("/api/crawl", { roots: [code] })).body;
+      assert.deepEqual(hub.roots, [code]);
+      for (let i = 0; i < 50 && hub.crawl.running; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        hub = (await libApi("/api/hub")).body;
+      }
+      const found = hub.projects.find((p: any) => p.root === site);
+      assert.ok(found, "the codebase was not found: " + JSON.stringify(hub.projects.map((p: any) => p.root)));
+      assert.equal(found.state, "codebase");
+      assert.deepEqual(found.stack, ["Next.js", "JavaScript"]);
+      assert.deepEqual(found.credentials.sort(), ["HUB_ONE", "SECRET_TOKEN_X"]);
+      assert.deepEqual(found.inGlobal, ["HUB_ONE"], "a credential your global keys have was not offered");
+      const bad = await libApi("/api/crawl", { roots: [join(code, "missing")] });
+      assert.equal(bad.status, 400);
+    } finally {
+      rmSync(code, { recursive: true, force: true });
+    }
+  });
+
   test("the hub acts only on projects it knows: an unknown folder is refused by header and by body (hub)", async () => {
     const other = realpathSync(mkdtempSync(join(tmpdir(), "hush-hub-other-")));
     mkdirSync(join(other, ".hush"), { recursive: true });

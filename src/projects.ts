@@ -10,24 +10,30 @@
  * by its own .hush/ and the confirmations in ~/.hush.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { setImmediate as nextTick } from "node:timers/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { hushHome } from "./identity.ts";
 import { parseJson } from "./json.ts";
-import { writeFileAtomic } from "./vault-files.ts";
+import { ValidationError, writeFileAtomic } from "./vault-files.ts";
+import { type CodebaseDetails, describeCodebase, isCodebase } from "./codebase.ts";
 
 export interface KnownProject {
-  /** The project's root: the folder holding .hush/, links resolved. */
+  /** The project's root: the folder holding .hush/ (or the codebase's top), links resolved. */
   root: string;
   /** When hush was last used there (ISO), or when it was found. */
   seen: string;
   hidden?: boolean;
+  /** What the last crawl found out about it (codebase.ts). */
+  details?: CodebaseDetails;
 }
 
 interface Registry {
   projects: KnownProject[];
   /** When the one-time search of the usual code folders ran (ISO). */
   searched?: string;
+  /** The folders the person chose for hush to look in for codebases. */
+  roots?: string[];
 }
 
 const registryPath = (): string => join(hushHome(), "projects.json");
@@ -50,7 +56,8 @@ function load(): Registry {
     const projects = Array.isArray(j?.projects)
       ? j.projects.filter((p) => p && typeof p.root === "string" && typeof p.seen === "string")
       : [];
-    return { projects, ...(typeof j?.searched === "string" ? { searched: j.searched } : {}) };
+    const roots = Array.isArray(j?.roots) ? j.roots.filter((x) => typeof x === "string") : undefined;
+    return { projects, ...(typeof j?.searched === "string" ? { searched: j.searched } : {}), ...(roots ? { roots } : {}) };
   } catch {
     return { projects: [] };
   }
@@ -87,11 +94,21 @@ export function rememberProject(root: string): void {
   }
 }
 
-/** The projects to show: still there, not hidden, most recently used first. */
-export function listProjects(): KnownProject[] {
+/** Still worth listing: a hush project, or a codebase that is still there. */
+const listable = (root: string): boolean => isProjectRoot(root) || isCodebase(root);
+export const isListedRoot = listable;
+
+/**
+ * The projects to show: still there, not hidden. Hush projects first, then
+ * codebases hush has found but that are not set up yet; within each, the most
+ * recently worked on first.
+ */
+export function listProjects(): (KnownProject & { hush: boolean })[] {
+  const when = (p: KnownProject) => p.details?.active ?? p.seen;
   return load()
-    .projects.filter((p) => !p.hidden && isProjectRoot(p.root))
-    .sort((a, b) => b.seen.localeCompare(a.seen) || basename(a.root).localeCompare(basename(b.root)));
+    .projects.filter((p) => !p.hidden && listable(p.root))
+    .map((p) => ({ ...p, hush: isProjectRoot(p.root) }))
+    .sort((a, b) => Number(b.hush) - Number(a.hush) || when(b).localeCompare(when(a)) || basename(a.root).localeCompare(basename(b.root)));
 }
 
 /** Is `root` on the list (hidden ones included)? The app acts only on these. */
@@ -100,10 +117,10 @@ export function isKnownProject(root: string): boolean {
   return load().projects.some((p) => p.root === at);
 }
 
-/** Add a folder by hand. It must already be a hush project. */
+/** Add a folder by hand: a hush project, or any codebase. */
 export function addProject(root: string): KnownProject {
   const at = real(root);
-  if (!isProjectRoot(at)) throw new Error(`${at} is not a hush project: it has no .hush/vault.json or .hush/envs.json`);
+  if (!listable(at)) throw new ValidationError(`${at} is not a codebase hush recognises: no .hush, .git or project file (package.json, pyproject.toml, …) in it`);
   const r = load();
   const known = r.projects.find((p) => p.root === at);
   if (known) {
@@ -139,6 +156,31 @@ export function searchRoots(home = homedir()): string[] {
     });
 }
 
+/** The folders to look in: the ones the person chose, else the usual code folders. */
+export function crawlRoots(): { roots: string[]; chosen: boolean } {
+  const r = load();
+  if (r.roots) return { roots: r.roots, chosen: true };
+  // A relocated hush home (HUSH_HOME: a test, a second identity) guesses no
+  // folders of the real home: only ones chosen for it are looked in.
+  return { roots: process.env.HUSH_HOME ? [] : searchRoots(), chosen: false };
+}
+
+/** Choose the folders hush looks in for codebases. Each must be a folder that exists. */
+export function setCrawlRoots(roots: string[]): string[] {
+  const clean = [...new Set(roots.map((d) => d.trim()).filter(Boolean).map((d) => (d === "~" ? homedir() : d.startsWith("~/") ? join(homedir(), d.slice(2)) : d)).map(real))];
+  for (const d of clean) {
+    let dir = false;
+    try {
+      dir = statSync(d).isDirectory();
+    } catch { /* missing */ }
+    if (!dir) throw new ValidationError(`${d} is not a folder`);
+  }
+  const r = load();
+  r.roots = clean;
+  save(r);
+  return clean;
+}
+
 const SKIP = new Set(["node_modules", ".git", ".hg", ".svn", "Library", "dist", "build", "target", "vendor", ".venv", "venv", ".next", ".cache"]);
 
 /**
@@ -146,13 +188,13 @@ const SKIP = new Set(["node_modules", ".git", ".hg", ".svn", "Library", "dist", 
  * depth limit, a folder budget and a deadline. Names only — nothing inside a
  * project is read beyond whether .hush/ has a vault or a list of sets.
  */
-export function findProjects(roots: string[], limits = { depth: 4, folders: 20_000, ms: 2_000 }): string[] {
+export function findProjects(roots: string[], limits: { depth: number; folders: number; ms: number; codebases?: boolean } = { depth: 4, folders: 20_000, ms: 2_000 }): string[] {
   const found: string[] = [];
   const deadline = Date.now() + limits.ms;
   let budget = limits.folders;
   const walk = (dir: string, depth: number): void => {
     if (budget-- <= 0 || Date.now() > deadline) return;
-    if (isProjectRoot(dir)) {
+    if (isProjectRoot(dir) || (limits.codebases && isCodebase(dir))) {
       found.push(real(dir));
       return; // a project's own subfolders are its own business
     }
@@ -192,4 +234,69 @@ export function searchOnce(roots = searchRoots()): number {
     return 0;
   }
   return added;
+}
+
+// -------------------------------------------------------------- the crawl
+
+export interface CrawlStatus {
+  running: boolean;
+  /** Codebases described so far, and how many were found. */
+  done: number;
+  total: number;
+  /** The one being described now. */
+  current?: string;
+  /** When the last crawl finished (ISO). */
+  finished?: string;
+}
+
+let crawl: CrawlStatus = { running: false, done: 0, total: 0 };
+
+export const crawlStatus = (): CrawlStatus => ({ ...crawl });
+
+/**
+ * Look through the chosen folders for codebases and describe each one: its
+ * stack, when it was last worked on, and which credentials its code reads
+ * (names only). Runs in the background, one codebase at a time, yielding in
+ * between so the app stays responsive; the list fills in as it goes.
+ */
+export function startCrawl(): CrawlStatus {
+  if (crawl.running) return crawlStatus();
+  const { roots } = crawlRoots();
+  const found = findProjects(roots, { depth: 4, folders: 40_000, ms: 4_000, codebases: true });
+  const r = load();
+  const now = new Date().toISOString();
+  for (const root of found) if (!r.projects.some((p) => p.root === root)) r.projects.push({ root, seen: now });
+  r.searched = now;
+  save(r);
+  // Every listed project gets described, not only the ones found this time.
+  const todo = [...new Set([...found, ...r.projects.filter((p) => !p.hidden).map((p) => p.root)])].filter(listable);
+  crawl = { running: true, done: 0, total: todo.length };
+  void (async () => {
+    for (const root of todo) {
+      crawl.current = basename(root);
+      await nextTick();
+      let details: CodebaseDetails | null = null;
+      try {
+        details = describeCodebase(root);
+      } catch { /* unreadable: listed without details */ }
+      if (details) {
+        const latest = load();
+        const entry = latest.projects.find((p) => p.root === root);
+        if (entry) {
+          entry.details = details;
+          try {
+            save(latest);
+          } catch { /* the list is a convenience */ }
+        }
+      }
+      crawl.done++;
+    }
+    crawl = { running: false, done: crawl.done, total: crawl.total, finished: new Date().toISOString() };
+  })();
+  return crawlStatus();
+}
+
+/** The first time the app opens: crawl once, in the background. */
+export function crawlOnce(): void {
+  if (!load().searched) startCrawl();
 }

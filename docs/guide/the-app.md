@@ -10,8 +10,14 @@ A local app in your browser that covers every project hush knows on this
 machine, not just the folder you started it in.
 
 - **Home** lists your projects with how many keys each gets. hush remembers a
-  project whenever it runs in one, searches your usual code folders once the
-  first time, and takes any folder you add by hand.
+  project whenever it runs in one, and **looks through the folders you choose**
+  (your usual code folders until you do) for every codebase, set up for hush or
+  not. Each one shows its stack (Next.js, Python, Go, …), its branch and when it
+  was last worked on, which credentials its code reads and how many of those
+  your global keys already have, and a warning when a plaintext `.env` sits in
+  it. That is a names-only scan: no value, and nothing from a `.env`, is read.
+  **Look again** re-crawls in the background. Dropping a global key on a
+  codebase that is not set up sets it up with that key.
 - **Global keys** are yours, kept once, never in a repository. **Drag a key onto
   a project** — in the sidebar or on Home — and it is part of that project: it
   gets the key whenever it runs. Nothing goes into the project's repository, and

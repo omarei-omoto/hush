@@ -11,7 +11,7 @@ import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
-import { addProject, hideProject, isKnownProject, isProjectRoot } from "./projects.ts";
+import { addProject, hideProject, isKnownProject, isListedRoot, setCrawlRoots, startCrawl } from "./projects.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
 import { setLocalApprovals } from "./policy.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
@@ -178,7 +178,7 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
     try {
       started = realpathSync(startedRoot);
     } catch { /* kept as given */ }
-    if (!isProjectRoot(at) || (at !== started && !isKnownProject(at))) {
+    if (!isListedRoot(at) || (at !== started && !isKnownProject(at))) {
       throw new ValidationError("hush does not know that project — add it from the sidebar first");
     }
     return at;
@@ -198,6 +198,8 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
       const lib = librarySets().find((s) => s.name === set);
       if (!lib || !lib.keys.includes(key)) return json(res, 400, { error: `${key} is not in your global set ${set}` });
       const hushDir = join(root, ".hush");
+      // A codebase not set up yet becomes a hush project here: its first key.
+      if (!existsSync(hushDir)) writeProjectDotfiles(hushDir);
       const link = keyLinkName(set, key);
       const links = loadLinks(hushDir);
       const covered = links.includes(link) || links.includes(set === "default" ? "library:default" : set);
@@ -216,6 +218,17 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
       saveLinks(hushDir, links.filter((l) => l !== link));
       audit(hushDir, { actor: "ui", action: "key.unassign", link });
       return json(res, 200, { ...hubState(startedRoot), ...(root === ctx.root ? { state: state(ctx) } : {}) });
+    }
+
+    /**
+     * Where hush looks for codebases, and a fresh look. `roots` replaces the
+     * folders to look in; the crawl then runs in the background and /api/hub
+     * reports its progress.
+     */
+    case "/api/crawl": {
+      if (Array.isArray(body.roots)) setCrawlRoots(body.roots.map(String));
+      startCrawl();
+      return json(res, 200, hubState(startedRoot));
     }
 
     /** The project list: add a folder by hand, or take one off the list. */

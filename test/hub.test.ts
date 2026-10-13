@@ -52,7 +52,7 @@ describe("the project list", () => {
       assert.ok(isKnownProject(a), "a hidden project is still one the app may act on once re-added");
       rememberProject(a);
       assert.ok(listProjects().some((p) => p.root === a), "using a hidden project again brings it back");
-      assert.throws(() => addProject(join(code, "plain-folder")), /not a hush project/);
+      assert.throws(() => addProject(join(code, "plain-folder")), /not a codebase hush recognises/);
     });
     rmSync(home, { recursive: true, force: true });
     rmSync(code, { recursive: true, force: true });
@@ -169,4 +169,50 @@ test("hush use --confirm offers a single key a cloned project's list names, and 
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+describe("codebases, found and described", () => {
+  test("describeCodebase reads the stack, branch, the credentials the code reads, and a plaintext .env — never a value", async () => {
+    const { describeCodebase, isCodebase } = await import("../src/codebase.ts");
+    const root = scratch("hush-cb-");
+    try {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { next: "15", react: "19" }, devDependencies: { typescript: "5" } }));
+      mkdirSync(join(root, ".git"));
+      writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/feature/hub\n");
+      mkdirSync(join(root, "app"));
+      writeFileSync(join(root, "app", "page.tsx"), "process.env.OPENAI_API_KEY; process.env.STRIPE_SECRET_KEY; process.env.NODE_ENV; process.env.PORT;\n");
+      writeFileSync(join(root, ".env"), "OPENAI_API_KEY=sk-a-real-looking-value-0123456789\n");
+      assert.ok(isCodebase(root));
+      const d = describeCodebase(root);
+      assert.deepEqual(d.stack, ["Next.js", "TypeScript"]);
+      assert.equal(d.branch, "feature/hub");
+      assert.ok(d.active, "no last-activity time from git's files");
+      assert.deepEqual(d.credentials, ["OPENAI_API_KEY", "STRIPE_SECRET_KEY"]);
+      assert.equal(d.plaintextEnv, true);
+      assert.ok(!JSON.stringify(d).includes("sk-a-real-looking"), "a value was read into the details");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the crawl finds plain codebases as well as hush projects, and only in the folders chosen", async () => {
+    const { setCrawlRoots, crawlRoots } = await import("../src/projects.ts");
+    const home = scratch("hush-hub-home-");
+    const code = scratch("hush-hub-code-");
+    withHome(home, () => {
+      const hushProject = makeProject(code, "api");
+      const plain = join(code, "clients", "landing");
+      mkdirSync(plain, { recursive: true });
+      writeFileSync(join(plain, "package.json"), "{}");
+      mkdirSync(join(code, "notes"));
+      assert.deepEqual(crawlRoots(), { roots: [], chosen: false }, "a relocated hush home guessed folders of the real one");
+      assert.deepEqual(findProjects([code], { depth: 4, folders: 1000, ms: 1000, codebases: true }).sort(), [hushProject, plain].sort());
+      assert.deepEqual(findProjects([code]), [hushProject], "without codebases, only hush projects");
+      assert.deepEqual(setCrawlRoots([code]), [code]);
+      assert.deepEqual(crawlRoots(), { roots: [code], chosen: true });
+      assert.throws(() => setCrawlRoots([join(code, "missing")]), /not a folder/);
+    });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(code, { recursive: true, force: true });
+  });
 });

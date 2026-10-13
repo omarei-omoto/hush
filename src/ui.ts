@@ -14,7 +14,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { realpathSync } from "node:fs";
-import { isKnownProject, isProjectRoot, rememberProject } from "./projects.ts";
+import { isKnownProject, isListedRoot, rememberProject } from "./projects.ts";
 import { PAGE } from "./ui-page.ts";
 import { locateProject, isValidationError } from "./vault.ts";
 import { requireIdentity } from "./identity.ts";
@@ -51,7 +51,7 @@ function projectCtx(root: string, started: UiCtx): UiCtx | null {
   };
   const at = real(root);
   if (at === real(started.root)) return started;
-  if (!isKnownProject(at) || !isProjectRoot(at)) return null;
+  if (!isKnownProject(at) || !isListedRoot(at)) return null;
   const hushDir = join(at, ".hush");
   return { vaultPath: join(hushDir, "vault.json"), hushDir, root: at, defaultEnv: "default" };
 }

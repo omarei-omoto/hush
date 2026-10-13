@@ -14,6 +14,13 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   the project records just that key (`openai#OPENAI_API_KEY` in its list of
   sets), and you confirm it by dropping it. A key's menu has **Use in a
   project…** for the same without a mouse.
+- **hush finds your codebases.** Choose the folders you keep code in (your
+  usual code folders until you do), and Home lists every codebase in them —
+  set up for hush or not — with its stack, branch, when it was last worked on,
+  the credentials its code reads (names only) and how many your global keys
+  already have, and a warning for a plaintext `.env`. The crawl runs in the
+  background; **Look again** repeats it. Dropping a global key on a codebase
+  that is not set up sets it up with that key.
 - **Library is now Global keys**, with **Save a global key** on Home and there.
 - **Fewer false "missing" warnings.** Only variables that look like credentials,
   or that you already keep, are flagged; `NODE_ENV`, `PORT` and the like are

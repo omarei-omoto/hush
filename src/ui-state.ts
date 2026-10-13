@@ -3,10 +3,10 @@
  * agent, the ladder. `/api/state` returns this, and so does every write.
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isProjectRoot, listProjects, searchOnce } from "./projects.ts";
+import { type CrawlStatus, crawlOnce, crawlRoots, crawlStatus, isProjectRoot, listProjects } from "./projects.ts";
 import { join, basename, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
-import { scanTree } from "./scan.ts";
+import { scanTree, looksLikeSecret } from "./scan.ts";
 import { setupState } from "./setup.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { approvalPromptAvailable } from "./approval.ts";
@@ -434,26 +434,37 @@ export function state(ctx: UiCtx) {
 export interface HubProject {
   root: string;
   name: string;
-  /** "vault": it has its own encrypted vault; "links-only": it only uses your global keys. */
-  state: "vault" | "links-only";
+  /** "vault": its own encrypted vault; "links-only": only your global keys; "codebase": found, not set up for hush yet. */
+  state: "vault" | "links-only" | "codebase";
   /** Distinct key names a run here gets: its own vault's, plus every global key it uses. */
   keys: number;
   /** Of those, how many come from your global keys. */
   fromGlobal: number;
   /** The folder this app was started in. */
   started: boolean;
+  /** What the crawl found (codebase.ts): stack, branch, last activity, the credentials its code reads. */
+  stack: string[];
+  branch?: string;
+  active?: string;
+  credentials: string[];
+  /** Credentials its code reads that a run here does not get. */
+  lacking: string[];
+  /** Of those, the ones your global keys have — a drag away. */
+  inGlobal: string[];
+  plaintextEnv: boolean;
 }
 
 /**
- * Every project hush knows, for the sidebar and the home screen. Names and
+ * Every project and codebase hush knows, for the sidebar and Home. Names and
  * counts only: nothing is decrypted, and a project's vault is opened just far
- * enough to list its key names.
+ * enough to list its key names. The first call starts the background crawl.
  */
-export function hubState(startedRoot: string): { projects: HubProject[]; searchedNow: number } {
-  const searchedNow = searchOnce();
+export function hubState(startedRoot: string): { projects: HubProject[]; crawl: CrawlStatus; roots: string[]; rootsChosen: boolean } {
+  crawlOnce();
   const library = librarySets();
+  const globalKeys = new Set(library.flatMap((s) => s.keys));
   const keysOfLibrarySet = (name: string): string[] => library.find((s) => s.name === name)?.keys ?? [];
-  const roots = listProjects().map((p) => p.root);
+  const listed = listProjects();
   const realStart = (() => {
     try {
       return realpathSync(startedRoot);
@@ -461,12 +472,15 @@ export function hubState(startedRoot: string): { projects: HubProject[]; searche
       return startedRoot;
     }
   })();
-  if (isProjectRoot(realStart) && !roots.includes(realStart)) roots.unshift(realStart);
-  const projects = roots.map((root): HubProject => {
+  if (isProjectRoot(realStart) && !listed.some((p) => p.root === realStart)) {
+    listed.unshift({ root: realStart, seen: new Date().toISOString(), hush: true });
+  }
+  const projects = listed.map((p): HubProject => {
+    const root = p.root;
     const hushDir = join(root, ".hush");
     const vaultPath = join(hushDir, "vault.json");
     const own = new Set<string>();
-    let state: HubProject["state"] = "links-only";
+    let state: HubProject["state"] = p.hush ? "links-only" : "codebase";
     if (existsSync(vaultPath)) {
       state = "vault";
       try {
@@ -476,30 +490,38 @@ export function hubState(startedRoot: string): { projects: HubProject[]; searche
       }
     }
     const global = new Set<string>();
-    for (const link of usedSets(hushDir)) {
-      if (link === "default") continue;
-      const pick = parseKeyLink(link);
-      if (pick) global.add(pick.key);
-      else for (const k of keysOfLibrarySet(link === LIBRARY_DEFAULT ? "default" : link)) global.add(k);
+    if (p.hush) {
+      for (const link of usedSets(hushDir)) {
+        if (link === "default") continue;
+        const pick = parseKeyLink(link);
+        if (pick) global.add(pick.key);
+        else for (const k of keysOfLibrarySet(link === LIBRARY_DEFAULT ? "default" : link)) global.add(k);
+      }
     }
     const all = new Set([...own, ...global]);
-    return { root, name: basename(root), state, keys: all.size, fromGlobal: global.size, started: root === realStart };
+    const d = p.details;
+    // What counts: names that look like credentials, and any name you already
+    // keep (in this project or as a global key), the same rule as the project page.
+    const credentials = (d?.reads ?? d?.credentials ?? []).filter((n) => looksLikeSecret(n) || globalKeys.has(n) || all.has(n));
+    const lacking = credentials.filter((c) => !all.has(c));
+    return {
+      root,
+      name: basename(root),
+      state,
+      keys: all.size,
+      fromGlobal: global.size,
+      started: root === realStart,
+      stack: d?.stack ?? [],
+      ...(d?.branch ? { branch: d.branch } : {}),
+      ...(d?.active ? { active: d.active } : {}),
+      credentials,
+      lacking,
+      inGlobal: lacking.filter((c) => globalKeys.has(c)),
+      plaintextEnv: d?.plaintextEnv ?? false,
+    };
   });
-  return { projects, searchedNow };
+  const { roots, chosen } = crawlRoots();
+  return { projects, crawl: crawlStatus(), roots, rootsChosen: chosen };
 }
 
-/** Read by nearly every program, and never kept in a secrets manager. */
-const ORDINARY_VARS = new Set([
-  "NODE_ENV", "PORT", "HOST", "HOSTNAME", "CI", "HOME", "PATH", "PWD", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "TZ",
-  "DEBUG", "VERBOSE", "LOG_LEVEL", "ENV", "ENVIRONMENT", "APP_ENV", "TMPDIR", "EDITOR", "BASE_URL", "PUBLIC_URL",
-  "SITE_URL", "APP_URL", "VERCEL", "VERCEL_ENV", "VERCEL_URL", "NEXT_RUNTIME", "GITHUB_ACTIONS", "RUNNER_OS",
-  "PYTHONPATH", "JAVA_HOME", "NODE_OPTIONS",
-]);
-const SECRET_WORDS = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|DSN|PRIVATE|CERT|SALT|SIGNING|WEBHOOK)/;
-const CONNECTION_STRING = /^((DATABASE|DB|REDIS|MONGO|MONGODB|POSTGRES|POSTGRESQL|PG|MYSQL|AMQP|RABBITMQ|KAFKA|SUPABASE|NEON|TURSO|ELASTIC|CLICKHOUSE)(_[A-Z0-9]+)?_(URL|URI))$|_DATABASE_URL$/;
-
-/** Does a variable's name say it holds a credential? Names only: nothing here looks at a value. */
-export function looksLikeSecret(name: string): boolean {
-  if (ORDINARY_VARS.has(name) || name.startsWith("npm_")) return false;
-  return SECRET_WORDS.test(name) || CONNECTION_STRING.test(name);
-}
+export { looksLikeSecret } from "./scan.ts";

@@ -77,6 +77,17 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .pcard .pdir{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pcard .pmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
+.navmore{display:block;padding:4px 10px 4px 36px;font-size:12.5px;color:var(--muted);text-decoration:none}
+.navmore:hover{color:var(--ink)}
+.progress{height:4px;border-radius:2px;background:var(--line);margin-top:12px;overflow:hidden}
+.progress i{display:block;height:100%;background:var(--ink);transition:width .4s}
+.pcard .techs{display:flex;flex-wrap:wrap;gap:4px}
+.pcard .ptop b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcard .ptop .badge{flex:0 0 auto}
+.tech{font-size:11.5px;padding:1px 7px;border-radius:999px;background:var(--sunken);color:var(--ink)}
+.pcard .ago{margin-left:auto;font-size:12px}
+.pcard.fresh{border-style:dashed}
+.chip .iconbtn{margin-left:2px}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:13px}
 .chip small{color:var(--muted)}
 .li.pick{width:100%;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer}

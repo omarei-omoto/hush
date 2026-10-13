@@ -39,6 +39,14 @@ const T=(function(){
   return t;
 })();
 let S=null;
+/* Every project hush knows, with key counts (GET /api/hub). */
+let HUB=null;
+/* The project this window is showing — any project on the list. Kept per browser. */
+let CUR=(function(){try{return localStorage.getItem("hush-project")||null}catch(e){return null}})();
+function setProject(root){
+  CUR=root||null;
+  try{if(CUR)localStorage.setItem("hush-project",CUR);else localStorage.removeItem("hush-project")}catch(e){}
+}
 
 /* ------------------------------------------------------------ foundations */
 
@@ -67,6 +75,9 @@ function clear(el){while(el.firstChild)el.removeChild(el.firstChild)}
 
 const ICONS={
   folder:"M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  home:"M3 11l9-8 9 8M5 9.5V20h5v-6h4v6h5V9.5",
+  key:"M15 7a4 4 0 1 1-3.9 4.9L4 19v2h3v-2h2v-2h2l1.1-1.1A4 4 0 0 1 15 7zM16.5 9.5h.01",
+  grip:"M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01",
   library:"M4 5h4v14H4zM10 5h4v14h-4zM16 6l3.5-1 3 13.5-3.5 1z",
   team:"M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7.5M22 21v-1a6 6 0 0 0-4-5.6",
   agent:"M12 3v3M8 21h8M5 8h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2zM9 13h.01M15 13h.01",
@@ -105,15 +116,26 @@ function toast(msg,opts){
 }
 
 async function api(path,body){
-  const r=await fetch(path,{method:body?"POST":"GET",headers:{"x-hush-token":T,"content-type":"application/json"},
-    body:body?JSON.stringify(body):undefined});
+  const headers={"x-hush-token":T,"content-type":"application/json"};
+  // Which project the request is about; without one, the folder hush ui started in.
+  if(CUR)headers["x-hush-project"]=CUR;
+  const r=await fetch(path,{method:body?"POST":"GET",headers:headers,body:body?JSON.stringify(body):undefined});
   let j={};
   try{j=await r.json()}catch(e){j={error:"the hush server did not answer — is it still running?"}}
   if(!r.ok){toast(j.error||"that did not work",{error:true});throw new Error(j.error||"failed")}
   return j;
 }
 async function refresh(next){
-  S=next&&next.folder?next:await api("/api/state");
+  if(next&&next.folder){S=next}
+  else{
+    try{S=await api("/api/state")}
+    catch(e){
+      // A project taken off the list (or moved) since this browser last showed it.
+      if(!CUR||!/does not know that project/.test(e.message))throw e;
+      setProject(null);S=await api("/api/state");
+    }
+  }
+  if(!HUB)HUB=await api("/api/hub");
   // The library's default set is its catch-all; "default" beside this
   // project's own default would read as the same thing.
   S.library.forEach(function(x){if(x.name==="default"&&x.label==="default")x.label="Catch-all"});
@@ -123,6 +145,65 @@ async function refresh(next){
 function plural(n,one,many){return n+" "+(n===1?one:(many||one+"s"))}
 function initials(name){return String(name||"?").split(/[\s._-]+/).filter(Boolean).slice(0,2).map(function(w){return w.charAt(0).toUpperCase()}).join("")||"?"}
 function folderName(){return S.folder.root.replace(/[\\/]+$/,"").split(/[\\/]/).pop()||S.folder.root}
+/** The project on screen: the one picked in the sidebar, else the folder hush ui started in. */
+function currentRoot(){
+  if(CUR)return CUR;
+  const st=HUB&&HUB.projects.find(function(p){return p.started});
+  return st?st.root:S.folder.root;
+}
+async function reloadHub(){HUB=await api("/api/hub")}
+function openProject(root){setProject(root);location.hash="#project";refresh()}
+
+/* ------------------------------------------------- dragging global keys -- */
+
+const KEY_MIME="application/x-hush-key";
+/** A global key you can drag onto a project in the sidebar or on the home screen. */
+function draggableKey(el,set,key){
+  el.draggable=true;
+  el.classList.add("drag");
+  el.addEventListener("dragstart",function(ev){
+    ev.dataTransfer.setData(KEY_MIME,JSON.stringify({set:set,key:key}));
+    ev.dataTransfer.setData("text/plain",key);
+    ev.dataTransfer.effectAllowed="link";
+    document.body.classList.add("dragging-key");
+  });
+  el.addEventListener("dragend",function(){document.body.classList.remove("dragging-key")});
+}
+function dropTarget(el,project){
+  el.addEventListener("dragover",function(ev){
+    if([].indexOf.call(ev.dataTransfer.types||[],KEY_MIME)<0)return;
+    ev.preventDefault();ev.dataTransfer.dropEffect="link";el.classList.add("drop-on");
+  });
+  el.addEventListener("dragleave",function(){el.classList.remove("drop-on")});
+  el.addEventListener("drop",function(ev){
+    el.classList.remove("drop-on");
+    const raw=ev.dataTransfer.getData(KEY_MIME);
+    if(!raw)return;
+    ev.preventDefault();ev.stopPropagation();
+    const k=JSON.parse(raw);
+    giveKey(project,k.set,k.key);
+  });
+}
+/** Make a global key part of a project: a key link, yours, nothing written into its repo's vault. */
+async function giveKey(project,set,key){
+  const r=await api("/api/assign",{project:project.root,set:set,key:key});
+  HUB={projects:r.projects};
+  toast(r.assigned==="already"?project.name+" already gets "+key:key+" is now part of "+project.name);
+  if(project.root===currentRoot())await refresh();else render();
+}
+/** The same, without a mouse: pick the project from a list. */
+function giveKeyDialog(set,key){
+  let dlg=null;
+  const list=h("div",{class:"card list"});
+  (HUB?HUB.projects:[]).forEach(function(p){
+    list.append(h("button",{type:"button",class:"li pick",onclick:function(){dlg.close();giveKey(p,set,key)}},
+      icon("folder"),h("div",{class:"body"},h("div",{class:"t",text:p.name}),h("div",{class:"d mono",text:tildePath(p.root)})),
+      h("span",{class:"badge",text:plural(p.keys,"key")})));
+  });
+  dlg=dialog({title:"Use "+key+" in a project",noSubmit:true,cancel:"Close",lead:"It stays one of your global keys; the project gets it when it runs. Nothing goes into the project's repository.",
+    body:[HUB&&HUB.projects.length?list:h("p",{class:"muted",text:"hush doesn't know any projects yet. Run hush in one, or add a folder from the sidebar."})]});
+}
+function tildePath(p){const m=/^(\/Users\/[^/]+|\/home\/[^/]+)(\/.*)?$/.exec(p);return m?"~"+(m[2]||""):p}
 const VAULT_MADE="made this project's vault — commit .hush/vault.json so the team gets it";
 
 /* ------------------------------------------------------------ the model -- */
@@ -130,6 +211,18 @@ const VAULT_MADE="made this project's vault — commit .hush/vault.json so the t
 /** Every set a run gets, in the order they apply, with the card data for each. */
 function usedSets(){
   return S.used.map(function(name,i){
+    // One key from a global set (dragged onto this project): a one-key entry.
+    const at=name.indexOf("#");
+    if(at>0){
+      const sn=name.slice(0,at)==="library:default"?"default":name.slice(0,at);
+      const key=name.slice(at+1);
+      const lib=S.library.find(function(x){return x.name===sn});
+      if(lib&&lib.keys.indexOf(key)>-1){
+        return {set:{name:name,label:key,keys:[key],secrets:(lib.secrets||[]).filter(function(x){return x.key===key}),description:"",whenToUse:""},
+          where:"library",link:name,index:i,keyLink:true,fromSet:lib};
+      }
+      return {missing:key+" (from "+sn+")",link:name,index:i};
+    }
     if(name==="library:default"){
       const lib=S.library.find(function(x){return x.name==="default"});
       return lib?{set:lib,where:"library",link:name,index:i}:null;

@@ -252,16 +252,22 @@ function keyRow(where,set,s,win,link){
   const sub=[];
   if(s.note)sub.push(h("span",{class:"tag",text:s.note}));
   if(over)sub.push(h("span",{text:"overridden by "+win[s.key].label}));
-  return h("div",{class:"krow"+(over?" over":"")},
-    h("div",{class:"kname"},h("span",{class:"k",text:s.key,title:s.key}),sub.length?h("div",{class:"sub"},sub):null),
+  // A global key (one of the library's, shown in its own set) can be dragged
+  // onto any project; a key link entry on a project page cannot.
+  const global=where==="library"&&set.name.indexOf("#")<0;
+  const row=h("div",{class:"krow"+(over?" over":"")},
+    h("div",{class:"kname"},h("div",{class:"kline"},global?h("span",{class:"grip","aria-hidden":"true"},icon("grip")):null,h("span",{class:"k",text:s.key,title:global?"Drag onto a project to use it there":s.key})),sub.length?h("div",{class:"sub"},sub):null),
     bar,
     h("div",{class:"kact"},rv,moreButton("More for "+s.key,[
+      global?{label:"Use in a project…",run:function(){giveKeyDialog(set.name,s.key)}}:null,
       {label:"Replace value…",run:function(){replaceDialog(where,set.name,s.key)}},
       where==="project"?{label:s.note?"Edit tag…":"Add a tag…",run:function(){tagDialog(set.name,s.key,s.note)}}:null,
       (where==="library"?S.library:S.project).length>1?{label:"Move to another set…",run:function(){moveDialog(where,set,s.key)}}:null,
       "-",
       {label:"Delete "+s.key,danger:true,run:function(){confirmDialog("Delete "+s.key+"?","It is removed from "+set.label+". This cannot be undone.","Delete",function(){return setSecret(set.name,s.key,null,where)})}},
     ])));
+  if(global)draggableKey(row,set.name,s.key);
+  return row;
 }
 
 const OPEN_ADD={};

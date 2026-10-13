@@ -2,6 +2,7 @@
  * Which project and vault a command acts on, the policy that governs it, and the
  * one-time setup dialogue for a folder hush has not been told about yet.
  */
+import { rememberProject } from "../projects.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { Vault, locateProject, slugifyEnv, assertScopeName, assertProjectHushDir } from "../vault.ts";
@@ -67,6 +68,8 @@ function checkRollback(vault: Vault): void {
 
 export function ctx(a: Args): Ctx {
   const loc = locateProject(process.cwd());
+  // Every command run in a project puts it on the app's project list (projects.ts).
+  if (loc) rememberProject(dirname(loc.hushDir));
   if (!loc) {
     die("No hush vault found from this directory.", "Run `hush init` here, or `hush link <vault>`.");
   }
@@ -104,6 +107,7 @@ export function ctx(a: Args): Ctx {
  */
 export function ctxLoose(a: Args): LooseCtx {
   const loc = locateProject(process.cwd());
+  if (loc) rememberProject(dirname(loc.hushDir));
   const hushDir = loc?.hushDir ?? join(process.cwd(), ".hush");
   const vaultPath = loc?.vaultPath ?? join(hushDir, "vault.json");
   const hasVault = loc?.hasVault ?? false;

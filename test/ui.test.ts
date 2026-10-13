@@ -7,7 +7,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1269,6 +1269,62 @@ test("/api/move carves one pile into named sets", async () => {
     const s = (await libApi("/api/env", { action: "delete", where: "library", name: "scratch" })).body;
     assert.ok(!s.library.some((x: any) => x.name === "scratch"), "it survived deletion");
     assert.ok(s.library.some((x: any) => x.name === "acme-prod-eu"), "it deleted the wrong one");
+  });
+
+  test("the hub: every project with its key count, a global key dropped onto a project, and taken back (hub)", async () => {
+    const root = realpathSync(libRoot);
+    // A global set of its own, so the drop is the only thing that brings a key here.
+    await libApi("/api/env", { action: "create", where: "library", label: "Hub test" });
+    for (const [key, value] of [["HUB_ONE", "hub_one_value_12345"], ["HUB_TWO", "hub_two_value_67890"]]) {
+      const w = await libApi("/api/secret", { where: "library", scope: "hub-test", key, value });
+      assert.equal(w.status, 200, JSON.stringify(w.body));
+    }
+    const hub = (await libApi("/api/hub")).body;
+    const here = hub.projects.find((p: any) => p.root === root);
+    assert.ok(here, "the folder hush ui started in is not on the list: " + JSON.stringify(hub));
+    assert.equal(here.started, true);
+    const before = here.keys;
+
+    const given = await libApi("/api/assign", { project: root, set: "hub-test", key: "HUB_ONE" });
+    assert.equal(given.status, 200, JSON.stringify(given.body));
+    assert.equal(given.body.assigned, "added");
+    assert.equal(given.body.projects.find((p: any) => p.root === root).keys, before + 1);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, ".hush", "envs.json"), "utf8")).use.filter((l: string) => l.includes("#")), ["hub-test#HUB_ONE"]);
+    const s = (await libApi("/api/state")).body;
+    assert.ok(s.used.includes("hub-test#HUB_ONE"));
+    assert.ok(!JSON.stringify(given.body).includes("hub_one_value"), "a value came back");
+
+    const again = await libApi("/api/assign", { project: root, set: "hub-test", key: "HUB_ONE" });
+    assert.equal(again.body.assigned, "already");
+
+    const taken = await libApi("/api/unassign", { project: root, link: "hub-test#HUB_ONE" });
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    assert.equal(taken.body.projects.find((p: any) => p.root === root).keys, before);
+  });
+
+  test("the hub acts only on projects it knows: an unknown folder is refused by header and by body (hub)", async () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "hush-hub-other-")));
+    mkdirSync(join(other, ".hush"), { recursive: true });
+    writeFileSync(join(other, ".hush", "envs.json"), JSON.stringify({ use: [] }));
+    try {
+      const viaHeader = await fetch(libBase + "/api/state", { headers: { "x-hush-token": libToken, "x-hush-project": other } });
+      assert.equal(viaHeader.status, 403, "a project not on the list was served");
+      const viaBody = await libApi("/api/assign", { project: other, set: "hub-test", key: "HUB_ONE" });
+      assert.equal(viaBody.status, 400);
+      assert.match(viaBody.body.error, /does not know that project/);
+
+      // Added by hand, it is one the app can show and give keys to.
+      const added = await libApi("/api/projects", { action: "add", root: other });
+      assert.ok(added.body.projects.some((p: any) => p.root === other));
+      const shown = await fetch(libBase + "/api/state", { headers: { "x-hush-token": libToken, "x-hush-project": other } });
+      assert.equal(shown.status, 200);
+      assert.equal(((await shown.json()) as any).folder.root, other);
+      const given = await libApi("/api/assign", { project: other, set: "hub-test", key: "HUB_TWO" });
+      assert.equal(given.status, 200, JSON.stringify(given.body));
+      assert.deepEqual(JSON.parse(readFileSync(join(other, ".hush", "envs.json"), "utf8")).use, ["hub-test#HUB_TWO"]);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 });
 

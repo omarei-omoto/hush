@@ -58,6 +58,29 @@ svg.i{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-
 .nav a[aria-current=page]{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:inset 0 0 0 1px var(--line)}
 .nav .count{margin-left:auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 .nav .count.warn{color:var(--warn);font-weight:600}
+.side{overflow-y:auto}
+.navhead{margin:14px 10px 4px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav a.proj .pname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.navadd{display:flex;align-items:center;gap:10px;padding:7px 10px;border:0;background:none;border-radius:8px;color:var(--muted);font:inherit;cursor:pointer;text-align:left}
+.navadd:hover{background:var(--sunken);color:var(--ink)}
+/* Dragging a global key: every project is a place it can go. */
+body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1px var(--line-2);background:var(--surface)}
+.drop-on,.nav a.proj.drop-on,.pcard.drop-on{box-shadow:inset 0 0 0 2px var(--ink)!important;background:var(--sunken)!important;color:var(--ink)}
+.drag{cursor:grab;-webkit-user-select:none;user-select:none}.drag:active{cursor:grabbing}
+.grip{display:inline-flex;color:var(--muted);flex:0 0 auto}
+.kline{display:flex;align-items:center;gap:4px;min-width:0}
+.kline .k{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.pcard{display:flex;flex-direction:column;gap:6px;text-align:left;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:inherit;font:inherit;cursor:pointer}
+.pcard:hover{border-color:var(--line-2)}
+.pcard .ptop{display:flex;align-items:center;gap:8px}
+.pcard .pdir{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcard .pmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:13px}
+.chip small{color:var(--muted)}
+.li.pick{width:100%;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.li.pick:hover{background:var(--sunken)}
 .level{margin-top:auto;display:block;padding:12px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:inherit;background:var(--surface)}
 .level:hover{border-color:var(--line-2)}
 .level .t{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)}
@@ -267,6 +290,8 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
   .nav a{flex:1;flex-direction:column;gap:2px;padding:6px 2px;font-size:11px;border-radius:8px}
   .nav a svg{width:19px;height:19px}
   .nav .count{display:none}
+  /* On a phone the bar holds the sections; projects are on Home. */
+  .nav a.proj,.navhead,.navadd{display:none}
   .main{padding:20px 16px 96px}
   .head .actions{width:100%}
   .head .actions .btn{flex:1}

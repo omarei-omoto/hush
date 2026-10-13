@@ -1,7 +1,7 @@
 /**
  * `hush use` — which sets this project uses, in order.
  */
-import { usedSets, librarySets, loadLinks, saveLinks, writeProjectDotfiles, LIBRARY_DEFAULT, confirmLinks, confirmedLinks, placeOf } from "../library.ts";
+import { parseKeyLink, usedSets, librarySets, loadLinks, saveLinks, writeProjectDotfiles, LIBRARY_DEFAULT, confirmLinks, confirmedLinks, placeOf } from "../library.ts";
 import { consent } from "../cli/consent.ts";
 import { type Args, bool, list } from "../cli/args.ts";
 import { ctxLoose, dieNotSetUp, interactiveSetup, isSetUp, runSetupDialogue } from "../cli/context.ts";
@@ -22,7 +22,13 @@ export async function cmdUse(a: Args): Promise<void> {
   if (bool(a, "confirm")) {
     const lib = new Set(librarySets().map((s) => s.name));
     const done = confirmedLinks(loose.hushDir);
-    const waiting = loadLinks(loose.hushDir).filter((l) => (l === LIBRARY_DEFAULT || lib.has(l)) && !done.has(l));
+    // Whole library sets, and single keys taken from one (set#KEY).
+    const inLibrary = (l: string) => {
+      const pick = parseKeyLink(l);
+      const set = pick ? pick.set : l;
+      return set === LIBRARY_DEFAULT || lib.has(set);
+    };
+    const waiting = loadLinks(loose.hushDir).filter((l) => inLibrary(l) && !done.has(l));
     if (!waiting.length) return info(dim("Nothing to confirm: this project uses no library set that is not confirmed here."));
     const ok = await consent(`Let this project use your library set${waiting.length > 1 ? "s" : ""} ${waiting.join(", ")}?`, {
       hushDir: loose.hushDir,

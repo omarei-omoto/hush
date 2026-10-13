@@ -4,19 +4,20 @@
  */
 import { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseEnvFile } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
-import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor } from "./library.ts";
+import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
+import { addProject, hideProject, isKnownProject, isProjectRoot } from "./projects.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
 import { setLocalApprovals } from "./policy.ts";
 import { CATALOG, serviceForVar } from "./services.ts";
 import { preview } from "./redact.ts";
 import { withoutChain } from "./audit.ts";
-import { type UiCtx, forgetOnboarding, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
+import { type UiCtx, forgetOnboarding, hubState, openProjectVault, projectVault, requireProjectVault, state } from "./ui-state.ts";
 import { setSkip, setupState } from "./setup.ts";
 import { parseJson } from "./json.ts";
 import { writeRepoFile } from "./vault-files.ts";
@@ -147,7 +148,7 @@ function dropStages(ids: unknown): number {
   return n;
 }
 
-export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, path: string) {
+export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerResponse, path: string, startedRoot: string = ctx.root) {
   // Throws a 400-shaped message naming the folder's state rather than
   // crashing on Vault.open() of a project vault that does not exist yet.
   const vault = () => requireProjectVault(ctx);
@@ -157,7 +158,74 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
     return json(res, 200, state(ctx));
   }
 
+  // Every project hush knows, with how many keys each gets (projects.ts).
+  if (path === "/api/hub" && req.method === "GET") {
+    return json(res, 200, hubState(startedRoot));
+  }
+
   const body = await readBody(req);
+
+  /** A project a request names in its body: on the list, or the folder this server started in. */
+  const knownRoot = (raw: unknown): string => {
+    if (typeof raw !== "string" || !raw) throw new ValidationError("project is required");
+    let at: string;
+    try {
+      at = realpathSync(raw);
+    } catch {
+      throw new ValidationError("no such project folder");
+    }
+    let started = startedRoot;
+    try {
+      started = realpathSync(startedRoot);
+    } catch { /* kept as given */ }
+    if (!isProjectRoot(at) || (at !== started && !isKnownProject(at))) {
+      throw new ValidationError("hush does not know that project — add it from the sidebar first");
+    }
+    return at;
+  };
+
+  switch (path) {
+    /**
+     * Give a project one of your global keys: dropping a key on a project in
+     * the sidebar. Recorded as a key link ("set#KEY") in its list of sets, so
+     * the key stays yours — nothing goes into the repository's vault — and
+     * linking it here counts as confirming it for that project on this machine.
+     */
+    case "/api/assign": {
+      const root = knownRoot(body.project);
+      const set = String(body.set ?? "");
+      const key = String(body.key ?? "");
+      const lib = librarySets().find((s) => s.name === set);
+      if (!lib || !lib.keys.includes(key)) return json(res, 400, { error: `${key} is not in your global set ${set}` });
+      const hushDir = join(root, ".hush");
+      const link = keyLinkName(set, key);
+      const links = loadLinks(hushDir);
+      const covered = links.includes(link) || links.includes(set === "default" ? "library:default" : set);
+      if (!covered) saveLinks(hushDir, [...links, link]);
+      audit(hushDir, { actor: "ui", action: "key.assign", set, key });
+      return json(res, 200, { ...hubState(startedRoot), assigned: covered ? "already" : "added" });
+    }
+
+    /** Take a global key (or a whole global set) back off a project. */
+    case "/api/unassign": {
+      const root = knownRoot(body.project);
+      const link = String(body.link ?? "");
+      const hushDir = join(root, ".hush");
+      const links = loadLinks(hushDir);
+      if (!links.includes(link)) return json(res, 400, { error: `${root} does not use ${link}` });
+      saveLinks(hushDir, links.filter((l) => l !== link));
+      audit(hushDir, { actor: "ui", action: "key.unassign", link });
+      return json(res, 200, { ...hubState(startedRoot), ...(root === ctx.root ? { state: state(ctx) } : {}) });
+    }
+
+    /** The project list: add a folder by hand, or take one off the list. */
+    case "/api/projects": {
+      if (body.action === "add") addProject(String(body.root ?? ""));
+      else if (body.action === "hide") hideProject(String(body.root ?? ""));
+      else return json(res, 400, { error: 'action must be "add" or "hide"' });
+      return json(res, 200, hubState(startedRoot));
+    }
+  }
 
   switch (path) {
     case "/api/secret": {

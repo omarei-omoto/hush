@@ -12,7 +12,9 @@
 import { system32 } from "./platform.ts";
 import { createServer, type IncomingMessage } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { realpathSync } from "node:fs";
+import { isKnownProject, isProjectRoot, rememberProject } from "./projects.ts";
 import { PAGE } from "./ui-page.ts";
 import { locateProject, isValidationError } from "./vault.ts";
 import { requireIdentity } from "./identity.ts";
@@ -38,6 +40,22 @@ function hostIsLocal(req: IncomingMessage): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
+/** The context for a project the app was asked about, or null when it is not one hush knows. */
+function projectCtx(root: string, started: UiCtx): UiCtx | null {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolvePath(p);
+    }
+  };
+  const at = real(root);
+  if (at === real(started.root)) return started;
+  if (!isKnownProject(at) || !isProjectRoot(at)) return null;
+  const hushDir = join(at, ".hush");
+  return { vaultPath: join(hushDir, "vault.json"), hushDir, root: at, defaultEnv: "default" };
+}
+
 export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
   const proj = locateProject(process.cwd());
 
@@ -51,6 +69,7 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
   let ctx: UiCtx;
   if (proj) {
     ctx = { vaultPath: proj.vaultPath, hushDir: proj.hushDir, root: dirname(proj.hushDir), defaultEnv: proj.env || "default" };
+    rememberProject(ctx.root);
   } else {
     const root = process.cwd();
     const hushDir = join(root, ".hush");
@@ -105,7 +124,13 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
       if (url.pathname.startsWith("/api/")) {
         if (!tokenOk(req.headers["x-hush-token"])) return json(res, 403, { error: "bad token" });
         try {
-          return await handleApi(ctx, req, res, url.pathname);
+          // The app shows every project hush knows (projects.ts); a request
+          // names the one it is about. Only a project on that list, or the
+          // folder this server started in, can be named.
+          const named = req.headers["x-hush-project"];
+          const here = typeof named === "string" && named ? projectCtx(named, ctx) : ctx;
+          if (!here) return json(res, 403, { error: "hush does not know that project — add it from the sidebar first" });
+          return await handleApi(here, req, res, url.pathname, ctx.root);
         } catch (err) {
           // Rejected input is the caller's problem (400); anything else is ours.
           const message = err instanceof Error ? err.message : String(err);

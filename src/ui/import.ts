@@ -226,11 +226,18 @@ document.getElementById("picker").addEventListener("change",function(ev){
 
 /* ---------------------------------------------------------------- shell -- */
 
-const SECTIONS=[["project","Project","folder"],["library","Library","library"],["team","Team","team"],["agent","Agent","agent"],["activity","Activity","activity"]];
+const SECTIONS=[["home","Home","home"],["library","Global keys","key"],["project","Project","folder"],["team","Team","team"],["agent","Agent","agent"],["activity","Activity","activity"]];
 function route(){
   const r=(location.hash||"").replace("#","");
   if(r==="folder")return "project";
-  return SECTIONS.some(function(s){return s[0]===r})?r:"project";
+  if(SECTIONS.some(function(s){return s[0]===r}))return r;
+  // Started inside a project: that project. Anywhere else: the list of them.
+  return (CUR||(S&&S.folder.state!=="unset"))?"project":"home";
+}
+
+function navLink(id,label,ic,extra){
+  const cur=route();
+  return h("a",{href:"#"+id,"aria-current":cur===id?"page":null},icon(ic),h("span",{text:label}),extra||null);
 }
 
 function renderShell(){
@@ -238,24 +245,98 @@ function renderShell(){
   const st=S.folder.state;
   here.append(h("div",{class:"name",text:folderName(),title:S.folder.root}),
     h("div",{class:"state"},h("span",{class:"dot "+(st==="vault"?"ok":st==="unset"?"warn":"")}),
-      st==="vault"?"Encrypted in this repo":st==="links-only"?"Uses your library only":"Not set up"));
+      st==="vault"?"Encrypted in this repo":st==="links-only"?"Uses your global keys only":"Not set up"));
 
-  const win=S.folder.state==="unset"?{}:winners();
-  const missing=(S.needs||[]).filter(function(n){return !win[n.name]}).length;
-  const counts={project:S.folder.state==="unset"?0:missing,library:S.library.length,team:S.members.length};
   const nav=document.getElementById("nav");clear(nav);
   const cur=route();
-  SECTIONS.forEach(function(s){
-    const c=counts[s[0]];
-    nav.append(h("a",{href:"#"+s[0],"aria-current":cur===s[0]?"page":null},icon(s[2]),h("span",{text:s[1]}),
-      c?h("span",{class:"count"+(s[0]==="project"?" warn":""),title:s[0]==="project"?c+" variables the code reads are missing":null,text:s[0]==="project"?c+" missing":String(c)}):null));
+  const keyCount=S.library.reduce(function(n,x){return n+x.keys.length},0);
+  nav.append(navLink("home","Home","home"),
+    navLink("library","Global keys","key",keyCount?h("span",{class:"count",text:String(keyCount)}):null));
+
+  // Every project hush knows. Click to open; drop a global key on one to give it that key.
+  nav.append(h("div",{class:"navhead",text:"Projects"}));
+  const here2=currentRoot();
+  (HUB?HUB.projects:[]).forEach(function(p){
+    const a=h("a",{href:"#project","aria-current":cur==="project"&&p.root===here2?"page":null,title:p.root,class:"proj",
+      onclick:function(ev){ev.preventDefault();openProject(p.root)}},
+      icon("folder"),h("span",{class:"pname",text:p.name}),h("span",{class:"count",text:String(p.keys)}));
+    dropTarget(a,p);
+    nav.append(a);
   });
+  nav.append(h("button",{type:"button",class:"navadd",onclick:addFolderDialog},icon("plus"),"Add a folder"));
+
+  // What the rest applies to: the project on screen.
+  nav.append(h("div",{class:"navhead",text:folderName()}));
+  const win=S.folder.state==="unset"?{}:winners();
+  const missing=(S.needs||[]).filter(function(n){return !win[n.name]}).length;
+  nav.append(navLink("project","Keys here","folder",missing&&S.folder.state!=="unset"?h("span",{class:"count warn",title:missing+" credentials the code reads are missing",text:missing+" missing"}):null),
+    navLink("team","Team","team",S.members.length?h("span",{class:"count",text:String(S.members.length)}):null),
+    navLink("agent","Agent","agent"),
+    navLink("activity","Activity","activity"));
 
   const lv=document.getElementById("level");clear(lv);
   const meter=h("div",{class:"meter"});
   for(let i=1;i<=5;i++)meter.append(h("i",{class:i<=S.posture.rung?"on":""}));
   lv.append(h("div",{class:"t"},h("span",null,"Protection"),h("b",{text:S.posture.rung+" of 5"})),meter);
   lv.setAttribute("aria-label","Protection level "+S.posture.rung+" of 5 — see the Agent section");
+}
+
+/* --------------------------------------------------------------- home */
+
+function addFolderDialog(){
+  const path=h("input",{class:"input mono",placeholder:"/Users/you/code/my-app",autocomplete:"off",spellcheck:"false"});
+  dialog({title:"Add a project",lead:"A folder hush already works in (it has a .hush folder). To start hush in a new one, run hush in it once.",
+    submit:"Add",body:[field("Folder",path)],
+    onSubmit:async function(){
+      if(!path.value.trim()){path.focus();return false}
+      HUB=await api("/api/projects",{action:"add",root:path.value.trim()});
+      render();toast("added");
+    }});
+}
+
+function renderHome(page){
+  page.append(h("header",{class:"head"},
+    h("div",null,h("h1",null,"Your projects"),
+      h("p",{text:"Every project hush knows on this machine. Drag a global key onto a project — here or in the sidebar — to make it part of that project. It stays yours: nothing goes into the project's repository."})),
+    h("div",{class:"actions"},
+      h("button",{type:"button",class:"btn",onclick:addFolderDialog},icon("plus"),"Add a folder"),
+      h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog({target:"library|default"})}},icon("key"),"Save a global key"))));
+
+  const projects=HUB?HUB.projects:[];
+  if(!projects.length){
+    page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,"No projects yet"),
+      h("p",{text:"Run hush in a project once (hush setup, hush run, anything) and it shows up here. Or add a folder that already has a .hush folder."}),
+      h("div",{class:"actions"},h("button",{type:"button",class:"btn primary",onclick:addFolderDialog},icon("plus"),"Add a folder")))));
+  }else{
+    const grid=h("div",{class:"pgrid"});
+    projects.forEach(function(p){
+      const card=h("button",{type:"button",class:"pcard",onclick:function(){openProject(p.root)}},
+        h("div",{class:"ptop"},icon("folder"),h("b",{text:p.name})),
+        h("div",{class:"mono pdir",text:tildePath(p.root)}),
+        h("div",{class:"pmeta"},
+          h("span",{class:"badge"+(p.keys?" ok":""),text:plural(p.keys,"key")}),
+          p.fromGlobal?h("span",{class:"muted",text:p.fromGlobal+" from your global keys"}):null,
+          h("span",{class:"muted",text:p.state==="vault"?"· own vault":"· global keys only"})));
+      dropTarget(card,p);
+      grid.append(card);
+    });
+    page.append(grid);
+  }
+
+  // Your global keys, ready to drag, without leaving the page.
+  const chips=h("div",{class:"chips"});
+  S.library.forEach(function(set){
+    set.keys.forEach(function(k){
+      const c=h("span",{class:"chip",title:"From "+set.label+" — drag onto a project"},icon("grip"),h("span",{class:"mono",text:k}),
+        set.name!=="default"?h("small",{text:set.label}):null);
+      draggableKey(c,set.name,k);
+      chips.append(c);
+    });
+  });
+  page.append(h("section",{class:"section"},
+    h("div",{class:"sechead"},h("div",null,h("h2",{text:"Global keys"}),
+      h("p",{text:S.library.length?"Drag any of these onto a project.":"Keys you keep once and use in any project. Save one to start."}))),
+    S.library.length?chips:null));
 }
 
 function render(){
@@ -271,7 +352,8 @@ function render(){
     S.trust.forEach(function(l,i){lines.append(h(i===0?"b":"div",{text:l}))});
     page.append(h("div",{class:"banner warn",role:"alert",style:"margin-bottom:14px"},icon("alert"),lines));
   }
-  if(r==="project")renderProject(page);
+  if(r==="home")renderHome(page);
+  else if(r==="project")renderProject(page);
   else if(r==="library")renderLibrary(page);
   else if(r==="team")renderTeam(page);
   else if(r==="agent")renderAgent(page);

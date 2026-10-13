@@ -6,17 +6,27 @@ Don't want to type commands? Don't.
 hush ui
 ```
 
-A local app in your browser, built around what you came to do:
+A local app in your browser that covers every project hush knows on this
+machine, not just the folder you started it in.
 
-- **Project** answers "does my app have what it needs?" hush scans the code for
-  the variables it reads and marks each one provided (and by which set) or
-  missing. A missing key that one of your other sets already has comes with a
-  **Use that set** button, so you don't type it twice. Below that are the sets
-  a run gets, in the order they apply, with every key visible and any key that
-  a later set overrides struck through.
-- **Library** is your own catalog. **Team** is who can decrypt. **Agent** shows
-  what your coding agent is connected to and what it must ask you first.
-  **Activity** is the audit log in plain sentences.
+- **Home** lists your projects with how many keys each gets. hush remembers a
+  project whenever it runs in one, searches your usual code folders once the
+  first time, and takes any folder you add by hand.
+- **Global keys** are yours, kept once, never in a repository. **Drag a key onto
+  a project** — in the sidebar or on Home — and it is part of that project: it
+  gets the key whenever it runs. Nothing goes into the project's repository, and
+  rotating the key is one edit that every project picks up. Without a mouse, a
+  key's menu has **Use in a project…**. A project can take just that one key
+  from a set, or the whole set.
+- **Keys here**, for the project you are looking at: what a run gets, in the
+  order the sets apply; the global keys it uses, each with **Remove**; and what
+  its code reads. Only variables that look like credentials (`…_KEY`,
+  `…_TOKEN`, `DATABASE_URL`, …) or that you already keep are listed, so
+  `NODE_ENV` and `PORT` are never "missing". Your global sets are offered only
+  when they hold something the code is missing.
+- **Team** is who can decrypt. **Agent** shows what your coding agent is
+  connected to and what it must ask you first. **Activity** is the audit log in
+  plain sentences.
 
 It binds to `127.0.0.1` only, needs a one-time token that travels in the link's
 `#fragment` (so it never reaches a server log, and the page wipes it from the

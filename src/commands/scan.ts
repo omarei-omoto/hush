@@ -3,7 +3,7 @@
  */
 import { resolve as resolvePath } from "node:path";
 import { scanTree, reconcile } from "../scan.ts";
-import { usedSets, librarySets } from "../library.ts";
+import { parseKeyLink, usedSets, librarySets } from "../library.ts";
 import { type Args, bool } from "../cli/args.ts";
 import { ctxLoose } from "../cli/context.ts";
 import { collectExtraSets } from "../cli/sets.ts";
@@ -28,7 +28,8 @@ export async function cmdScan(a: Args): Promise<void> {
   const keysOf = new Map<string, string[]>();
   for (const s of librarySets()) keysOf.set(s.name, s.keys);
   for (const s of loose.vault?.sets() ?? []) keysOf.set(s.name, s.keys);
-  const vaultKeys = [...new Set(names.flatMap((n) => keysOf.get(n) ?? []))];
+  // A single key taken from a library set (set#KEY) provides just that key.
+  const vaultKeys = [...new Set(names.flatMap((n) => parseKeyLink(n) ? [parseKeyLink(n)!.key] : (keysOf.get(n) ?? [])))];
 
   const r = reconcile(usages, vaultKeys);
 

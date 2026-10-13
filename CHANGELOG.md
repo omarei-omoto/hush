@@ -4,6 +4,22 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 
 ## Unreleased
 
+### The app is a hub of all your projects
+
+- **Every project in one window.** `hush ui` lists every project hush knows —
+  remembered whenever hush runs in one, found once in your usual code folders,
+  or added by hand — with how many keys each gets. Click one to work on it.
+- **Drag a global key onto a project** (in the sidebar or on Home) to make it
+  part of that project. It stays yours and nothing goes into the repository;
+  the project records just that key (`openai#OPENAI_API_KEY` in its list of
+  sets), and you confirm it by dropping it. A key's menu has **Use in a
+  project…** for the same without a mouse.
+- **Library is now Global keys**, with **Save a global key** on Home and there.
+- **Fewer false "missing" warnings.** Only variables that look like credentials,
+  or that you already keep, are flagged; `NODE_ENV`, `PORT` and the like are
+  not. A project page offers only the global sets that hold something its code
+  is missing, not every set you own.
+
 ## 0.12.0 — 2026-10-04
 
 Fixes from a deep review of 0.11.1 (docs/AUDIT.md, sixteenth pass): 33 findings,

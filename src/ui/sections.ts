@@ -46,7 +46,7 @@ function needsCard(){
     h("div",null,h("h3",{text:"What your code reads"}),
       h("p",{class:"lead",text:plural(needs.length,"variable")+" found in the code — "+(missing.length
         ?missing.length+" not provided yet. A run would start without "+(missing.length===1?"it":"them")+"."
-        :"every one is provided.")+(S.needsPartial?" This folder is too big to read in full, so the list is partial: open hush ui inside the project for all of it.":"")})),
+        :"every one is provided.")+(S.needsOrdinary?" Ordinary settings like NODE_ENV and PORT ("+S.needsOrdinary+") are left out.":"")+(S.needsPartial?" This folder is too big to read in full, so the list is partial: open hush ui inside the project for all of it.":"")})),
     h("div",{class:"tally"},
       h("span",{class:"badge ok"},icon("check"),(needs.length-missing.length)+" provided"),
       missing.length?h("span",{class:"badge warn"},icon("alert"),missing.length+" missing"):null));
@@ -110,7 +110,10 @@ function renderProject(page){
   const nc=needsCard();
   if(nc)page.append(nc);
 
-  const used=usedSets();
+  const all=usedSets();
+  // Global keys dropped onto this project (key links) are listed on their own, below.
+  const picks=all.filter(function(u){return u.keyLink});
+  const used=all.filter(function(u){return !u.keyLink});
   const win=winners();
   const sec=h("section",{class:"section"},
     h("div",{class:"sechead"},
@@ -136,12 +139,31 @@ function renderProject(page){
   sec.append(stack);
   page.append(sec);
 
+  const picked=h("div",{class:"card list"});
+  picks.forEach(function(u){
+    const s=u.set.secrets[0];
+    picked.append(h("div",{class:"li"},icon("key"),
+      h("div",{class:"body"},h("div",{class:"t mono",text:u.set.label}),h("div",{class:"d",text:"From your global "+u.fromSet.label+(s?" · "+s.preview:"")})),
+      h("button",{type:"button",class:"btn sm ghost",onclick:async function(){
+        const r=await api("/api/unassign",{project:currentRoot(),link:u.link});
+        HUB={projects:r.projects};await refresh(r.state);toast(u.set.label+" is no longer part of "+folderName());
+      }},"Remove")));
+  });
+  page.append(h("section",{class:"section"},
+    h("div",{class:"sechead"},h("div",null,h("h2",{text:"Global keys used here"}),
+      h("p",{text:picks.length?"Yours, kept once in Global keys; this project gets them when it runs. Nothing is in its repository.":"None yet. Drag a key from Global keys onto this project in the sidebar, or use a key's menu: Use in a project…"}))),
+    picks.length?picked:null));
+
   const unusedProject=S.project.filter(function(s){return S.used.indexOf(s.name)<0});
   add(page,offersCard("Other sets in this project","In the vault, but not applied when you run.",unusedProject.map(function(s){return offerRow("project",s,s.name)})));
 
+  // Only the global sets that hold something this project's code is missing.
+  // Offering every set you own on every project read as "not assigned".
+  const lacking=(S.needs||[]).filter(function(n){return !win[n.name]}).map(function(n){return n.name});
   const lib=S.library.filter(function(s){return S.used.indexOf(s.name==="default"?"library:default":s.name)<0});
-  if(S.global.exists){
-    add(page,offersCard("Add from your library","Your own sets. Nothing reaches this project until you add it.",lib.map(function(s){return offerRow("library",s,s.name==="default"?"library:default":s.name)})));
+  const helpful=lib.filter(function(s){return s.keys.some(function(k){return lacking.indexOf(k)>-1})});
+  if(S.global.exists&&helpful.length){
+    add(page,offersCard("Your global keys can fill these in","Sets that hold something this project's code reads and doesn't have yet.",helpful.map(function(s){return offerRow("library",s,s.name==="default"?"library:default":s.name)})));
   }
 }
 
@@ -225,10 +247,11 @@ function setupPanel(){
 
 function renderLibrary(page){
   page.append(h("header",{class:"head"},
-    h("div",null,h("h1",null,"Library"),h("p",{text:"Yours alone, never in a repo. Any project can add these — nothing reaches one until it does."})),
+    h("div",null,h("h1",null,"Global keys"),h("p",{text:"Yours alone, kept once, never in a repository. Drag any key onto a project in the sidebar to use it there."})),
     h("div",{class:"actions"},
       h("button",{type:"button",class:"btn",onclick:function(){DROP_WHERE="library";document.getElementById("picker").click()}},icon("upload"),"Import .env"),
-      h("button",{type:"button",class:"btn primary",onclick:function(){newSetDialog("library")}},icon("plus"),"New set"))));
+      h("button",{type:"button",class:"btn",onclick:function(){newSetDialog("library")}},icon("plus"),"New set"),
+      h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog({target:"library|default"})}},icon("key"),"Save a global key"))));
   if(S.global.error){page.append(h("div",{class:"banner warn"},icon("alert"),h("span",{text:S.global.error})));return}
   if(!S.global.exists||!S.library.length){
     const others=S.global.others||[];

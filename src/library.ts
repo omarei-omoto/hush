@@ -22,7 +22,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, onlyInAllows, type EnvMeta } from "./vault.ts";
+import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, onlyInAllows, assertScopeName, assertKeyName, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
@@ -125,6 +125,22 @@ function lastMentionWins(names: string[]): string[] {
  */
 export const LIBRARY_DEFAULT = "library:default";
 
+/**
+ * One key of a library set, rather than the whole set: "openai#OPENAI_API_KEY".
+ * What dragging a single global key onto a project records. A set name cannot
+ * contain "#" (assertScopeName), so a key link can never be read as a set.
+ */
+export function parseKeyLink(link: string): { set: string; key: string } | null {
+  const at = link.indexOf("#");
+  if (at <= 0 || at === link.length - 1) return null;
+  return { set: link.slice(0, at), key: link.slice(at + 1) };
+}
+
+/** The library set a link points at: "library:default" is the library's own default. */
+const librarySetOf = (link: string): string => (link === LIBRARY_DEFAULT ? "default" : link);
+
+export const keyLinkName = (set: string, key: string): string => `${set === "default" ? LIBRARY_DEFAULT : set}#${key}`;
+
 /** The name to record in envs.json for a set living in `where`. */
 export function linkNameFor(where: "library" | "project", name: string): string {
   return where === "library" && name === "default" ? LIBRARY_DEFAULT : name;
@@ -191,8 +207,14 @@ export function saveLinks(hushDir: string, use: string[]): void {
     const project = existsSync(vaultFile) ? Vault.open(vaultFile) : null;
     const library = openGlobal();
     for (const link of added) {
-      const [vault, name] =
-        link === LIBRARY_DEFAULT ? [library, "default"] : project?.hasSet(link) ? [project, link] : [library, link];
+      const pick = parseKeyLink(link);
+      if (pick) {
+        if (pick.set !== LIBRARY_DEFAULT) assertScopeName(pick.set);
+        assertKeyName(pick.key);
+      }
+      const [vault, name] = pick
+        ? [library, librarySetOf(pick.set)]
+        : link === LIBRARY_DEFAULT ? [library, "default"] : project?.hasSet(link) ? [project, link] : [library, link];
       const onlyIn = onlyInOf(vault, name);
       if (onlyIn && !allowedAt(onlyIn, place)) throw new ValidationError(onlyInMessage(vault!.envLabel(name), onlyIn, place));
     }
@@ -370,6 +392,20 @@ export function composeSets(
   const names = lastMentionWins([...usedSets(hushDir), ...extra]);
 
   for (const name of names) {
+    // One key from a library set (a key link): only that key, under the same
+    // confirmation and folder rules as the whole set.
+    const pick = parseKeyLink(name);
+    if (pick) {
+      const setName = librarySetOf(pick.set);
+      if (!library?.hasSet(setName) || !library.sets().some((s) => s.name === setName && s.keys.includes(pick.key))) {
+        missing.push(name);
+        continue;
+      }
+      if (!confirmedHere(name) || !fitsHere(library, setName, name)) continue;
+      secrets[pick.key] = library.get(id, setName, pick.key);
+      layers.push(`${globalVaultName()}:${pick.set === LIBRARY_DEFAULT ? "default" : pick.set}#${pick.key}`);
+      continue;
+    }
     if (name === "default") {
       // Only this project's own default. The library's is opt-in, below.
       if (project?.hasSet("default") && allowed("default") && fitsHere(project, "default", "default")) {

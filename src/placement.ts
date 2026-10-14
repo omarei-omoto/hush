@@ -338,6 +338,54 @@ export function keepHere(o: KeepHere): Placed {
   return { done: `${o.key} is only ${name}'s now${others.length ? ` — taken from ${others.map((u) => u.name).join(", ")}` : ""}` };
 }
 
+// ------------------------------------------------------ one copy, not many
+
+/**
+ * The same key, with the same value, kept as several projects' own (and maybe
+ * once among your global keys too): keep one global copy, and give every one
+ * of those projects that instead. `to` is the global set that already has it,
+ * or `toLabel` names a new one. Values are compared here, never sent anywhere.
+ */
+export function shareOneCopy(o: { id: Opener; key: string; sets: string[]; to?: string; toLabel?: string }): { done: string } {
+  const lib = library();
+  assertKeyName(o.key);
+  if (o.sets.length < 1) throw new ValidationError("Name the sets that keep a copy.");
+  const own = o.sets.map((set) => {
+    const owner = lib.hasSet(set) ? ownerOf(lib, set) : null;
+    if (!owner) throw new ValidationError(`"${set}" is not one project's own set.`);
+    if (!lib.has(set, o.key)) throw new ValidationError(`"${lib.envLabel(set)}" has no ${o.key}.`);
+    return { set, owner };
+  });
+  const value = lib.get(o.id, own[0].set, o.key);
+  for (const x of own) {
+    if (lib.get(o.id, x.set, o.key) !== value) throw new ValidationError(`${o.key} is not the same in all of them any more. Look again.`);
+  }
+  let target: string;
+  if (o.to) {
+    target = globalTarget(lib, o.to);
+    if (!lib.has(target, o.key) || lib.get(o.id, target, o.key) !== value) {
+      throw new ValidationError(`Your global ${lib.envLabel(target)} does not hold the same ${o.key}.`);
+    }
+  } else {
+    target = globalTarget(lib, undefined, o.toLabel ?? o.key);
+    lib.moveSecret(o.id, o.key, own[0].set, target);
+  }
+  for (const x of own) if (lib.has(x.set, o.key)) lib.delete(x.set, o.key);
+  const emptied = own.filter((x) => Object.keys(lib.data.envs[x.set] ?? {}).length === 0).map((x) => x.set);
+  for (const set of emptied) lib.removeSet(o.id, set);
+  lib.save();
+  const names: string[] = [];
+  for (const x of own) {
+    const hushDir = hushDirOf(x.owner);
+    const links = loadLinks(hushDir).filter((l) => !(emptied.includes(x.set) && l === linkNameFor("library", x.set)));
+    const keep = getsWholeSet(lib, links, target) ? links : [...links, keyLinkName(target, o.key)];
+    writeProjectDotfiles(hushDir);
+    saveLinks(hushDir, [...new Set(keep)]);
+    names.push(basename(x.owner));
+  }
+  return { done: `${o.key} is one global key now, in ${lib.envLabel(target)}, used by ${[...new Set(names)].join(", ")}` };
+}
+
 // ---------------------------------------------------------------- groups
 
 /** File a global set under a group (a new one, or one that exists), or out of any group with null. */

@@ -14,6 +14,8 @@ export interface CodebaseDetails {
   branch?: string;
   /** When it was last worked on (ISO): the newest of git's own bookkeeping files. */
   active?: string;
+  /** Who its git remote "origin" belongs to ("github.com/omoto"), when it has one: for grouping projects. */
+  owner?: string;
   /** Credentials its code reads, by name: variables that look like keys, tokens, passwords. */
   credentials: string[];
   /** Every variable its code reads, by name (capped), so a name you keep as a global key counts too. */
@@ -91,7 +93,21 @@ function gitOf(root: string): { branch?: string; active?: string } {
       newest = Math.max(newest, statSync(join(git, f)).mtimeMs);
     } catch { /* not there */ }
   }
-  return { ...(branch ? { branch } : {}), ...(newest ? { active: new Date(newest).toISOString() } : {}) };
+  const owner = ownerOf(readText(join(git, "config"), 64 * 1024));
+  return { ...(branch ? { branch } : {}), ...(newest ? { active: new Date(newest).toISOString() } : {}), ...(owner ? { owner } : {}) };
+}
+
+/**
+ * The host and owner of the "origin" remote in a git config, from either URL
+ * shape: https://github.com/omoto/web.git or git@github.com:omoto/web.git.
+ * Never the credentials an https URL can carry.
+ */
+export function ownerOf(config: string): string | undefined {
+  const section = /\[remote "origin"\]([^[]*)/.exec(config)?.[1] ?? "";
+  const url = /^\s*url\s*=\s*(\S+)/m.exec(section)?.[1];
+  if (!url) return undefined;
+  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(?::\d+)?[:/]+([A-Za-z0-9_.-]+)\/[^/]+?(?:\.git)?\/?$/.exec(url);
+  return m ? `${m[1].toLowerCase()}/${m[2]}` : undefined;
 }
 
 /**

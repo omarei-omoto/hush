@@ -27,6 +27,8 @@ export interface KnownProject {
   /** When hush was last used there (ISO), or when it was found. */
   seen: string;
   hidden?: boolean;
+  /** The project group it is filed under in the app ("omoto", "Clients"): a folder for the list, nothing more. */
+  group?: string;
   /** What the last crawl found out about it (codebase.ts). */
   details?: CodebaseDetails;
 }
@@ -41,6 +43,8 @@ interface Registry {
   roots?: string[];
   /** Folders the person removed from the list: the crawl does not add them back. */
   ignored?: string[];
+  /** Suggestions the person waved away in the app (suggest.ts), by id: not offered again. */
+  dismissed?: string[];
 }
 
 const registryPath = (): string => join(hushHome(), "projects.json");
@@ -65,12 +69,15 @@ function load(): Registry {
       : [];
     const roots = Array.isArray(j?.roots) ? j.roots.filter((x) => typeof x === "string") : undefined;
     const ignored = Array.isArray(j?.ignored) ? j.ignored.filter((x) => typeof x === "string") : undefined;
+    const dismissed = Array.isArray(j?.dismissed) ? j.dismissed.filter((x) => typeof x === "string") : undefined;
+    for (const p of projects) if (typeof p.group !== "string" || !p.group.trim()) delete p.group;
     return {
       projects,
       ...(typeof j?.searched === "string" ? { searched: j.searched } : {}),
       ...(typeof j?.crawled === "string" ? { crawled: j.crawled } : {}),
       ...(roots ? { roots } : {}),
       ...(ignored?.length ? { ignored } : {}),
+      ...(dismissed?.length ? { dismissed } : {}),
     };
   } catch {
     return { projects: [] };
@@ -205,6 +212,70 @@ export function rescanProject(root: string): void {
   known.details = details;
   save(r);
 }
+
+// ----------------------------------------------------------- project groups
+
+const groupKey = (label: string): string => label.trim().toLowerCase().replace(/\s+/g, " ");
+
+/** The groups in use, each with how many projects (listed ones) are in it. */
+export function projectGroups(): { label: string; count: number }[] {
+  const counts = new Map<string, { label: string; count: number }>();
+  for (const p of listProjects()) {
+    if (!p.group) continue;
+    const k = groupKey(p.group);
+    const g = counts.get(k) ?? { label: p.group, count: 0 };
+    g.count++;
+    counts.set(k, g);
+  }
+  return [...counts.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * File projects under a group, or out of any (label null or empty). A label
+ * that matches a group already there, case and spacing aside, joins it.
+ */
+export function setProjectGroup(roots: string[], label: string | null): void {
+  const clean = (label ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 60);
+  const r = load();
+  const existing = clean ? r.projects.find((p) => p.group && groupKey(p.group) === groupKey(clean))?.group : undefined;
+  for (const root of roots) {
+    const at = real(root);
+    const known = r.projects.find((p) => p.root === at);
+    if (!known) throw new ValidationError(`hush does not know ${at}`);
+    if (clean) known.group = existing ?? clean;
+    else delete known.group;
+  }
+  save(r);
+}
+
+/** Rename a group: every project in it moves with it. */
+export function renameProjectGroup(label: string, next: string): void {
+  const clean = next.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 60);
+  if (!clean) throw new ValidationError("Give the group a name.");
+  const r = load();
+  const members = r.projects.filter((p) => p.group && groupKey(p.group) === groupKey(label));
+  if (!members.length) throw new ValidationError("No such group.");
+  const clash = r.projects.find((p) => p.group && groupKey(p.group) === groupKey(clean) && groupKey(p.group) !== groupKey(label));
+  for (const p of members) p.group = clash?.group ?? clean;
+  save(r);
+}
+
+/** Take every project out of a group. The projects stay on the list. */
+export function ungroupProjects(label: string): void {
+  const r = load();
+  for (const p of r.projects) if (p.group && groupKey(p.group) === groupKey(label)) delete p.group;
+  save(r);
+}
+
+/** Wave a suggestion away for good. */
+export function dismissSuggestion(id: string): void {
+  if (!id || id.length > 400) throw new ValidationError("no such suggestion");
+  const r = load();
+  r.dismissed = [...new Set([...(r.dismissed ?? []), id])].slice(-500);
+  save(r);
+}
+
+export const dismissedSuggestions = (): Set<string> => new Set(load().dismissed ?? []);
 
 /** Where people keep code, for the one-time search. Only the ones that exist are read. */
 export function searchRoots(home = homedir()): string[] {

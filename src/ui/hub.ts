@@ -207,6 +207,7 @@ function projectMenuItems(p){
     {label:revealLabel(),run:function(){revealProject(p)}},
     {label:"Copy path",run:function(){copyText(p.root,"the path")}},
     {label:"Rescan",run:function(){projectAction(p,"rescan","looked at "+p.name+" again")}},
+    {label:p.group?"Move to another group…":"Put in a group…",run:function(){projectGroupDialog(p)}},
     "-",
     {label:"Hide",run:function(){
       projectAction(p,"hide",p.name+" is hidden — Home lists it under Hidden",{label:"Undo",run:function(){projectAction(p,"show",p.name+" is back")}});

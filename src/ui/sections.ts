@@ -14,16 +14,12 @@ async function copyText(text,what){
   try{await navigator.clipboard.writeText(text);toast("copied "+what)}catch(e){toast("copying is blocked here — select the text instead",{error:true})}
 }
 async function skipStep(id){await refresh(await api("/api/setup-skip",{id:id,skip:true}))}
+/* Setup's remaining steps, folded into one line until opened. */
 function onboardingCard(){
   const o=S.onboarding;
   if(!o||!o.next)return null;
   const todo=o.steps.filter(function(s){return s.status==="todo"});
-  const card=h("section",{class:"card pad","aria-label":"Finish setting up"});
-  card.append(h("div",{class:"sechead",style:"margin:0"},
-    h("div",null,h("h3",{text:"Finish setting up"}),
-      h("p",{class:"lead",text:o.done+" of "+o.total+" done. Each step runs in your terminal, or hand them to your coding agent."})),
-    h("button",{type:"button",class:"btn sm",onclick:function(){copyText(AGENT_PROMPT,"the prompt for your agent")}},icon("copy"),"Prompt for your agent")));
-  const list=h("div",{class:"stack",style:"margin-top:14px"});
+  const list=h("div",{class:"stack",style:"margin-top:10px"});
   todo.forEach(function(s){
     list.append(h("div",{class:"offer"},
       h("div",{class:"what"},h("b",{text:s.title}),h("div",{text:s.detail}),
@@ -32,46 +28,50 @@ function onboardingCard(){
       s.command?h("button",{type:"button",class:"btn sm",onclick:function(){copyText(s.command,"the command")}},icon("copy"),"Copy"):null,
       h("button",{type:"button",class:"btn sm ghost",onclick:function(){skipStep(s.id)}},"Skip")));
   });
-  card.append(list);
-  return card;
+  return h("details",{class:"card fold-card"},
+    h("summary",null,h("span",{class:"meter"},o.steps.map(function(s){return h("i",{class:s.status==="todo"?"":"on"})})),
+      h("b",{text:"Finish setting up"}),h("span",{class:"muted",text:o.done+" of "+o.total+" done · "+plural(todo.length,"step")+" left"}),
+      h("span",{class:"tright"},h("button",{type:"button",class:"btn sm ghost",onclick:function(ev){ev.preventDefault();copyText(AGENT_PROMPT,"the prompt for your agent")}},icon("copy"),"Prompt for your agent"))),
+    h("p",{class:"muted",style:"margin:10px 0 0",text:"Each step runs in your terminal, or hand them all to your coding agent with the prompt."}),
+    list);
 }
 
+/* What the code reads: what is missing, each with its fix; what is provided folds away. */
 function needsCard(){
   const needs=S.needs||[];
   if(!needs.length)return null;
   const win=winners();
   const missing=needs.filter(function(n){return !win[n.name]});
-  const card=h("section",{class:"card pad","aria-label":"What your code reads"});
-  const head=h("div",{class:"sechead",style:"margin:0"},
-    h("div",null,h("h3",{text:"What your code reads"}),
-      h("p",{class:"lead",text:plural(needs.length,"variable")+" found in the code — "+(missing.length
-        ?missing.length+" not provided yet. A run would start without "+(missing.length===1?"it":"them")+"."
-        :"every one is provided.")+(S.needsOrdinary?" Ordinary settings like NODE_ENV and PORT ("+S.needsOrdinary+") are left out.":"")+(S.needsPartial?" This folder is too big to read in full, so the list is partial: open hush ui inside the project for all of it.":"")})),
-    h("div",{class:"tally"},
-      h("span",{class:"badge ok"},icon("check"),(needs.length-missing.length)+" provided"),
-      missing.length?h("span",{class:"badge warn"},icon("alert"),missing.length+" missing"):null));
-  card.append(head);
-  const list=h("div",{class:"needs"});
-  const sorted=missing.concat(needs.filter(function(n){return win[n.name]}));
-  const LIMIT=40;
-  sorted.forEach(function(n,i){
-    const site=n.sites&&n.sites.length?n.sites[0]:"";
-    if(win[n.name]){
-      list.append(h("span",{class:"need ok",title:"from "+win[n.name].label+(site?" · read in "+site:""),hidden:i>=LIMIT},icon("check"),n.name,h("span",{class:"from",text:win[n.name].label})));
-    }else{
+  const provided=needs.filter(function(n){return win[n.name]});
+  const card=h("section",{class:"card pad needcard","aria-label":"What your code reads"});
+  if(missing.length){
+    card.append(h("div",{class:"needhead"},icon("alert"),h("b",{text:missing.length===1?"1 key its code reads is missing":missing.length+" keys its code reads are missing"}),
+      h("span",{class:"muted",text:"A run would start without "+(missing.length===1?"it":"them")+"."})));
+    const list=h("div",{class:"needs"});
+    missing.forEach(function(n){
+      const site=n.sites&&n.sites.length?n.sites[0]:"";
       // Often the key already exists in a set this project just isn't using.
       // Offering that set beats asking for the value again.
       const src=sourceFor(n.name);
-      list.append(h("span",{class:"need missing",title:(src?src.set.label+" has it":"not in any of your sets")+(site?" · read in "+site:""),hidden:i>=LIMIT},icon("alert"),n.name,
+      list.append(h("span",{class:"need missing",title:(src?src.set.label+" has it":"not in any of your sets")+(site?" · read in "+site:"")},n.name,
         src?h("button",{type:"button","aria-label":"Use "+src.set.label+" here, which has "+n.name,onclick:function(){useHere(src.link,src.set.label,true)}},"Use "+src.set.label)
           :h("button",{type:"button","aria-label":"Add "+n.name,onclick:function(){addSecretDialog({key:n.name})}},"Add")));
-    }
-  });
-  card.append(list);
-  if(sorted.length>LIMIT){
-    card.append(h("button",{type:"button",class:"linkbtn",style:"margin-top:10px",onclick:function(ev){
-      [].forEach.call(list.children,function(c){c.hidden=false});ev.currentTarget.remove()}},"Show all "+sorted.length));
+    });
+    card.append(list);
   }
+  if(provided.length){
+    const list=h("div",{class:"needs",style:"margin-top:10px"});
+    provided.forEach(function(n){
+      const site=n.sites&&n.sites.length?n.sites[0]:"";
+      list.append(h("span",{class:"need ok",title:"from "+win[n.name].label+(site?" · read in "+site:"")},icon("check"),n.name,h("span",{class:"from",text:win[n.name].label})));
+    });
+    card.append(h("details",{class:"provided",open:!missing.length&&provided.length<=6},
+      h("summary",null,icon("check"),h("span",{text:missing.length?provided.length+" provided":"Every credential its code reads is provided ("+provided.length+")"})),list));
+  }
+  const notes=[];
+  if(S.needsOrdinary)notes.push("ordinary settings like NODE_ENV and PORT ("+S.needsOrdinary+") are left out");
+  if(S.needsPartial)notes.push("this folder is too big to read in full, so the list is partial");
+  if(notes.length)card.append(h("p",{class:"muted small",text:notes.join("; ").replace(/^./,function(c){return c.toUpperCase()})+"."}));
   return card;
 }
 
@@ -145,21 +145,13 @@ function groupCard(u,win){
 function renderProject(page){
   const fstate=S.folder.state;
   const name=folderName();
-  page.append(h("header",{class:"head"},
-    h("div",null,h("h1",{text:name}),h("p",{text:fstate==="unset"
-      ?"hush hasn't been set up here. Nothing is written until you choose."
-      :"What "+name+" gets when you run it with hush — hush dev, hush run, or your agent's hush_run."})),
-    h("div",{class:"actions"},
-      dropCard(),
-      h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog()}},icon("plus"),"Add secret"))));
+  projectHeader(page,"project");
 
   if(fstate==="unset"){page.append(setupPanel());return}
 
-  const oc=onboardingCard();
-  if(oc)page.append(oc);
-
-  const nc=needsCard();
-  if(nc)page.append(nc);
+  add(page,onboardingCard());
+  add(page,needsCard());
+  add(page,suggestionsCard(currentRoot(),["give","same-value","plaintext","only-one"],"Suggested for "+name));
 
   const all=usedSets();
   const win=winners();
@@ -222,17 +214,14 @@ function renderProject(page){
   if(fromGlobal.length)gSec.append(gStack);
   page.append(gSec);
 
+  // Sets kept for it that a run does not get: folded, out of the way.
   const unusedOwn=S.library.filter(function(s){return s.own&&S.used.indexOf(linkOf(s))<0}).map(function(s){return offerRow("library",s,linkOf(s))})
-    .concat(S.project.filter(function(s){return S.used.indexOf(s.name)<0}).map(function(s){return offerRow("project",s,s.name)}));
-  add(page,offersCard("Its other sets","Kept for this project, but not applied when it runs.",unusedOwn));
-
-  // Only the global sets that hold something this project's code is missing.
-  // Offering every set you own on every project read as "not assigned".
-  const lacking=(S.needs||[]).filter(function(n){return !win[n.name]}).map(function(n){return n.name});
-  const lib=globalSets().filter(function(s){return S.used.indexOf(linkOf(s))<0});
-  const helpful=lib.filter(function(s){return s.keys.some(function(k){return lacking.indexOf(k)>-1})});
-  if(S.global.exists&&helpful.length){
-    add(page,offersCard("Your global keys can fill these in","Sets that hold something this project's code reads and doesn't have yet.",helpful.map(function(s){return offerRow("library",s,linkOf(s))})));
+    .concat(S.project.filter(function(s){return S.used.indexOf(s.name)<0&&(s.keys.length||s.name!=="default")}).map(function(s){return offerRow("project",s,s.name)}));
+  if(unusedOwn.length){
+    const box=h("div",{class:"card"});
+    unusedOwn.forEach(function(r){box.append(r)});
+    page.append(h("details",{class:"section psec"},h("summary",null,h("span",{text:"Its other sets"}),h("span",{class:"count",text:String(unusedOwn.length)})),
+      h("p",{class:"muted",text:"Kept for "+name+", but not applied when it runs."}),box));
   }
 }
 
@@ -314,35 +303,10 @@ function setupPanel(){
 
 /* ---------------------------------------------------------------- library */
 
-/* Global sets only one project uses (GET-like /api/tidy): null until asked, then the list. */
-let TIDY=null;
-function tidyBanner(){
-  if(TIDY===null){
-    TIDY="asking";
-    api("/api/tidy",{action:"list"}).then(function(r){TIDY=r.offers;if(route()==="library"&&TIDY.length)render()},function(){TIDY=[]});
-    return null;
-  }
-  if(!Array.isArray(TIDY)||!TIDY.length)return null;
-  return h("div",{class:"banner",style:"margin-bottom:14px"},icon("info"),
-    h("span",null,plural(TIDY.length,"global set")+(TIDY.length===1?" is":" are")+" used by one project only — most likely "+(TIDY.length===1?"that project's":"each project's")+" own. ",
-      h("button",{type:"button",class:"linkbtn",onclick:tidyDialog},"Review")));
-}
-function tidyDialog(){
-  const rows=TIDY.map(function(o){return {o:o,cb:h("input",{type:"checkbox",checked:true})}});
-  const list=h("div",{class:"card list"});
-  rows.forEach(function(r){
-    list.append(h("label",{class:"offer",style:"cursor:pointer"},r.cb,
-      h("div",{class:"what"},h("b",{text:r.o.label}),h("div",{text:"only "+r.o.name+" uses it · "+plural(r.o.keys,"key")}))));
-  });
-  dialog({title:"Keep these for the one project using each?",
-    lead:"Each is used by one project and no other — most likely imported before keys could belong to one project. Kept for its project, it leaves your global keys and hush refuses it anywhere else. That project keeps getting it, and nothing is deleted.",
-    submit:"Keep them there",body:[list],
-    onSubmit:async function(){
-      const picks=rows.filter(function(r){return r.cb.checked}).map(function(r){return {set:r.o.set,root:r.o.root}});
-      if(!picks.length){toast("nothing ticked");return false}
-      const r=await api("/api/tidy",{action:"apply",picks:picks});
-      await refresh(r);toast("kept "+plural(r.done.length,"set")+" for "+(r.done.length===1?"its project":"their projects"));
-    }});
+/* Every global set only one project uses, kept for that project in one go. */
+async function keepAllForTheirProjects(items){
+  const r=await api("/api/tidy",{action:"apply",picks:items.map(function(s){return s.act.tidy})});
+  await refresh(r);toast("kept "+plural(r.done.length,"set")+" for "+(r.done.length===1?"its project":"their projects"));
 }
 
 function renderLibrary(page){
@@ -366,7 +330,10 @@ function renderLibrary(page){
         others.map(function(v){return h("button",{type:"button",class:"btn ghost",onclick:async function(){await refresh(await api("/api/global",{name:v}));toast("your library is now "+v)}},"Use my “"+v+"” vault")})))));
     return;
   }
-  add(page,tidyBanner());
+  const sc=suggestionsCard(null,["only-one","same-value","replace"],"Suggested for your global keys");
+  const sole=Array.isArray(SUG)?SUG.filter(function(x){return x.kind==="only-one"}):[];
+  if(sc&&sole.length>1)sc.querySelector(".sughead").append(h("button",{type:"button",class:"btn sm ghost tright",onclick:function(){keepAllForTheirProjects(sole)}},"Keep all "+sole.length+" for their projects"));
+  add(page,sc);
   (S.groups||[]).forEach(function(g){
     const members=g.sets.map(function(n){return sets.find(function(x){return x.name===n})}).filter(Boolean);
     const stack=h("div",{class:"stack"});
@@ -391,9 +358,9 @@ function renderLibrary(page){
 /* ------------------------------------------------------------------- team */
 
 function renderTeam(page){
-  page.append(h("header",{class:"head"},h("div",null,h("h1",null,"Team",
-      S.signed===true?h("span",{class:"badge ok",style:"margin-left:10px;vertical-align:middle"},"signed"):S.signed===false?h("span",{class:"badge",style:"margin-left:10px;vertical-align:middle"},"unsigned"):null),
-    h("p",{text:"People who can decrypt this project's vault. Removing someone re-encrypts everything, so their old copy opens nothing new."+(S.signed?" Only an admin can change who is on this list.":"")}))));
+  projectHeader(page,"team");
+  page.append(h("p",{class:"lead tablead"},"People who can decrypt this project's vault, the keys in its repository. Removing someone re-encrypts everything, so their old copy opens nothing new."+(S.signed?" Only an admin can change who is on this list.":""),
+    S.signed===true?h("span",{class:"badge ok",style:"margin-left:8px"},"signed"):S.signed===false?h("span",{class:"badge",style:"margin-left:8px"},"unsigned"):null));
   if(S.folder.state!=="vault"){
     page.append(h("div",{class:"banner"},icon("info"),h("span",{text:"This project has no vault yet. Adding someone makes one at .hush/vault.json — commit it so they can read it."})));
   }

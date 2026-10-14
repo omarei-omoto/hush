@@ -83,6 +83,32 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
 - **Fixed:** closing the keys sidebar also hid the keys inside every set card
   on the page.
 
+### A calmer app that suggests the next step
+
+- **Project groups.** File projects into groups ("Clients", "omoto") by
+  dragging one onto a group or from its ⋯ menu; groups fold in the sidebar and
+  section Home. Drop a global key, set or key group on a project group to give
+  it to every project in it. Groups are kept in `~/.hush/projects.json`, not
+  in any project.
+- **Views on Home:** cards or a list; by project group, by folder or neither;
+  sorted by recent work, name or what needs you; filtered to All, Needs you,
+  Using hush or Not set up. Remembered per browser.
+- **Suggested**, with one click each: give a project a key its code reads from
+  the global set that has it; keep one global copy of a key several projects
+  keep as their own (compared on your machine, never sent to the page); import
+  a plaintext `.env` sitting in a project (after a review); keep a global set
+  one project uses for that project; replace a key past its rotation age or one
+  a removed teammate could still use; group projects that share a folder or a
+  GitHub owner. Each can be waved away for good.
+- **Dragging a key lights up the projects that need it**: those whose code
+  reads it and does not get it.
+- **Less clutter.** The left sidebar is just Home, Global keys and your
+  projects. A project's Team, Agent and Activity are tabs under its header,
+  which also shows its keys, what is missing, setup progress and protection.
+  The protection meter moved from the sidebar to the Agent tab. **Add** is one
+  menu. Setup folds into one line, only missing keys show until you open the
+  rest, and Home's folders card is one line.
+
 ## 0.12.0 — 2026-10-04
 
 Fixes from a deep review of 0.11.1 (docs/AUDIT.md, sixteenth pass): 33 findings,

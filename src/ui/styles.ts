@@ -49,9 +49,6 @@ svg.i{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-
 .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:22px;padding:22px 16px}
 .brand{display:flex;align-items:center;padding:2px 8px 0;color:var(--ink)}
 .brand .lockup{height:21px;width:auto;display:block}
-.here{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
-.here .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.here .state{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;margin-top:2px}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:0 0 auto}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}
 .nav{display:flex;flex-direction:column;gap:2px}
@@ -61,10 +58,29 @@ svg.i{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-
 .nav .count{margin-left:auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 .nav .count.warn{color:var(--warn);font-weight:600}
 .side{overflow-y:auto}
-.navhead{margin:14px 10px 4px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.navhead{display:flex;align-items:center;justify-content:space-between;gap:6px;margin:16px 2px 4px 10px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.navhead .iconbtn{width:24px;height:24px}
+.nav a.phone{display:none}
+.navnote{margin:4px 10px;font-size:12.5px;color:var(--muted)}
+.nav a.proj{padding:5px 10px}
+.nav a.proj.ingroup{padding-left:30px}
+/* A project group in the sidebar: folds shut; takes a dragged project, or a key for all of it. */
+.pgroup{display:flex;align-items:center;border-radius:8px;min-width:0}
+.pgroup .fold{display:flex;align-items:center;gap:6px;flex:1;min-width:0;padding:5px 6px 5px 8px;border:0;background:none;font:inherit;font-weight:600;color:var(--ink-2);cursor:pointer;text-align:left;border-radius:8px}
+.pgroup .fold:hover{background:var(--sunken);color:var(--ink)}
+.pgroup .fold svg{width:14px;height:14px;color:var(--muted)}
+.pgroup .pname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pgroup .count{font-size:12px;color:var(--muted);padding:0 10px 0 4px}
+.pgroup>.iconbtn{width:24px;height:24px;display:none}
+.pgroup:hover>.iconbtn,.pgroup:focus-within>.iconbtn,.pgroup>.iconbtn[aria-expanded=true]{display:inline-flex}
+.pgroup:hover .count,.pgroup:focus-within .count{display:none}
+.pgroup.holds .fold{color:var(--ink)}
+body.dragging-project .pgroup,body.dragging-key .pgroup,body.dragging-project .psec>summary{box-shadow:inset 0 0 0 1px var(--line-2);background:var(--surface)}
+/* While a key is dragged, the projects whose code reads it and lacks it. */
+.wants{box-shadow:inset 0 0 0 2px var(--ok)!important}
+.pcard.wants::after,.prow.wants::after{content:attr(data-wants);position:absolute;right:10px;top:-9px;font-size:11px;font-weight:600;color:var(--ok);background:var(--ok-bg);padding:1px 6px;border-radius:6px;pointer-events:none}
+.nav a.proj.wants .pname{color:var(--ok);font-weight:600}
 .nav a.proj .pname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.navadd{display:flex;align-items:center;gap:10px;padding:7px 10px;border:0;background:none;border-radius:8px;color:var(--muted);font:inherit;cursor:pointer;text-align:left}
-.navadd:hover{background:var(--sunken);color:var(--ink)}
 /* Dragging a global key: every project is a place it can go. */
 body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1px var(--line-2);background:var(--surface)}
 .drop-on,.nav a.proj.drop-on,.pcard.drop-on{box-shadow:inset 0 0 0 2px var(--ink)!important;background:var(--sunken)!important;color:var(--ink)}
@@ -127,16 +143,12 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .pcard:focus-within{border-color:var(--ink)}
 .pcard .pend{margin-left:auto;display:flex;align-items:center;gap:2px;flex:0 0 auto}
 .pcard .pend .iconbtn{position:relative;z-index:1;width:24px;height:24px;margin:-4px -8px -4px 0}
-.filter{margin-top:22px}
-.filter .input{width:100%;max-width:420px}
 .hiddenlist summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14.5px;font-weight:600}
 .hiddenlist summary .count{color:var(--muted);font-weight:500;font-size:12.5px}
 .hiddenlist>p{margin:6px 0 10px;font-size:13px}
 .hiddenlist .li .btn{flex:0 0 auto}
 /* An open project's page takes a dropped key. */
 .page.drop-on{box-shadow:none!important;background:none!important;outline:2px dashed var(--ink);outline-offset:14px;border-radius:14px}
-.navmore{display:block;padding:4px 10px 4px 36px;font-size:12.5px;color:var(--muted);text-decoration:none}
-.navmore:hover{color:var(--ink)}
 .progress{height:4px;border-radius:2px;background:var(--line);margin-top:12px;overflow:hidden}
 .progress i{display:block;height:100%;background:var(--ink);transition:width .4s}
 .pcard .techs{display:flex;flex-wrap:wrap;gap:4px}
@@ -150,13 +162,6 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .chip small{color:var(--muted)}
 .li.pick{width:100%;border:0;background:none;font:inherit;color:inherit;text-align:left;cursor:pointer}
 .li.pick:hover{background:var(--sunken)}
-.level{margin-top:auto;display:block;padding:12px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:inherit;background:var(--surface)}
-.level:hover{border-color:var(--line-2)}
-.level .t{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)}
-.level .t b{color:var(--ink);font-weight:600}
-.meter{display:flex;gap:3px;margin-top:8px}
-.meter i{flex:1;height:5px;border-radius:3px;background:var(--line)}
-.meter i.on{background:var(--ink)}
 .main{min-width:0;padding:36px 44px 96px}
 .page{max-width:1040px;margin:0 auto}
 .head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:24px}
@@ -168,6 +173,85 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .sechead h2{margin:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em}
 .sechead p{margin:2px 0 0;color:var(--muted);font-size:13px}
 .stack{display:flex;flex-direction:column;gap:12px}
+.page>.card+.card,.page>.card+details,.page>details+.card,.page>details+details,.page>.banner+.card,.page>.card+.banner{margin-top:12px}
+.tright{margin-left:auto}
+.small{font-size:12px;margin:10px 0 0}
+
+/* ----------------------------------------------- a project's header and tabs */
+.phead{align-items:flex-start;margin-bottom:12px}
+.ptitle{min-width:0;flex:1}
+.pline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.phead .meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:12.5px;color:var(--muted)}
+.phead .meta .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46ch}
+.health{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.health>*+*::before{content:"·";margin-right:8px;color:var(--muted)}
+.health a{color:var(--muted);text-decoration:none}
+.health a:hover{color:var(--ink);text-decoration:underline}
+.health a.warn{color:var(--warn);font-weight:600}
+.phead .actions{align-items:center}
+.tabs{display:flex;gap:2px;margin:0 0 22px;box-shadow:inset 0 -1px 0 var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs a{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:2px solid transparent;color:var(--muted);text-decoration:none;font-weight:500;white-space:nowrap}
+.tabs a:hover{color:var(--ink)}
+.tabs a[aria-current=page]{color:var(--ink);border-bottom-color:var(--ink)}
+.tabs .count{font-size:12px;color:var(--muted)}
+.tablead{margin:0 0 18px;color:var(--muted)}
+.meter{display:inline-flex;gap:3px;width:56px;flex:0 0 auto}
+.meter i{flex:1;height:5px;border-radius:3px;background:var(--line)}
+.meter i.on{background:var(--ink)}
+.meter.big{width:120px;align-self:center}
+/* Setup, folded into one line until opened. */
+.fold-card>summary{display:flex;align-items:center;gap:10px;padding:10px 12px 10px 16px;cursor:pointer;list-style:none;flex-wrap:wrap}
+.fold-card>summary::-webkit-details-marker{display:none}
+.fold-card[open]{padding-bottom:14px}
+.fold-card>p,.fold-card>.stack{margin-left:16px;margin-right:16px}
+.needcard{padding:14px 18px}
+.needhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--warn)}
+.needhead .muted{font-size:13px}
+.needhead+.needs{margin-top:10px}
+.provided>summary{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--ok);font-size:13px;font-weight:500}
+.needcard>.provided:first-child>summary{margin:0}
+
+/* ------------------------------------------------------------ suggestions */
+.sugg{padding:4px 0}
+.sughead{display:flex;align-items:center;gap:8px;padding:8px 12px 8px 16px;font-size:13.5px}
+.sughead svg{color:var(--ok)}
+.sughead .count{color:var(--muted);font-size:12px}
+.sug{display:flex;align-items:center;gap:10px;padding:8px 10px 8px 16px;border-top:1px solid var(--line)}
+.sug>svg{color:var(--muted)}
+.sug .stext{flex:1;min-width:0;font-size:13.5px}
+.sug .btn{flex:0 0 auto}
+.sugg .more{margin:8px 16px 6px}
+
+/* ------------------------------------------------------------------- home */
+.looking{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:-10px 0 18px}
+.progress.inline{display:inline-block;width:120px;margin:0}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:22px}
+.toolbar>.input{width:190px}
+.toolbar .tright{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.input.sm,select.input.sm{height:30px;font-size:13px;padding:0 8px;width:auto}
+.seg button{border:0;background:none;font:inherit;font-size:13px;font-weight:500;color:var(--muted);padding:4px 10px;border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.seg button .count{font-size:11.5px;color:var(--muted)}
+.seg.views button{padding:4px 7px}
+.psec>summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14.5px;font-weight:600;margin-bottom:10px;list-style:none;border-radius:8px;padding:2px 4px;margin-left:-4px}
+.psec>summary::-webkit-details-marker{display:none}
+.psec>summary::before{content:"";width:6px;height:6px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:rotate(-45deg);margin:0 3px 0 2px;transition:transform .15s}
+.psec[open]>summary::before{transform:rotate(45deg)}
+.psec>summary .count{color:var(--muted);font-weight:500;font-size:12.5px}
+.psec>summary .tright .iconbtn{width:26px;height:26px}
+.psec>p{margin:-4px 0 10px;font-size:13px}
+.plist{overflow:hidden}
+.prow{display:grid;grid-template-columns:minmax(110px,1fr) minmax(0,.8fr) minmax(0,1.3fr) 190px 60px 28px;gap:12px;align-items:center;padding:8px 10px 8px 16px;position:relative}
+.prow+.prow{border-top:1px solid var(--line)}
+.prow:hover{background:var(--sunken)}
+.prow .pcover{color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prow .pcover::after{content:"";position:absolute;inset:0}
+.prow .iconbtn{position:relative;z-index:1;width:26px;height:26px}
+.prow>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;min-width:0}
+.prow .pmeta{display:flex;gap:6px}
+.prow .ago{text-align:right}
 
 /* ---------------------------------------------------------------- buttons */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 14px;
@@ -357,15 +441,19 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
   .app{background:none}
   .side{position:static;height:auto;flex-direction:row;align-items:center;gap:12px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--line)}
   .brand .lockup{height:18px}
-  .here{flex:1;min-width:0;padding:6px 10px}
-  .level{display:none}
   .nav{position:fixed;left:0;right:0;bottom:0;z-index:50;flex-direction:row;gap:0;padding:6px 6px calc(6px + env(safe-area-inset-bottom));
     background:var(--surface);border-top:1px solid var(--line)}
   .nav a{flex:1;flex-direction:column;gap:2px;padding:6px 2px;font-size:11px;border-radius:8px}
   .nav a svg{width:19px;height:19px}
   .nav .count{display:none}
   /* On a phone the bar holds the sections; projects are on Home. */
-  .nav a.proj,.navhead,.navadd{display:none}
+  .nav a.proj,.navhead,.pgroup,.projrow,.navnote{display:none}
+  .nav a.phone{display:flex}
+  .nav a.phone span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+  .toolbar>.input{width:100%}
+  .prow{grid-template-columns:minmax(0,1fr) auto 28px}
+  .prow>span:not(.pmeta){display:none}
+  .phead .meta .mono{max-width:100%}
   .main{padding:20px 16px 96px}
   .head .actions{width:100%}
   .head .actions .btn{flex:1}

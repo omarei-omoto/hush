@@ -12,8 +12,16 @@ function copyCmd(text){
 }
 
 function renderAgent(page){
-  page.append(h("header",{class:"head"},h("div",null,h("h1",null,"Agent"),
-    h("p",{text:"Your coding agent can use these secrets without ever reading one. Here's what it's connected to, and what it has to ask you first."}))));
+  projectHeader(page,"agent");
+  page.append(h("p",{class:"lead tablead",text:"Your coding agent can use these secrets without ever reading one. Here's what it's connected to, and what it has to ask you first."}));
+  // How well the keys are protected: once here, where it can be acted on, rather than always on screen.
+  page.append(h("section",{class:"card pad protect","aria-label":"Protection"},
+    h("div",{class:"sechead",style:"margin:0"},
+      h("div",null,h("h3",{text:"Protection: "+S.posture.rung+" of 5 — "+S.posture.name}),
+        S.posture.next?h("p",{class:"lead",text:S.posture.next.label+(S.posture.next.why?" — "+S.posture.next.why:"")}):h("p",{class:"lead",text:"The top rung. Nothing more to do here."})),
+      h("span",{class:"meter big"},[1,2,3,4,5].map(function(i){return h("i",{class:i<=S.posture.rung?"on":""})}))),
+    S.posture.next&&S.posture.next.command?h("div",{class:"row",style:"margin-top:10px;align-items:center;gap:8px"},
+      h("code",{text:S.posture.next.command}),h("button",{type:"button",class:"btn sm",onclick:function(){copyText(S.posture.next.command,"the command")}},icon("copy"),"Copy")):null));
 
   const steps=[
     {ok:S.agent.mcpRegistered,t:"Connect hush to your agent",d:"Adds hush's tools to Claude Code, Codex or Cursor — it asks before writing each file.",cmd:"hush install-mcp"},
@@ -131,6 +139,7 @@ function describeEvent(e){
     case "group.rename":return ["change","Renamed a group"];
     case "group.ungroup":return ["change","Took every set out of a group"];
     case "tidy":return ["change","Kept "+plural(Number(e.moved)||0,"set")+" for the one project using each"];
+    case "share":return ["change","Kept one global copy of "+(e.key||"a key")+" instead of "+(e.sets||"several")];
     case "global.create":return ["change","Created your library"];
     case "global.adopt":return ["change","Switched your library to "+(e.name||"")];
     case "verify":return ["other","Checked the vault"];
@@ -168,9 +177,10 @@ async function loadAudit(){
   if(route()==="activity")render();
 }
 function renderActivity(page){
-  page.append(h("header",{class:"head"},h("div",null,h("h1",null,"Activity"),
-    h("p",{text:"What was done with this project's secrets, by you, your terminal and your agent. Values are never logged."})),
-    h("div",{class:"actions"},h("button",{type:"button",class:"btn",onclick:function(){AUDIT=null;render();loadAudit()}},"Refresh"))));
+  projectHeader(page,"activity");
+  page.append(h("div",{class:"tablead row",style:"justify-content:space-between;align-items:center"},
+    h("p",{class:"lead",style:"margin:0",text:"What was done with this project's secrets, by you, your terminal and your agent. Values are never logged."}),
+    h("button",{type:"button",class:"btn sm",onclick:function(){AUDIT=null;render();loadAudit()}},"Refresh")));
   if(AUDIT===null){page.append(h("p",{class:"muted",text:"Loading…"}));loadAudit();return}
   if(!AUDIT.length){page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,"Nothing yet"),h("p",null,"Runs, reveals and changes show up here."))));return}
   let day=null,box=null;

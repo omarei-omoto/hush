@@ -7,7 +7,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, realpathSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1406,6 +1406,66 @@ test("/api/move carves one pile into named sets", async () => {
     } finally {
       rmSync(other, { recursive: true, force: true });
     }
+  });
+
+  test("suggestions, project groups, and importing the .env sitting in a project's folder (hub)", async () => {
+    const root = realpathSync(libRoot);
+    // A plaintext .env: staged from disk for review, names and masked previews only.
+    writeFileSync(join(root, ".env"), "DISK_ONLY_KEY=disk_only_value_98765\n");
+    try {
+      const st = await libApi("/api/stage-file", {});
+      assert.equal(st.status, 200, JSON.stringify(st.body));
+      assert.deepEqual(st.body.entries.map((e: any) => e.key), ["DISK_ONLY_KEY"]);
+      assert.ok(!JSON.stringify(st.body).includes("disk_only_value_98765"), "a value came back");
+      await libApi("/api/discard", { stageIds: [st.body.stageId] });
+      // A link there could point at any file: refused.
+      unlinkSync(join(root, ".env"));
+      writeFileSync(join(libHome, "elsewhere"), "ELSEWHERE=1\n");
+      symlinkSync(join(libHome, "elsewhere"), join(root, ".env"));
+      const linked = await libApi("/api/stage-file", {});
+      assert.equal(linked.status, 400);
+      assert.match(linked.body.error, /not a regular file/);
+    } finally {
+      rmSync(join(root, ".env"), { force: true });
+    }
+    assert.equal((await libApi("/api/stage-file", {})).status, 404);
+
+    // Suggestions come with their one-click fix, and a dismissed one stays gone.
+    const sug = await libApi("/api/suggestions", {});
+    assert.equal(sug.status, 200, JSON.stringify(sug.body));
+    assert.ok(Array.isArray(sug.body.suggestions));
+    for (const x of sug.body.suggestions) assert.ok(x.id && x.text && x.label && x.act, JSON.stringify(x));
+    if (sug.body.suggestions.length) {
+      const first = sug.body.suggestions[0];
+      assert.equal((await libApi("/api/suggestions", { action: "dismiss", id: first.id })).status, 200);
+      assert.ok(!(await libApi("/api/suggestions", {})).body.suggestions.some((x: any) => x.id === first.id));
+    }
+
+    // A project group: filed, renamed, ungrouped — the project stays on the list throughout.
+    let hub = (await libApi("/api/projects", { action: "group", roots: [root], group: "Test projects" })).body;
+    assert.equal(hub.projects.find((p: any) => p.root === root).group, "Test projects");
+    assert.deepEqual(hub.groups, [{ label: "Test projects", count: 1 }]);
+    hub = (await libApi("/api/projects", { action: "rename-group", group: "test projects", label: "Mine" })).body;
+    assert.equal(hub.projects.find((p: any) => p.root === root).group, "Mine");
+    hub = (await libApi("/api/projects", { action: "ungroup", group: "Mine" })).body;
+    assert.ok(hub.projects.some((p: any) => p.root === root && !p.group));
+    assert.equal((await libApi("/api/projects", { action: "group", roots: [join(root, "nope")], group: "x" })).status, 400);
+
+    // One global copy instead of two of this project's own, and the project still gets it.
+    const sets: string[] = [];
+    for (const label of ["Copy one", "Copy two"]) {
+      const c = (await libApi("/api/env", { action: "create", where: "library", own: true, label })).body;
+      await libApi("/api/link", { name: c.created, use: true });
+      await libApi("/api/secret", { where: "library", scope: c.created, key: "SAME_KEY", value: "same_value_55555" });
+      sets.push(c.created);
+    }
+    const shared = await libApi("/api/share", { key: "SAME_KEY", sets, toLabel: "Same key" });
+    assert.equal(shared.status, 200, JSON.stringify(shared.body));
+    assert.deepEqual(shared.body.library.find((x: any) => x.name === "same-key").keys, ["SAME_KEY"]);
+    assert.ok(!shared.body.library.some((x: any) => sets.includes(x.name)), "an emptied copy was left behind");
+    assert.ok(shared.body.used.includes("same-key#SAME_KEY"));
+    assert.ok(!JSON.stringify(shared.body).includes("same_value_55555"), "a value came back");
+    assert.equal((await libApi("/api/share", { key: "SAME_KEY", sets: ["no-such-set"] })).status, 400);
   });
 
   test("a project's own keys and global ones: kept here, made global, groups given whole, and tidying up (hub)", async () => {

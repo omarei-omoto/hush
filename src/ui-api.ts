@@ -13,8 +13,9 @@ import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName, libraryGroups, placeOf, sameFolder } from "./library.ts";
-import { fileUnder, keepHere, makeGlobal, renameGroup, soleUsers, tidy, ungroup } from "./placement.ts";
-import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, removeProject, rescanProject, setCrawlRoots, showProject, startCrawl } from "./projects.ts";
+import { fileUnder, keepHere, makeGlobal, renameGroup, shareOneCopy, soleUsers, tidy, ungroup } from "./placement.ts";
+import { suggestions } from "./suggest.ts";
+import { addProject, crawlRoots, dismissSuggestion, hideProject, isKnownProject, isListedRoot, removeProject, renameProjectGroup, rescanProject, setCrawlRoots, setProjectGroup, showProject, startCrawl, ungroupProjects } from "./projects.ts";
 import { fileManagerCommand } from "./platform.ts";
 import { chooseFolder, detectBackend } from "./dialogs.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
@@ -170,6 +171,20 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
 
   const body = await readBody(req);
 
+  // "Import it" on a project's plaintext .env: the file is read here, from
+  // that project's folder, and staged for review like a dropped one. Only a
+  // regular file — a link could point anywhere — and no bigger than a drop.
+  if (path === "/api/stage-file") {
+    const file = join(ctx.root, ".env");
+    const st = lstatSync(file, { throwIfNoEntry: false });
+    if (!st) return json(res, 404, { error: "there is no .env in " + ctx.root });
+    if (!st.isFile()) return json(res, 400, { error: `${file} is not a regular file — it is a link or a device` });
+    if (st.size > 2_000_000) return json(res, 400, { error: "that file is too large to be a .env (2 MB limit)" });
+    body.text = readFileSync(file, "utf8");
+    body.filename = ".env";
+    path = "/api/stage";
+  }
+
   /** A project a request names in its body: on the list, or the folder this server started in. */
   const knownRoot = (raw: unknown): string => {
     if (typeof raw !== "string" || !raw) throw new ValidationError("project is required");
@@ -293,6 +308,37 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
     }
 
     /**
+     * What the app suggests doing next (suggest.ts), each with its one-click
+     * fix; "dismiss" waves one away for good.
+     */
+    case "/api/suggestions": {
+      if (body.action === "dismiss") {
+        dismissSuggestion(String(body.id ?? ""));
+        return json(res, 200, { dismissed: true });
+      }
+      const hub = hubState(startedRoot);
+      let library: Vault | null = null;
+      try {
+        library = openGlobal();
+      } catch { /* no readable library: nothing to suggest about it */ }
+      return json(res, 200, { suggestions: suggestions({ projects: hub.projects, library, id, policy: loadPolicy(ctx.hushDir) }) });
+    }
+
+    /** One copy instead of many: the same key and value kept as several projects' own (placement.ts). */
+    case "/api/share": {
+      const sets = Array.isArray(body.sets) ? body.sets.map(String) : [];
+      const r = shareOneCopy({
+        id,
+        key: String(body.key ?? ""),
+        sets,
+        to: typeof body.to === "string" && body.to ? body.to : undefined,
+        toLabel: typeof body.toLabel === "string" ? body.toLabel : undefined,
+      });
+      audit(ctx.hushDir, { actor: "ui", action: "share", key: body.key, sets: sets.length });
+      return json(res, 200, { ...state(ctx), hub: hubState(startedRoot), done: r.done });
+    }
+
+    /**
      * Global sets only one project uses — most likely that project's own,
      * imported before a key could belong to one project. "list" offers them;
      * "apply" keeps the chosen ones for their project.
@@ -358,8 +404,22 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
         addProject(String(body.root ?? ""));
         return json(res, 200, hubState(startedRoot));
       }
+      // Project groups: folders for the list. "group" files projects under one (or none).
+      if (action === "group") {
+        const roots = (Array.isArray(body.roots) ? body.roots : [body.root]).map(knownRoot);
+        setProjectGroup(roots, typeof body.group === "string" ? body.group : null);
+        return json(res, 200, hubState(startedRoot));
+      }
+      if (action === "rename-group") {
+        renameProjectGroup(String(body.group ?? ""), String(body.label ?? ""));
+        return json(res, 200, hubState(startedRoot));
+      }
+      if (action === "ungroup") {
+        ungroupProjects(String(body.group ?? ""));
+        return json(res, 200, hubState(startedRoot));
+      }
       if (!["hide", "show", "remove", "rescan", "reveal"].includes(action)) {
-        return json(res, 400, { error: 'action must be "add", "hide", "show", "remove", "rescan" or "reveal"' });
+        return json(res, 400, { error: 'action must be "add", "group", "rename-group", "ungroup", "hide", "show", "remove", "rescan" or "reveal"' });
       }
       const root = knownRoot(body.root);
       if (action === "reveal") {

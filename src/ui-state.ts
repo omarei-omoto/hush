@@ -3,7 +3,7 @@
  * agent, the ladder. `/api/state` returns this, and so does every write.
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { type CrawlStatus, crawlOnce, crawlRoots, crawlStatus, isProjectRoot, isSetAside, listHidden, listProjects } from "./projects.ts";
+import { type CrawlStatus, crawlOnce, crawlRoots, crawlStatus, isProjectRoot, isSetAside, listHidden, listProjects, projectGroups } from "./projects.ts";
 import { join, basename, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
 import { scanTree, looksLikeSecret } from "./scan.ts";
@@ -471,6 +471,10 @@ export interface HubProject {
   /** Of those, the ones your global keys have — a drag away. */
   inGlobal: string[];
   plaintextEnv: boolean;
+  /** Its project group in the app, if any. */
+  group?: string;
+  /** Who its git remote belongs to ("github.com/omoto"). */
+  owner?: string;
 }
 
 /**
@@ -481,6 +485,8 @@ export interface HubProject {
 export function hubState(startedRoot: string): {
   projects: HubProject[];
   hidden: { root: string; name: string }[];
+  /** Project groups, with how many projects each holds. */
+  groups: { label: string; count: number }[];
   crawl: CrawlStatus;
   roots: string[];
   rootsChosen: boolean;
@@ -564,11 +570,13 @@ export function hubState(startedRoot: string): {
       lacking,
       inGlobal: lacking.filter((c) => globalKeys.has(c)),
       plaintextEnv: d?.plaintextEnv ?? false,
+      ...(p.group ? { group: p.group } : {}),
+      ...(d?.owner ? { owner: d.owner } : {}),
     };
   });
   const { roots, chosen } = crawlRoots();
   const hidden = listHidden().map((p) => ({ root: p.root, name: basename(p.root) }));
-  return { projects, hidden, crawl: crawlStatus(), roots, rootsChosen: chosen, platform: process.platform };
+  return { projects, hidden, groups: projectGroups(), crawl: crawlStatus(), roots, rootsChosen: chosen, platform: process.platform };
 }
 
 export { looksLikeSecret } from "./scan.ts";

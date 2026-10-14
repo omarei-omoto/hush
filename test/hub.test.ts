@@ -247,11 +247,13 @@ describe("choosing a folder with the system's picker", () => {
   test("each desktop's picker is asked for a folder, starting where hush already looks", async () => {
     const { folderPickerArgs, powershellFolderScript } = await import("../src/dialogs.ts");
     const mac = folderPickerArgs("osascript", 'Pick "one"', "/Users/me/code");
-    assert.deepEqual(mac.slice(0, 3), ["-l", "JavaScript", "-e"]);
-    assert.match(mac[3], /NSOpenPanel/);
-    assert.match(mac[3], /activateIgnoringOtherApps/, "the picker would open behind the browser");
-    assert.deepEqual(mac.slice(4), ['Pick "one"', "/Users/me/code"], "the prompt and folder were not passed as arguments");
-    assert.ok(!mac[3].includes("Pick"), "the prompt was quoted into the script");
+    assert.equal(mac[0], "-e");
+    assert.match(mac[1], /^on run argv\n\tactivate\n/, "the picker would open behind the browser");
+    assert.match(mac[1], /choose folder with prompt \(item 1 of argv\) default location \(POSIX file \(item 2 of argv\)\)/);
+    assert.doesNotMatch(mac[1], /NSOpenPanel/, "a custom open panel from osascript drops clicks in its sidebar");
+    assert.match(mac[1], /if n is -128 then error/, "a cancel would reopen the dialog");
+    assert.deepEqual(mac.slice(2), ['Pick "one"', "/Users/me/code"], "the prompt and folder were not passed as arguments");
+    assert.ok(!mac[1].includes("Pick"), "the prompt was quoted into the script");
     assert.deepEqual(folderPickerArgs("zenity", "p", "/home/me"), ["--file-selection", "--directory", "--title", "p", "--filename", "/home/me/"]);
     assert.deepEqual(folderPickerArgs("kdialog", "p", "/home/me"), ["--title", "p", "--getexistingdirectory", "/home/me"]);
     const win = powershellFolderScript("a 'quoted' prompt", "C:\\Users\\me\\Ünïcode");
@@ -261,6 +263,19 @@ describe("choosing a folder with the system's picker", () => {
     assert.match(win, /SetOptions\(options \| 0x20/, "the Explorer-style picker is not in folder mode");
     assert.match(win, /catch \{\s*\$d = New-Object Windows\.Forms\.FolderBrowserDialog/, "no picker where Add-Type is not allowed");
     assert.match(win, /^'@$/m, "the C# shim's here-string is not closed at the start of a line");
+  });
+
+  test("the macOS picker's AppleScript compiles", { skip: process.platform !== "darwin" }, async () => {
+    const { folderPickerArgs } = await import("../src/dialogs.ts");
+    const { spawnSync } = await import("node:child_process");
+    const dir = scratch("hush-osacompile-");
+    try {
+      writeFileSync(join(dir, "choose.applescript"), folderPickerArgs("osascript", "p", "/")[1]);
+      const r = spawnSync("/usr/bin/osacompile", ["-o", join(dir, "choose.scpt"), join(dir, "choose.applescript")], { encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("a picked path is tidied the same way on every system", async () => {

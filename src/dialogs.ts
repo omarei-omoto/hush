@@ -528,32 +528,31 @@ if ($path) {
 }
 
 /**
- * The macOS picker: Finder's open panel, shown by osascript as a small app of
- * its own that comes to the front. AppleScript's `choose folder` belongs to
- * whichever app started hush, so it opens behind the browser it was asked
- * from. The prompt and start folder arrive as arguments, never in the script.
+ * The macOS picker: AppleScript's own `choose folder`, the standard dialog,
+ * drawn in osascript's process and brought to the front by `activate`. The
+ * prompt and start folder arrive as arguments, never in the script.
+ *
+ * Not a custom NSOpenPanel from JavaScript for Automation: that panel's
+ * contents are served by another process, and a host that is not a full app
+ * relays clicks to them unreliably — the sidebar ignored clicks. A start
+ * folder that is gone opens the dialog where macOS last left it instead.
  */
-const MAC_FOLDER_PANEL = `function run(argv) {
-  ObjC.import("AppKit");
-  var app = $.NSApplication.sharedApplication;
-  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
-  app.activateIgnoringOtherApps(true);
-  var p = $.NSOpenPanel.openPanel;
-  p.canChooseDirectories = true;
-  p.canChooseFiles = false;
-  p.allowsMultipleSelection = false;
-  p.message = argv[0];
-  p.prompt = "Choose";
-  p.directoryURL = $.NSURL.fileURLWithPath(argv[1]);
-  p.level = $.NSModalPanelWindowLevel;
-  return p.runModal == $.NSModalResponseOK ? ObjC.unwrap(p.URLs.objectAtIndex(0).path) : "";
-}`;
+const MAC_CHOOSE_FOLDER = `on run argv
+	activate
+	try
+		set picked to choose folder with prompt (item 1 of argv) default location (POSIX file (item 2 of argv))
+	on error m number n
+		if n is -128 then error m number n
+		set picked to choose folder with prompt (item 1 of argv)
+	end try
+	return POSIX path of picked
+end run`;
 
 /** The arguments that open the folder picker with each backend. Exported for tests. */
 export function folderPickerArgs(name: BackendName, prompt: string, start: string): string[] {
   switch (name) {
     case "osascript":
-      return ["-l", "JavaScript", "-e", MAC_FOLDER_PANEL, prompt, start];
+      return ["-e", MAC_CHOOSE_FOLDER, prompt, start];
     case "zenity":
       return ["--file-selection", "--directory", "--title", prompt, "--filename", start.endsWith("/") ? start : start + "/"];
     case "kdialog":

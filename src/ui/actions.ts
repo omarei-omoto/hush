@@ -321,16 +321,23 @@ function tagDialog(scope,key,current){
     onSubmit:async function(){await retag(scope,key,t.value.trim())}});
 }
 
-/** Reveal: approval may pop up on the desktop first, so the bar says it is waiting. */
+/**
+ * Reveal: approval may pop up on the desktop first, so the bar says it is
+ * waiting — churning, like ciphertext being worked on. The value then
+ * decrypts into place as the bar lifts, and goes back into ciphertext when
+ * the bar falls (motion.ts).
+ */
 async function reveal(where,scope,key,bar,plain,btn){
   if(bar.classList.contains("open")){if(bar._hide)bar._hide();return}
   bar.classList.add("wait");btn.disabled=true;btn.lastChild.textContent="Waiting…";
   bar.setAttribute("aria-busy","true");
+  const settle=churn(bar.querySelector(".masked"));
   let value;
   try{value=(await api("/api/reveal",{scope:scope,key:key,where:where})).value}
-  catch(e){bar.classList.remove("wait");btn.disabled=false;btn.lastChild.textContent="Reveal";bar.removeAttribute("aria-busy");return}
+  catch(e){settle();bar.classList.remove("wait");btn.disabled=false;btn.lastChild.textContent="Reveal";bar.removeAttribute("aria-busy");return}
+  settle();
   bar.classList.remove("wait");bar.removeAttribute("aria-busy");
-  plain.textContent=value;
+  decrypt(plain,value);
   bar.classList.add("open");btn.disabled=false;
   btn.replaceChildren(icon("eyeoff"),document.createTextNode("Hide"));
   const copy=h("button",{type:"button",class:"btn sm ghost",onclick:async function(){
@@ -338,8 +345,9 @@ async function reveal(where,scope,key,bar,plain,btn){
   }},icon("copy"),"Copy");
   btn.after(copy);
   const timer=setTimeout(hide,15000);
-  function hide(){clearTimeout(timer);bar.classList.remove("open");plain.textContent="";copy.remove();
-    btn.replaceChildren(icon("eye"),document.createTextNode("Reveal"));}
+  function hide(){clearTimeout(timer);copy.remove();
+    btn.replaceChildren(icon("eye"),document.createTextNode("Reveal"));
+    encrypt(plain,function(){bar.classList.remove("open");plain.textContent=""});}
   bar._hide=hide;
 }
 

@@ -112,7 +112,7 @@ function icon(name){
 
 function toast(msg,opts){
   const box=document.getElementById("toasts");
-  const t=h("div",{class:"toast"+(opts&&opts.error?" err":"")},h("span",{text:msg}));
+  const t=h("div",{class:"toast"+(opts&&opts.error?" err":"")},icon(opts&&opts.error?"alert":"check"),h("span",{text:msg}));
   if(opts&&opts.action){
     t.append(h("button",{type:"button",onclick:function(){t.remove();opts.action.run()}},opts.action.label));
   }

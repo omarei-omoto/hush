@@ -639,7 +639,12 @@ describe("the page script itself", () => {
     assert.equal((js.match(/\/api\/reveal/g) || []).length, 1, "something besides reveal() asks for a value");
     const start = js.indexOf("async function reveal(");
     const body = js.slice(start, js.indexOf("\n}\n", start));
-    assert.match(body, /plain\.textContent=value/, "the revealed value is not set as text");
+    // It decrypts into place (motion.ts), and what it ends as is text.
+    assert.match(body, /decrypt\(plain,value\)/, "the revealed value is not handed to decrypt()");
+    const d = js.indexOf("function decrypt(");
+    const decrypt = js.slice(d, js.indexOf("\n}\n", d));
+    assert.match(decrypt, /el\.textContent=text/, "decrypt() does not end with the value set as text");
+    assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML/.test(decrypt), "decrypt() builds markup");
     assert.match(body, /setTimeout\(hide,15000\)/, "a revealed value does not hide itself again");
   });
 

@@ -212,6 +212,7 @@ function addMenuButton(){
 
 /* What suggest.ts offers: null until asked, then the list. Asked again after any change. */
 let SUG=null;
+const SUG_SHOWN={};
 function loadSuggestions(){
   if(SUG!==null)return;
   SUG="asking";
@@ -225,7 +226,10 @@ function suggestionsCard(root,kinds,title){
   const list=SUG.filter(function(s){return (!root||s.roots.indexOf(root)>-1)&&(!kinds||kinds.indexOf(s.kind)>-1)});
   if(!list.length)return null;
   const LIMIT=3;
-  const card=h("section",{class:"card sugg","aria-label":"Suggested"},
+  // It rises into place the first time it shows here, not each time the page redraws.
+  const seen=(root||"")+"|"+(kinds||[]).join(",");
+  const fresh=!SUG_SHOWN[seen];SUG_SHOWN[seen]=true;
+  const card=h("section",{class:"card sugg beam"+(fresh?" rise":""),"aria-label":"Suggested"},
     h("div",{class:"sughead"},icon("spark"),h("b",{text:title||"Suggested"}),h("span",{class:"count",text:String(list.length)})));
   list.forEach(function(s,i){card.append(suggestionRow(s,i>=LIMIT))});
   if(list.length>LIMIT){

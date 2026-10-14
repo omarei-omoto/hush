@@ -16,7 +16,10 @@ export const STYLES = String.raw`<!doctype html>
   --bar:#111111; --bar-ink:#8C8A83;
   --ok:#2F6B47; --ok-bg:#E3EDE4; --warn:#8C5A0E; --warn-bg:#F3E8D2; --danger:#A5321F; --danger-bg:#F6E1DB;
   --focus:#111111; --shadow:0 1px 0 rgba(17,17,17,.04); --shadow-lg:0 18px 48px rgba(17,17,17,.16);
+  --glow:rgba(47,107,71,.10); --glow-top:rgba(47,107,71,.055);
   --sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,Roboto,"Helvetica Neue",sans-serif;
+  /* Headings: Manrope, the wordmark's face (font.ts), else the system's. */
+  --display:"Manrope",var(--sans);
   --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme:light;
 }
@@ -27,6 +30,7 @@ export const STYLES = String.raw`<!doctype html>
   --ok:#7FC59A; --ok-bg:rgba(127,197,154,.12); --warn:#E3B062; --warn-bg:rgba(227,176,98,.12);
   --danger:#EE8A77; --danger-bg:rgba(238,138,119,.12); --focus:#F2F1ED;
   --shadow:none; --shadow-lg:0 18px 48px rgba(0,0,0,.55);
+  --glow:rgba(127,197,154,.10); --glow-top:rgba(127,197,154,.06);
   color-scheme:dark;
 }}
 *{box-sizing:border-box}
@@ -91,6 +95,8 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .pcard{display:flex;flex-direction:column;gap:6px;text-align:left;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:inherit;font:inherit;cursor:pointer}
 .pcard:hover{border-color:var(--line-2)}
+.pcard{background-image:radial-gradient(240px circle at var(--mx,-300px) var(--my,-300px),var(--glow),transparent 70%);transition:border-color .15s,transform .15s}
+.pcard:hover{transform:translateY(-1px)}
 .pcard .ptop{display:flex;align-items:center;gap:8px}
 .pcard .pdir{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pcard .pmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
@@ -98,7 +104,7 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 /* The keys sidebar: every global key, ready to drag onto a project. */
 .keyside{position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:22px 14px 22px 16px;border-left:1px solid var(--line);background:var(--bg)}
 .khead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
-.khead h2{margin:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em}
+.khead h2{margin:0;font-family:var(--display);font-size:15px;font-weight:650;letter-spacing:-.02em}
 .khead p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
 .keyside .input{width:100%}
 .klist{display:flex;flex-direction:column;gap:14px}
@@ -165,12 +171,12 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .main{min-width:0;padding:36px 44px 96px}
 .page{max-width:1040px;margin:0 auto}
 .head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:24px}
-.head h1{margin:0;font-size:26px;line-height:1.2;font-weight:600;letter-spacing:-.03em}
+.head h1{margin:0;font-family:var(--display);font-size:28px;line-height:1.15;font-weight:650;letter-spacing:-.04em}
 .head p{margin:4px 0 0;color:var(--muted);max-width:62ch}
 .head .actions{display:flex;gap:8px;flex-wrap:wrap}
 .section{margin-top:28px}
 .sechead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:wrap}
-.sechead h2{margin:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em}
+.sechead h2{margin:0;font-family:var(--display);font-size:15px;font-weight:650;letter-spacing:-.02em}
 .sechead p{margin:2px 0 0;color:var(--muted);font-size:13px}
 .stack{display:flex;flex-direction:column;gap:12px}
 .page>.card+.card,.page>.card+details,.page>details+.card,.page>details+details,.page>.banner+.card,.page>.card+.banner{margin-top:12px}
@@ -194,11 +200,15 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .tabs a{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:2px solid transparent;color:var(--muted);text-decoration:none;font-weight:500;white-space:nowrap}
 .tabs a:hover{color:var(--ink)}
 .tabs a[aria-current=page]{color:var(--ink);border-bottom-color:var(--ink)}
+.tabs{position:relative}
+.tabs.slid a[aria-current=page]{border-bottom-color:transparent}
+.tabline{position:absolute;bottom:0;height:2px;border-radius:2px;background:var(--ink);pointer-events:none;
+  transition:left .34s cubic-bezier(.2,.75,.25,1),width .34s cubic-bezier(.2,.75,.25,1)}
 .tabs .count{font-size:12px;color:var(--muted)}
 .tablead{margin:0 0 18px;color:var(--muted)}
 .meter{display:inline-flex;gap:3px;width:56px;flex:0 0 auto}
 .meter i{flex:1;height:5px;border-radius:3px;background:var(--line)}
-.meter i.on{background:var(--ink)}
+.meter i.on{background:var(--ok)}
 .meter.big{width:120px;align-self:center}
 /* Setup, folded into one line until opened. */
 .fold-card>summary{display:flex;align-items:center;gap:10px;padding:10px 12px 10px 16px;cursor:pointer;list-style:none;flex-wrap:wrap}
@@ -259,7 +269,7 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
   font-weight:500;cursor:pointer;white-space:nowrap;box-shadow:var(--shadow);transition:background .12s,border-color .12s}
 .btn:hover{background:var(--sunken)}
 .btn:disabled{opacity:.5;cursor:default}
-.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:var(--brand-ink);box-shadow:0 8px 22px -12px var(--glow),0 1px 0 rgba(255,255,255,.06) inset}
 .btn.primary:hover{background:var(--brand);opacity:.86}
 .btn.danger{background:var(--danger);border-color:var(--danger);color:#fff}
 .btn.sm{height:28px;padding:0 10px;font-size:13px;border-radius:7px}
@@ -304,7 +314,7 @@ textarea.input{height:auto;min-height:96px;padding:8px 10px;font-family:var(--mo
 /* ------------------------------------------------------------------ cards */
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
 .card.pad{padding:18px 20px}
-.card h3{margin:0;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.card h3{margin:0;font-family:var(--display);font-size:15.5px;font-weight:650;letter-spacing:-.02em}
 .card .lead{margin:4px 0 0;color:var(--muted)}
 .banner{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;border-radius:10px;font-size:13.5px;background:var(--sunken);color:var(--ink-2)}
 .banner.warn{background:var(--warn-bg);color:var(--warn)}
@@ -364,7 +374,8 @@ textarea.input{height:auto;min-height:96px;padding:8px 10px;font-family:var(--mo
 .bar .timer{position:absolute;left:0;bottom:0;height:2px;background:var(--warn);width:0}
 .bar.open .timer{animation:drain 15s linear forwards}
 @keyframes drain{from{width:100%}to{width:0}}
-.bar.wait .masked{animation:pulse 1.2s ease-in-out infinite}
+.bar.wait .masked{animation:pulse 1.2s ease-in-out infinite;color:var(--ok)}
+.bar .cipher{color:var(--ok)}
 @keyframes pulse{50%{opacity:.6}}
 @media (prefers-reduced-motion:reduce){.bar .masked{transition:none}.bar.open .timer,.bar.wait .masked{animation:none}}
 .addkey{border-top:1px dashed var(--line);padding:10px 14px 12px 16px}
@@ -412,7 +423,7 @@ dialog.wide{width:min(820px,calc(100vw - 32px))}
 dialog::backdrop{background:rgba(17,17,17,.42);backdrop-filter:blur(2px)}
 dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)}
 .dlg .dh{padding:20px 22px 0}
-.dlg .dh h2{margin:0;font-size:18px;font-weight:600;letter-spacing:-.02em}
+.dlg .dh h2{margin:0;font-family:var(--display);font-size:19px;font-weight:650;letter-spacing:-.03em}
 .dlg .dh p{margin:4px 0 0;color:var(--muted)}
 .dlg .db{padding:18px 22px;overflow:auto;display:flex;flex-direction:column;gap:14px}
 .dlg .df{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px;border-top:1px solid var(--line)}
@@ -432,6 +443,52 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
   font-size:13.5px;box-shadow:var(--shadow-lg);max-width:min(560px,90vw)}
 .toast.err{background:var(--danger);color:#fff}
 .toast button{background:none;border:1px solid currentColor;color:inherit;border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer;opacity:.9}
+
+/* ----------------------------------------------------------------- motion */
+/* As on tryhush.dev (motion.ts does the moving): a paper grain, a faint
+   light at the top of the page, a view that rises into place, suggestions
+   with a light running round them, and toasts, dialogs and menus that
+   arrive rather than appear. */
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.035;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+.main{background:radial-gradient(1100px 420px at 50% -220px,var(--glow-top),transparent 70%) no-repeat}
+@keyframes rise{from{opacity:0;transform:translateY(8px);filter:blur(5px)}to{opacity:1;transform:none;filter:none}}
+.page.enter>*,.rise{animation:rise .55s cubic-bezier(.2,.75,.25,1) both}
+.page.enter>*:nth-child(2){animation-delay:.05s}
+.page.enter>*:nth-child(3){animation-delay:.1s}
+.page.enter>*:nth-child(4){animation-delay:.15s}
+.page.enter>*:nth-child(5){animation-delay:.2s}
+.page.enter>*:nth-child(n+6){animation-delay:.25s}
+@keyframes fill{from{transform:scaleX(0)}}
+.page.enter .meter i.on{transform-origin:left;animation:fill .5s cubic-bezier(.2,.75,.25,1) .2s both}
+.page.enter .meter i.on:nth-child(2){animation-delay:.28s}
+.page.enter .meter i.on:nth-child(3){animation-delay:.36s}
+.page.enter .meter i.on:nth-child(4){animation-delay:.44s}
+.page.enter .meter i.on:nth-child(5){animation-delay:.52s}
+/* A light that runs round the suggestions' border. */
+@property --beam{syntax:"<angle>";inherits:false;initial-value:0deg}
+.beam{position:relative}
+.beam::before{content:"";position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;
+  background:conic-gradient(from var(--beam),transparent 0 72%,var(--ok) 86%,transparent 100%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;
+  animation:beam 7s linear infinite;opacity:.8}
+@keyframes beam{to{--beam:360deg}}
+.sughead b{font-family:var(--display);font-weight:650;letter-spacing:-.015em}
+@keyframes toast-in{from{opacity:0;transform:translateY(10px) scale(.96);filter:blur(4px)}}
+.toast{animation:toast-in .36s cubic-bezier(.2,.9,.3,1.15) both}
+.toast svg.i{width:15px;height:15px;opacity:.85}
+@keyframes dlg-in{from{opacity:0;transform:translateY(10px) scale(.98)}}
+@keyframes fade-in{from{opacity:0}}
+dialog[open]{animation:dlg-in .26s cubic-bezier(.2,.8,.25,1) both}
+dialog[open]::backdrop{animation:fade-in .22s ease both}
+dialog::backdrop{backdrop-filter:blur(4px)}
+@keyframes menu-in{from{opacity:0;transform:translateY(-4px) scale(.98)}}
+.menu{animation:menu-in .14s ease-out both}
+@media (prefers-reduced-motion:reduce){
+  .page.enter>*,.rise,.page.enter .meter i.on,.toast,dialog[open],dialog[open]::backdrop,.menu,.beam::before{animation:none}
+  .tabline{transition:none}
+  .pcard,.pcard:hover{transform:none}
+}
 
 /* -------------------------------------------------------------- responsive */
 /* Not enough room for three columns: the keys open as a drawer over the page. */
@@ -473,6 +530,10 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
   .srow>input[type=checkbox]{grid-column:1;grid-row:1 / span 4;align-self:start;margin-top:3px}
   .srow>.badge{justify-self:start}
   .set .title .count{display:none}
+  /* A suggestion's sentence gets the width; its buttons go under it. */
+  .sug{flex-wrap:wrap;row-gap:6px}
+  .sug .stext{flex:1 1 calc(100% - 30px)}
+  .sug .btn{margin-left:26px}
 }
 </style></head><body>
 `;

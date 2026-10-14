@@ -243,6 +243,7 @@ function render(){
   renderKeys();
   const page=document.getElementById("page");clear(page);
   const r=route();
+  entering(page,r+"|"+(CUR||""));
   // A vault that changed without anyone here accepting it: nothing in it is
   // decrypted, and the way out is a terminal command, on every section.
   if(S.trust&&S.trust.length){
@@ -256,6 +257,7 @@ function render(){
   else if(r==="team")renderTeam(page);
   else if(r==="agent")renderAgent(page);
   else renderActivity(page);
+  slideTabline();
   document.title=(PROJECT_TABS.indexOf(r)>-1?folderName()+(r==="project"?"":" · "+SECTIONS.find(function(s){return s[0]===r})[1]):SECTIONS.find(function(s){return s[0]===r})[1])+" · hush";
 }
 window.addEventListener("hashchange",function(){if(route()==="activity")AUDIT=null;render();window.scrollTo(0,0)});

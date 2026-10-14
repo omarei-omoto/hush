@@ -111,8 +111,9 @@ export function serveUi(opts: { port?: number; open?: boolean } = {}): void {
           // frame-ancestors: no other page may frame this one and trick a
           // click on Reveal or Remove. base-uri/form-action: nothing injected
           // could redirect a relative URL or a form post off this origin.
+          // font-src data: is the headings' face, embedded in the page (ui/font.ts).
           "content-security-policy":
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; " +
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; font-src data:; " +
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
           "referrer-policy": "no-referrer",
           "x-content-type-options": "nosniff",

@@ -28,14 +28,19 @@
  * or the dollar-brace sequence.
  */
 import { STYLES } from "./ui/styles.ts";
+import { FONT } from "./ui/font.ts";
 import { FOUNDATIONS } from "./ui/foundations.ts";
 import { ACTIONS } from "./ui/actions.ts";
 import { SECTIONS } from "./ui/sections.ts";
 import { AGENT } from "./ui/agent.ts";
 import { HUB_UI } from "./ui/hub.ts";
 import { VIEWS } from "./ui/views.ts";
+import { MOTION } from "./ui/motion.ts";
 import { IMPORT } from "./ui/import.ts";
 import { builtPage } from "./assets.ts";
 
+/** The stylesheet, with the headings' face (font.ts) at its top. */
+const STYLED = STYLES.replace("<style>", "<style>" + FONT);
+
 /** The whole document, in order — or, in the binary, the same document as its build embedded it (assets.ts). */
-export const PAGE = builtPage() ?? STYLES + FOUNDATIONS + ACTIONS + SECTIONS + AGENT + HUB_UI + VIEWS + IMPORT;
+export const PAGE = builtPage() ?? STYLED + FOUNDATIONS + ACTIONS + SECTIONS + AGENT + HUB_UI + VIEWS + MOTION + IMPORT;

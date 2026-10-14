@@ -1,0 +1,11 @@
+Usage: firebase functions:secrets:set [options] <KEY>
+
+create or update a secret for use in Cloud Functions for Firebase
+
+Options:
+  -f, --force             automatically updates functions to use the new secret
+  --data-file <dataFile>  file path from which to read secret data. Set to "-"
+                          to read the secret data from stdin
+  --format <format>       format of the secret value. 'string' (default) or
+                          'json'
+  -h, --help              display help for command

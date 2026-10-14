@@ -1,0 +1,67 @@
+[m[1mNAME[m
+    gcloud secrets versions add - create a new version of an existing secret
+
+[m[1mSYNOPSIS[m
+    [1mgcloud secrets versions add[m [4mSECRET[m [1m--data-file[m=[4mPATH[m [[4mGCLOUD_WIDE_FLAG ...[m]
+
+[m[1mDESCRIPTION[m
+    Create a new version of an existing secret with the provided data. The
+    command will return an error if no such secret exists.
+
+[m[1mEXAMPLES[m
+    Create a new version of an existing secret named 'my-secret' with secret
+    data "s3cr3t":
+
+        $ printf "s3cr3t" | gcloud secrets versions add my-secret \
+            --data-file=-
+
+    Create a new version of an existing secret named 'my-secret' with secret
+    data "s3cr3t" using PowerShell (Note: PowerShell will add a newline to the
+    resulting secret):
+
+        $ Write-Output "s3cr3t" | gcloud secrets versions add my-secret \
+            --data-file=-
+
+    Create a new version of an existing secret named 'my-secret' with secret
+    data from a file:
+
+        $ gcloud secrets versions add my-secret --data-file=/tmp/secret
+
+[m[1mPOSITIONAL ARGUMENTS[m
+     Secret resource - The secret to create. This represents a Cloud resource.
+     (NOTE) Some attributes are not given arguments in this group but can be
+     set in other ways.
+
+     To set the [1mproject[m attribute:
+      ◆ provide the argument [1mSECRET[m on the command line with a fully
+        specified name;
+      ◆ provide the argument [1m--project[m on the command line;
+      ◆ set the property [1mcore/project[m.
+
+     This must be specified.
+
+       [4mSECRET[m
+          ID of the secret or fully qualified identifier for the secret.
+
+          To set the [1msecret[m attribute:
+          ▸ provide the argument [1mSECRET[m on the command line.
+
+[m[1mREQUIRED FLAGS[m
+     [1m--data-file[m=[4mPATH[m
+        File path from which to read secret data. Set this to "-" to read the
+        secret data from stdin.
+
+[m[1mGCLOUD WIDE FLAGS[m
+    These flags are available to all commands: --access-token-file, --account,
+    --billing-project, --configuration, --flags-file, --flatten, --format,
+    --help, --impersonate-service-account, --log-http, --project, --quiet,
+    --trace-token, --user-output-enabled, --verbosity.
+
+    Run [1m$ gcloud help[m for details.
+
+[m[1mNOTES[m
+    This variant is also available:
+
+        $ gcloud beta secrets versions add
+
+[m

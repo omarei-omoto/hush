@@ -8,7 +8,7 @@ import { writePolicies } from "./helpers/policy.ts";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1157,6 +1157,72 @@ describe("mcp setup status", () => {
       assert.match(other.result?.content?.[0]?.text ?? "", /hush_setup_status/);
     } finally {
       rmSync(bare, { recursive: true, force: true });
+      p.cleanup();
+    }
+  });
+});
+
+describe("mcp: sending a key to a host (hush_push) and one value on stdin (hush_run stdin)", { skip: process.platform === "win32" && "stand-in CLI is a POSIX script" }, () => {
+  /** A stand-in wrangler: the real CLI's help, and a record of what it was run with. */
+  const fakeWrangler = (dir: string, log: string) => {
+    const help = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "hosts", "cloudflare.help.txt"), "utf8");
+    const path = join(dir, "wrangler");
+    writeFileSync(path, `#!${process.execPath}
+const fs = require("fs"); const argv = process.argv.slice(2);
+if (argv[0] === "--version") { console.log("4.151.0"); process.exit(0); }
+if (argv.join(" ") === "secret put --help") { process.stdout.write(${JSON.stringify(help)}); process.exit(0); }
+const stdin = fs.readFileSync(0, "utf8");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, stdin }) + "\\n");
+console.log("Success! Uploaded secret, which was " + stdin);
+`, { mode: 0o755 });
+  };
+
+  test("hush_push sends the value on stdin, masks it in what the agent gets back, and is refused without an approval", async () => {
+    const p = project();
+    const bin = mkdtempSync(join(tmpdir(), "hush-mcp-fakecli-"));
+    const log = join(bin, "calls.jsonl");
+    try {
+      fakeWrangler(bin, log);
+      writeFileSync(join(p.root, "wrangler.jsonc"), '{ "name": "linkdaisy" }');
+      const s = await talk(p, [init, call(1, "hush_push", { key: "API_KEY", to: "cloudflare" })], { PATH: `${bin}:${process.env.PATH}` });
+      const text = s.replies.find((r) => r.id === 1)?.result?.content?.[0]?.text ?? "";
+      assert.match(text, /Sent API_KEY to Cloudflare Workers Worker linkdaisy/, text);
+      assert.ok(!text.includes("super-secret-value-here"), `the value reached the agent:\n${text}`);
+      const call1 = JSON.parse(readFileSync(log, "utf8").trim().split("\n")[0]);
+      assert.deepEqual(call1.argv, ["secret", "put", "API_KEY", "--name", "linkdaisy"]);
+      assert.equal(call1.stdin, "super-secret-value-here");
+
+      // A host it does not drive, and a key the run does not get, are refused with the reason.
+      const bad = await talk(p, [init, call(2, "hush_push", { key: "API_KEY", to: "netlify" }), call(3, "hush_push", { key: "NOPE", to: "cloudflare" })], { PATH: `${bin}:${process.env.PATH}` });
+      assert.match(bad.replies.find((r) => r.id === 2)?.result?.content?.[0]?.text ?? "", /cannot send to "netlify"/);
+      assert.match(bad.replies.find((r) => r.id === 3)?.result?.content?.[0]?.text ?? "", /does not get NOPE/);
+    } finally {
+      p.cleanup();
+      rmSync(bin, { recursive: true, force: true });
+    }
+
+    // With approvals on and no way to show one, nothing is sent.
+    const q = project({ requireApproval: ["request"] });
+    const bin2 = mkdtempSync(join(tmpdir(), "hush-mcp-fakecli-"));
+    const log2 = join(bin2, "calls.jsonl");
+    try {
+      fakeWrangler(bin2, log2);
+      const s = await talk(q, [init, call(1, "hush_push", { key: "API_KEY", to: "cloudflare", target: "w" })], { PATH: `${bin2}:${process.env.PATH}` });
+      assert.equal(s.replies.find((r) => r.id === 1)?.result?.isError, true);
+      assert.ok(!existsSync(log2), "the CLI ran without an approval");
+    } finally {
+      q.cleanup();
+      rmSync(bin2, { recursive: true, force: true });
+    }
+  });
+
+  test("hush_run's stdin puts that one value on the command's standard input", async () => {
+    const p = project({ allowCommands: ["npm"], unsafeAllowCommands: [] });
+    try {
+      const s = await talk(p, [init, call(1, "hush_run", { command: "npm", args: ["--version"], stdin: "API_KEY" }), call(2, "hush_run", { command: "npm", args: ["--version"], stdin: "NOPE" })]);
+      assert.match(s.replies.find((r) => r.id === 1)?.result?.content?.[0]?.text ?? "", /exit 0/);
+      assert.match(s.replies.find((r) => r.id === 2)?.result?.content?.[0]?.text ?? "", /does not get NOPE/);
+    } finally {
       p.cleanup();
     }
   });

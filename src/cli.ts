@@ -17,6 +17,7 @@ import { cmdStart } from "./commands/start.ts";
 import { cmdImport } from "./commands/import.ts";
 import { cmdAccounts, cmdEnvs, cmdLs } from "./commands/ls.ts";
 import { cmdUse } from "./commands/use.ts";
+import { cmdPush } from "./commands/push.ts";
 import { cmdGet } from "./commands/get.ts";
 import { cmdRm } from "./commands/rm.ts";
 import { cmdExport } from "./commands/export.ts";
@@ -67,6 +68,7 @@ const COMMANDS: Record<string, (a: Args) => Promise<void>> = {
   run: cmdRun,
   exec: cmdRun,
   request: cmdRequest,
+  push: cmdPush,
   dev: cmdDev,
   scan: cmdScan,
   team: cmdTeam,

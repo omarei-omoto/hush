@@ -1,0 +1,51 @@
+Usage: convex env set [options] <name> <value>
+
+Set environment variables on your deployment.
+
+• `npx convex env set NAME 'value'`
+• `npx convex env set NAME # omit a value to set one interactively`
+• `npx convex env set NAME --from-file value.txt`
+• `npx convex env set --from-file .env.defaults`
+
+When setting multiple values, it will refuse all changes if any variables are
+already set to different values by default. Pass --force to overwrite the
+provided values.
+
+To keep secrets out of your shell history, omit the value to pipe it in via
+stdin, for instance:
+• `pbpaste | npx convex env set API_KEY` (macOS)
+• `Get-Clipboard | npx convex env set API_KEY` (Windows PowerShell)
+
+To update many variables at once, save them with `npx convex env list >
+.env.convex`, edit the file, then reapply the changes with `npx convex env set
+--force < .env.convex`.
+
+Arguments:
+  name                       The name of the environment variable to set.
+  value                      The value to set the variable to. Omit to set it
+                             interactively.
+
+Options:
+  --from-file <file>         Read environment variables from a .env file.
+                             Without --force, fails if any existing variable has
+                             a different value.
+  --force                    When setting multiple variables, overwrite existing
+                             environment variable values instead of failing on
+                             mismatch.
+  -h, --help                 display help for command
+
+Global Options:
+  --prod                     Set and view environment variables on this
+                             project's default production deployment.
+  --deployment <deployment>  Set and view environment variables on a specific
+                             deployment. Accepts:
+                             • a deployment name (e.g. joyful-capybara-123)
+                             • a deployment reference (e.g. dev/james, staging)
+                             • `dev` (for your personal dev deployment)
+                             • `prod` (for your project’s default production
+                             deployment)
+                             • `local` (for your local dev deployment).
+                             You can also select deployments in other projects
+                             with `project-slug:reference` or
+                             `team-slug:project-slug:reference`.
+  -V, --version              output the version number

@@ -109,6 +109,36 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   menu. Setup folds into one line, only missing keys show until you open the
   rest, and Home's folders card is one line.
 
+### Sending keys to your hosts
+
+- **`hush push KEY --to <host>`** sends a key to where the app runs, through
+  the host's own CLI with the value on its standard input: never on a command
+  line, never through a shell, never through the chat. Fourteen hosts:
+  Cloudflare Workers and Pages, Vercel, Convex, Fly.io, Railway, Firebase
+  Functions, GitHub Actions, GitLab CI/CD, Google Cloud Secret Manager, Koyeb,
+  Fastly, Pulumi and SST. The Worker, app or project comes from the project's
+  own config (wrangler.jsonc, fly.toml, .firebaserc) unless `--target` names one.
+- **Exactly the value you keep, or nothing.** Each host's CLI was checked —
+  its source, and its help as installed and as published — for how it reads
+  stdin; hush refuses a value that CLI would change (whitespace it trims, lines
+  it splits, sizes it cuts), and a CLI that is not one of the versions checked
+  (its help must show the flags relied on; where help cannot show it, a
+  minimum version). Railway before `variable set --stdin`, for example, is
+  refused with the update to make. `npm run check:hosts` re-runs every check
+  against the CLIs installed, or the latest published ones.
+- **hush remembers where each key went** (in `~/.hush`, never in the
+  repository), so `hush push --again` sends a replaced value everywhere it
+  went, `hush push --list` says which places have an old value, and the app
+  suggests sending the new one.
+- **In the app:** a key's ⋯ menu has **Send to a host…**, and each key shows
+  where it was sent. **For your agent:** `hush_push`, approved like a request.
+- **`hush run --stdin KEY -- <cmd>`** writes one value to a command's standard
+  input, for any other CLI that reads a secret that way; `hush_run` takes
+  `stdin: "KEY"`.
+- Hosts whose CLIs take a secret only as an argument — Netlify, Render, Heroku,
+  Expo EAS, Deno Deploy and others — are left out on purpose: an argument is
+  in the process list, and in an agent's transcript.
+
 ## 0.12.0 — 2026-10-04
 
 Fixes from a deep review of 0.11.1 (docs/AUDIT.md, sixteenth pass): 33 findings,

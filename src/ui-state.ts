@@ -17,6 +17,8 @@ import { AGENTS, mcpRegistrations } from "./agents.ts";
 import { Vault, ValidationError } from "./vault.ts";
 import { librarySets, openGlobal, usedSets, globalVaultName, globalVaultExists, namedVaults, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor, placeOf, allowedAt, parseKeyLink, parseGroupLink, libraryGroups, setsInGroup, sameFolder } from "./library.ts";
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
+import { isStale, pushesFor } from "./push.ts";
+import { hostById } from "./hosts.ts";
 import { CATALOG } from "./services.ts";
 import { preview } from "./redact.ts";
 import { isTrustError } from "./integrity.ts";
@@ -388,6 +390,19 @@ export function state(ctx: UiCtx) {
     // not work on the keys inside it, and the state everyone starts in is one
     // big unnamed pile that needs carving up.
     library: librarySetsOut,
+    // Where this project's keys were sent from this machine (push.ts), and
+    // which of them have a newer value here than there.
+    pushes: pushesFor(place).map((r) => ({
+      key: r.key,
+      host: r.host,
+      label: hostById(r.host)?.label ?? r.host,
+      ...(r.name ? { name: r.name } : {}),
+      ...(r.target ? { target: r.target } : {}),
+      ...(r.env ? { env: r.env } : {}),
+      at: r.at,
+      ...(r.source ? { where: r.source.where, set: r.source.set } : {}),
+      stale: isStale(r, vault, libraryVault) === true,
+    })),
     // Folders of global sets: a project can use one whole ("group:<slug>").
     groups: libraryGroups(libraryVault).map((g) => ({
       name: g.slug,

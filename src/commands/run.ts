@@ -84,6 +84,13 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
   // Parsed and described before any approval, so the dialog can name the files
   // and a bad spec fails without a prompt in the way. Nothing is written yet.
   const specs = repeat(a, "materialize").map(parseMaterializeSpec);
+  // --stdin KEY: that one value to the command's standard input, so a CLI that
+  // reads a secret from stdin (wrangler secret put, gh secret set) gets it
+  // without a shell, and without it ever being on a command line.
+  const stdinKey = str(a, "stdin");
+  if (stdinKey !== undefined && !(stdinKey in secrets)) {
+    die(`--stdin ${stdinKey}: a run here does not get ${stdinKey}.`, "hush ls shows what this project uses.");
+  }
   const materializePlan = specs.length ? describeMaterialize(specs, secrets) : [];
 
   // The deny list (node, python, bash, curl, …) exists for the agent's tools,
@@ -133,6 +140,7 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
           ...(unmasked ? ["Unmasked:  --no-redact — anything this command prints, injected values included, is shown as is"] : []),
           `Using sets:  ${layers.join(", ") || "(none)"}`,
           `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
+          ...(stdinKey ? [`Stdin:  the value of ${stdinKey}`] : []),
           `Directory:  ${process.cwd()}`,
           ...(riskyCommand
             ? [`Note:  ${basename(argv[0])} can print or send any injected value — allow it only if you started this`]
@@ -218,6 +226,7 @@ export async function runCommand(a: Args, argv: string[]): Promise<void> {
     redact: !bool(a, "no-redact"),
     redactOmit,
     capture: false,
+    ...(stdinKey ? { stdinText: secrets[stdinKey] } : {}),
   })
     .catch((e) => die(`could not run "${argv[0]}": ${e.message}`))
     .finally(cleanupFiles);

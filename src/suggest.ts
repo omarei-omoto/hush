@@ -6,6 +6,7 @@
  *   - plaintext    a .env with values sits in a project's folder: import it
  *   - only-one     a global set exactly one project uses: keep it there
  *   - replace      a global key someone removed could still use, or past its rotation age
+ *   - repush       a key was sent to a host (push.ts), and has a newer value here
  *   - group        projects sharing a parent folder or a git owner: group them
  *
  * Worked out on this machine from names and metadata — the one exception is
@@ -14,19 +15,22 @@
  * not offered again.
  */
 import { createHash } from "node:crypto";
-import { basename, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { Vault } from "./vault.ts";
+import { Vault } from "./vault.ts";
 import type { Opener } from "./crypto.ts";
 import { allowedAt, librarySets, ownerOf, suggestSets, type LibrarySet } from "./library.ts";
 import { soleUsers } from "./placement.ts";
 import { crawlRoots, dismissedSuggestions } from "./projects.ts";
 import { keyAges, describeAge } from "./freshness.ts";
 import type { HubProject } from "./ui-state.ts";
+import { isStale, pushesFor } from "./push.ts";
+import { hostById } from "./hosts.ts";
 
 export interface Suggestion {
   id: string;
-  kind: "give" | "same-value" | "plaintext" | "only-one" | "replace" | "group";
+  kind: "give" | "same-value" | "plaintext" | "only-one" | "replace" | "repush" | "group";
   /** The projects it is about. */
   roots: string[];
   /** One sentence; names in it are in `names`, so the page can set them apart. */
@@ -164,6 +168,32 @@ export function suggestions(o: {
         names: [a.key, label],
         label: "Replace…",
         act: { replace: { where: "library", set: a.set, key: a.key } },
+      });
+    }
+  }
+
+  // repush: sent to a host, then replaced here — the host still has the old value.
+  for (const p of o.projects) {
+    const sent = pushesFor(p.root);
+    if (!sent.length) continue;
+    let project: Vault | null = null;
+    try {
+      const f = join(p.root, ".hush", "vault.json");
+      project = existsSync(f) ? Vault.open(f) : null;
+    } catch { /* unreadable here: nothing to compare */ }
+    for (const r of sent) {
+      if (isStale(r, project, o.library) !== true || !r.source) continue;
+      const host = hostById(r.host);
+      if (!host) continue;
+      const where = `${host.label}${r.target ? ` · ${r.target}` : ""}${r.env ? ` (${r.env})` : ""}`;
+      out.push({
+        id: sid("repush", p.root, r.key, r.host, r.target ?? "", r.env ?? "", r.source.updatedAt),
+        kind: "repush",
+        roots: [p.root],
+        text: `${r.key} changed after it was sent to ${where}, which still has the old value.`,
+        names: [r.key, where],
+        label: "Send the new value",
+        act: { repush: { project: p.root, key: r.key, to: r.host, where: r.source.where, set: r.source.set, ...(r.target ? { target: r.target } : {}), ...(r.env ? { env: r.env } : {}), ...(r.name ? { as: r.name } : {}) } },
       });
     }
   }

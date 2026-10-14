@@ -1,0 +1,17 @@
+Set a variable
+
+Usage: railway variable set [OPTIONS] <VARIABLES>...
+
+Arguments:
+  <VARIABLES>...  Variable(s) in KEY=VALUE format, or just KEY when using --stdin
+
+Options:
+  -s, --service <SERVICE>          The service to set the variable for
+  -e, --environment <ENVIRONMENT>  The environment to set the variable in
+  -p, --project <PROJECT_ID>       Project ID to use (defaults to linked project)
+      --stdin                      Read the value from stdin instead of the command line (only with single KEY)
+      --skip-deploys               Skip triggering deploys when setting the variable
+      --json                       Output in JSON format
+  -h, --help                       Print help
+  -V, --version                    Print version
+

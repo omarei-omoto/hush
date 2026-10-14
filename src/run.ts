@@ -36,6 +36,12 @@ export interface RunOptions {
   redactOmit?: string[];
   /** Collect output instead of streaming it to this process's stdio. */
   capture?: boolean;
+  /**
+   * Written to the child's standard input, then closed — instead of passing
+   * this process's own stdin through. How one value reaches a command that
+   * reads it from stdin (`hush run --stdin KEY`), never on its command line.
+   */
+  stdinText?: string;
   timeoutMs?: number;
 }
 
@@ -95,8 +101,14 @@ export function runWithSecrets(
       ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       // stdout/stderr are always piped so the redactor can see them; only the
       // destination differs between capture and stream mode.
-      stdio: ["inherit", "pipe", "pipe"],
+      stdio: [opts.stdinText === undefined ? "inherit" : "pipe", "pipe", "pipe"],
     });
+    if (opts.stdinText !== undefined) {
+      // A command that exits without reading it all closes the pipe: its own
+      // business, not a crash here.
+      child.stdin!.on("error", () => {});
+      child.stdin!.end(Buffer.from(opts.stdinText, "utf8"));
+    }
 
     let stdout = "";
     let stderr = "";
@@ -108,15 +120,15 @@ export function runWithSecrets(
       return after;
     };
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
 
-    child.stdout.on("data", (chunk: string) => {
+    child.stdout!.on("data", (chunk: string) => {
       const safe = countMasks(outRedactor.push(chunk));
       if (opts.capture) stdout += safe;
       else process.stdout.write(safe);
     });
-    child.stderr.on("data", (chunk: string) => {
+    child.stderr!.on("data", (chunk: string) => {
       const safe = countMasks(errRedactor.push(chunk));
       if (opts.capture) stderr += safe;
       else process.stderr.write(safe);

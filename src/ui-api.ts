@@ -15,6 +15,8 @@ import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjec
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName, libraryGroups, placeOf, sameFolder } from "./library.ts";
 import { fileUnder, keepHere, makeGlobal, renameGroup, shareOneCopy, soleUsers, tidy, ungroup } from "./placement.ts";
 import { suggestions } from "./suggest.ts";
+import { HOSTS, detectHosts, hostById } from "./hosts.ts";
+import { planPush, programLine, recordPush, runPush } from "./push.ts";
 import { addProject, crawlRoots, dismissSuggestion, hideProject, isKnownProject, isListedRoot, removeProject, renameProjectGroup, rescanProject, setCrawlRoots, setProjectGroup, showProject, startCrawl, ungroupProjects } from "./projects.ts";
 import { fileManagerCommand } from "./platform.ts";
 import { chooseFolder, detectBackend } from "./dialogs.ts";
@@ -322,6 +324,75 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
         library = openGlobal();
       } catch { /* no readable library: nothing to suggest about it */ }
       return json(res, 200, { suggestions: suggestions({ projects: hub.projects, library, id, policy: loadPolicy(ctx.hushDir) }) });
+    }
+
+    /** The hosts a key can be sent to, the ones this project's files name, and where its keys went. */
+    case "/api/push-hosts": {
+      const place = placeOf(ctx.hushDir);
+      return json(res, 200, {
+        hosts: HOSTS.map((h) => ({
+          id: h.id,
+          label: h.label,
+          target: h.target ? { noun: h.target.noun, required: h.target.required } : null,
+          env: h.env ? { noun: h.env.noun, choices: h.env.choices ?? null, default: h.env.default ?? null, required: Boolean(h.env.required) } : null,
+          deploys: h.deploys,
+          after: h.after,
+        })),
+        detected: detectHosts(place),
+      });
+    }
+
+    /**
+     * Send one key — the value in the set named — to a host through its CLI,
+     * the value on stdin (push.ts). Asks first where the policy says "request".
+     */
+    case "/api/push": {
+      const host = hostById(String(body.to ?? ""));
+      if (!host) return json(res, 400, { error: "hush cannot send to that host" });
+      const key = String(body.key ?? "");
+      const set = String(body.set ?? "");
+      const from = body.where === "project" ? openProjectVault(ctx) : openGlobal();
+      if (!from || !from.has(set, key)) return json(res, 400, { error: `no ${key} in that set` });
+      const value = from.get(id, set, key);
+      const place = placeOf(ctx.hushDir);
+      const target = typeof body.target === "string" && body.target.trim() ? body.target.trim() : (host.target?.detect?.(place) ?? undefined);
+      const plan = planPush(host, key, value, {
+        ...(typeof body.as === "string" && body.as.trim() ? { name: body.as.trim() } : {}),
+        ...(target ? { target } : {}),
+        ...(typeof body.env === "string" && body.env.trim() ? { env: body.env.trim() } : {}),
+        ...(body.deploy === true ? { deploy: true } : {}),
+      });
+      const dest = `${host.label}${plan.opts.target ? ` ${host.target?.noun ?? ""} ${plan.opts.target}` : ""}${plan.opts.env ? ` (${plan.opts.env})` : ""}`;
+      const policy = loadPolicy(ctx.hushDir);
+      if (policy.requireApproval.includes("request")) {
+        const ap = await requestApproval(ctx.hushDir, {
+          action: "request",
+          summary: `Send ${key} to ${dest}`,
+          detail: [`Runs: ${plan.preview}`, programLine(host, place), "The value goes to the CLI's standard input, never on a command line."],
+          scope: `push:${host.id}/${plan.opts.target ?? ""}/${plan.opts.env ?? ""}/${key}`,
+          ttlSeconds: 0,
+          timeoutMs: Math.max(1, policy.approvalTimeoutSeconds) * 1000,
+          biometry: policy.biometry,
+          sessionGrant: false,
+        });
+        audit(ctx.hushDir, { actor: "ui", action: "approval", on: "push", key, decision: ap.decision, via: ap.via });
+        if (ap.decision === "deny" || ap.decision === "timeout") return json(res, 403, { error: ap.note ?? `Not approved (${ap.decision}).` });
+      }
+      const pushed = await runPush(plan, value, place);
+      audit(ctx.hushDir, { actor: "ui", action: "push", key, host: host.id, target: plan.opts.target, env: plan.opts.env, ok: pushed.ok });
+      if (pushed.ok) {
+        const item = from.list(set).find((i) => i.key === key);
+        recordPush(place, {
+          key,
+          host: host.id,
+          ...(plan.opts.name !== key ? { name: plan.opts.name } : {}),
+          ...(plan.opts.target ? { target: plan.opts.target } : {}),
+          ...(plan.opts.env ? { env: plan.opts.env } : {}),
+          at: new Date().toISOString(),
+          ...(item ? { source: { where: body.where === "project" ? "project" as const : "library" as const, set, updatedAt: item.updatedAt } } : {}),
+        });
+      }
+      return json(res, 200, { ...state(ctx), ok: pushed.ok, output: pushed.output, done: pushed.ok ? `${key} is in ${dest} now. ${host.after}` : `${host.bin} did not succeed — see its output` });
     }
 
     /** One copy instead of many: the same key and value kept as several projects' own (placement.ts). */

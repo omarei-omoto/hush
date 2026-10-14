@@ -86,6 +86,12 @@ machine, not just the folder you started it in.
   it from them. A set in the repository's vault can be made global too; if
   teammates read that vault, the app asks first, since they stop getting the
   key from the repository.
+- **Sending a key to a host:** a key's ⋯ menu has **Send to a host…** —
+  Cloudflare, Vercel, Fly, GitHub and the rest in
+  [Sending keys to your hosts](sending-keys-to-your-hosts.md). hush runs that
+  host's CLI on your machine with the value on its standard input. Each key
+  shows where it was sent; one that changed since says so, and a click sends
+  the new value.
 - **Global keys** suggests what to tidy: sets only one project uses (with
   **Keep all for their projects** when there are several), keys several
   projects keep the same copy of, and keys to replace.

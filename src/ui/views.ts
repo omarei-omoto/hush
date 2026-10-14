@@ -217,7 +217,7 @@ function loadSuggestions(){
   SUG="asking";
   api("/api/suggestions",{}).then(function(r){SUG=r.suggestions;if(SUG.length)render()},function(){SUG=[]});
 }
-const SUG_ICON={give:"key","same-value":"copy",plaintext:"alert","only-one":"folder",replace:"lock",group:"folder"};
+const SUG_ICON={give:"key","same-value":"copy",plaintext:"alert","only-one":"folder",replace:"lock",repush:"arrowup",group:"folder"};
 /** Suggestions about one project (root), of some kinds, or all of them; null when there are none. */
 function suggestionsCard(root,kinds,title){
   loadSuggestions();
@@ -259,6 +259,13 @@ async function runSuggestion(s,btn){
     else if(a.group){await fileProjects(a.group.roots,a.group.label)}
     else if(a.replace){replaceDialog(a.replace.where,a.replace.set,a.replace.key)}
     else if(a.importEnv){await importEnvOf(a.importEnv.project)}
+    else if(a.repush){
+      const x=a.repush;
+      if(x.project!==currentRoot()){setProject(x.project);location.hash="#project";await refresh()}
+      const r=await api("/api/push",{where:x.where,set:x.set,key:x.key,to:x.to,target:x.target,env:x.env,as:x.as});
+      await refresh(r);toast(r.done,r.ok?null:{error:true});
+      if(!r.ok&&r.output&&r.output.trim())cliOutputDialog(x.to,r.output);
+    }
   }finally{if(btn&&btn.isConnected)btn.disabled=false}
 }
 /* The .env sitting in a project's folder, read by the hush server and reviewed like a dropped one. */

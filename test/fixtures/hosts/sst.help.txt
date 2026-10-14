@@ -1,0 +1,16 @@
+Usage: sst secret set <name> [value]
+
+Flags:
+  --stage          The stage to deploy to
+  --verbose        Enable verbose logging
+  --print-logs     Print logs to stderr
+  --config         Path to the config file
+  --help           Print help
+  --fallback       Manage the fallback values of secrets
+
+Examples:
+  sst secret set StripeSecret 123456789
+  sst secret set StripeSecret < tmp.txt
+  sst secret set StripeSecret productionsecret --stage production
+
+Learn more at https://sst.dev

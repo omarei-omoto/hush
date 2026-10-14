@@ -10,6 +10,7 @@
 | `hush_add_secret` | **Have you type a new key on your screen**, never in the chat. |
 | `hush_run` | **Run a command with secrets injected.** Sees output, not values. |
 | `hush_request` | **Make an authenticated API call.** The secret goes in on the wire; the response comes back masked. |
+| `hush_push` | **Send a secret to where the app runs** (Cloudflare, Vercel, Fly, GitHub…) through that host's CLI, the value on its stdin. You approve each one. See [Sending keys to your hosts](sending-keys-to-your-hosts.md). |
 
 There is no `hush_get_secret`, and no flag that adds one. That is the whole
 design.

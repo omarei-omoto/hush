@@ -21,6 +21,11 @@ daily
   hush dev [script]                        find package.json, run it with them injected
   hush request [METHOD] <url> [--header 'Name: $VAR'] [--data @file]
                                            call an API with a secret injected, response redacted
+  hush push <KEY>… --to <host> [--target <name>] [--env <name>]
+                                           send keys to Cloudflare, Vercel, Fly, GitHub… via their CLIs, value on stdin
+  hush push --again [<KEY>…]               send the current value everywhere it was sent (after a rotation)
+  hush push --hosts | --list               the hosts hush can send to; where this project's keys went
+  hush run --stdin KEY -- <cmd>            that one value on the command's stdin, never its command line
   hush ls [<set>]                          library, project, what is used — or one set's keys
   hush ls [<set>] --age                    how long since each value was replaced, oldest first
   hush exposed                             values someone removed could still use, and where to replace them

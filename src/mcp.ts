@@ -254,8 +254,46 @@ export const TOOLS = [
             "Deprecated alias for sets (removed in hush 2.0): {\"fal\":\"acme\"} means the set named \"fal/acme\". Prefer sets.",
         },
         env: { type: "string", description: "Deprecated (removed in hush 2.0): the base set for this run, layered under sets. Prefer sets." },
+        stdin: {
+          type: "string",
+          description:
+            "The name of one key whose value is written to the command's standard input — for a CLI " +
+            "that reads a secret from stdin (e.g. `wrangler secret put NAME`). No shell needed, and the " +
+            "value is never on a command line. To send a key to a host, prefer hush_push.",
+        },
       },
       required: ["command"],
+    },
+  },
+  {
+    name: "hush_push",
+    description:
+      "Send one of the project's secrets to where the app runs — Cloudflare Workers or Pages, Vercel, " +
+      "Convex, Fly.io, Railway, Firebase Functions, GitHub Actions, GitLab CI, Google Cloud Secret " +
+      "Manager, Koyeb, Fastly, Pulumi or SST — through that host's own CLI, with the value on its " +
+      "standard input. The value never passes through you or a command line, and hush refuses a value " +
+      "the host's CLI would change. The user approves each push. Use this instead of telling the user " +
+      "to paste a key into a dashboard, and instead of `sh -c '... | wrangler secret put'`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "The key to send, e.g. 'STRIPE_SECRET_KEY'." },
+        to: {
+          type: "string",
+          enum: ["cloudflare", "cloudflare-pages", "vercel", "convex", "fly", "railway", "firebase", "github", "gitlab", "gcloud", "koyeb", "fastly", "pulumi", "sst"],
+          description: "The host.",
+        },
+        target: {
+          type: "string",
+          description:
+            "Which Worker, Pages project, app, repository, project, stack or store. Omit to use the one " +
+            "the project's own config names (wrangler.jsonc, fly.toml, .firebaserc), where it has one.",
+        },
+        env: { type: "string", description: "The host's environment, stage or deployment, e.g. 'production' for Vercel." },
+        as: { type: "string", description: "A different name for it there. Default: the key's own name." },
+        deploy: { type: "boolean", description: "Fly and Railway only: deploy as part of setting it. Default: stage it for the next deploy." },
+      },
+      required: ["key", "to"],
     },
   },
   {

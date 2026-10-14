@@ -1,0 +1,25 @@
+Create secret
+
+Usage:
+  koyeb secrets create NAME [flags]
+
+Flags:
+  -h, --help                       help for create
+      --registry-keyfile string    Registry URL. Only valid with --type=registry-gcp, otherwise ignored
+      --registry-name string       Registry name. Only valid with --type=registry-azure, otherwise ignored
+      --registry-url string        Registry URL. Only valid with --type=registry-private and --type=registry-gcp, otherwise ignored
+      --registry-username string   Registry username. Only valid with --type=registry-*
+      --type type                  Secret type (simple, registry-dockerhub, registry-private, registry-digital-ocean, registry-gitlab, registry-gcp, registry-azure) (default simple)
+  -v, --value string               Secret Value
+      --value-from-stdin           Secret Value from stdin
+
+Global Flags:
+  -c, --config string         config file (default is $HOME/.koyeb.yaml)
+  -d, --debug                 enable the debug output
+      --debug-full            do not hide sensitive information (tokens) in the debug output
+      --force-ascii           only output ascii characters (no unicode emojis)
+      --full                  do not truncate output
+      --organization string   organization ID
+  -o, --output output         output format (yaml,json,table)
+      --token string          API token
+      --url string            url of the api (default "https://app.koyeb.com")

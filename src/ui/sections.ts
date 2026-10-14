@@ -151,7 +151,7 @@ function renderProject(page){
 
   add(page,onboardingCard());
   add(page,needsCard());
-  add(page,suggestionsCard(currentRoot(),["give","same-value","plaintext","only-one"],"Suggested for "+name));
+  add(page,suggestionsCard(currentRoot(),["give","same-value","plaintext","only-one","repush"],"Suggested for "+name));
 
   const all=usedSets();
   const win=winners();
@@ -203,6 +203,7 @@ function renderProject(page){
           HUB={projects:r.projects,hidden:r.hidden,crawl:r.crawl,roots:r.roots,rootsChosen:r.rootsChosen,platform:r.platform};await refresh(r.state);toast(k+" is no longer part of "+name);
         }},"Remove"),
         moreButton("More for "+k,function(){return [
+          {label:"Send to a host…",run:function(){pushDialog("library",u.fromSet,k)}},
           {label:"Keep for "+name+" only",run:function(){place({action:"here",set:u.fromSet.name,key:k})}},
           {label:"Use in another project…",run:function(){giveKeyDialog({kind:"key",set:u.fromSet.name,key:k})}},
         ]})));

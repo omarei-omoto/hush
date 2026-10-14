@@ -8,6 +8,8 @@ import { realpathSync } from "node:fs";
 import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
 import { type Composed, composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt, libraryGroups, sameFolder } from "./library.ts";
+import { HOSTS, hostById } from "./hosts.ts";
+import { planPush, programLine, recordPush, runPush, sourceOf, type PushPlan } from "./push.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import {
   checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
@@ -409,6 +411,67 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       return text([renderRequest(result, { includeHeaders: true }), ...skipped].join("\n"));
     }
 
+    case "hush_push": {
+      const key = requireArg(args, "key", "hush_push");
+      const to = requireArg(args, "to", "hush_push");
+      const host = hostById(to);
+      if (!host) return errText(`hush cannot send to "${to}". It can send to: ${HOSTS.map((h) => h.id).join(", ")}.`);
+      if (ctx.policy.denyKeys.includes(key)) return errText(`Policy forbids agent access to ${key}.`);
+      const resolved = composeSets(ctx.vault, ctx.identity, ctx.hushDir, []);
+      checkScopes(ctx.policy, resolved.layers);
+      const value = resolved.secrets[key];
+      if (value === undefined) return errText(`This project's run does not get ${key}, so there is nothing to send. hush_list_sets shows what it has.`);
+      const target = typeof args.target === "string" && args.target ? args.target : (host.target?.detect?.(ctx.root) ?? undefined);
+      let plan: PushPlan;
+      try {
+        plan = planPush(host, key, value, {
+          ...(typeof args.as === "string" && args.as ? { name: args.as } : {}),
+          ...(target ? { target } : {}),
+          ...(typeof args.env === "string" && args.env ? { env: args.env } : {}),
+          ...(args.deploy === true ? { deploy: true } : {}),
+        });
+      } catch (e) {
+        return errText((e as Error).message);
+      }
+      const dest = `${host.label}${plan.opts.target ? ` ${host.target?.noun ?? ""} ${plan.opts.target}` : ""}${plan.opts.env ? ` (${plan.opts.env})` : ""}`;
+      if (ctx.policy.requireApproval.includes("request")) {
+        const ap = await requestApproval(ctx.hushDir, {
+          action: "request",
+          summary: `Send ${key} to ${dest}`,
+          detail: [`Runs: ${plan.preview}`, programLine(host, ctx.root), "The value goes to the CLI's standard input, never on a command line.", `Asked by:  your agent`],
+          scope: `push:${host.id}/${plan.opts.target ?? ""}/${plan.opts.env ?? ""}/${key}`,
+          ttlSeconds: 0,
+          timeoutMs: Math.max(1, ctx.policy.approvalTimeoutSeconds) * 1000,
+          biometry: ctx.policy.biometry,
+          sessionGrant: false,
+        });
+        audit(ctx.hushDir, { actor: "mcp", action: "approval", on: "push", decision: ap.decision, via: ap.via, code: ap.code });
+        if (ap.decision === "deny") return errText(ap.note ?? `The user denied sending ${key} (code ${ap.code}).`);
+        if (ap.decision === "timeout") return errText(`No answer to the approval prompt (code ${ap.code}). Ask the user to check their screen, then retry.`);
+      }
+      let pushed: Awaited<ReturnType<typeof runPush>>;
+      try {
+        pushed = await runPush(plan, value, ctx.root);
+      } catch (e) {
+        return errText((e as Error).message);
+      }
+      audit(ctx.hushDir, { actor: "mcp", action: "push", key, host: host.id, target: plan.opts.target, env: plan.opts.env, ok: pushed.ok });
+      if (!pushed.ok) return errText(`${host.bin} did not succeed; nothing was recorded. Its output (values masked):\n${pushed.output.trim()}`);
+      recordPush(ctx.root, {
+        key,
+        host: host.id,
+        ...(plan.opts.name !== key ? { name: plan.opts.name } : {}),
+        ...(plan.opts.target ? { target: plan.opts.target } : {}),
+        ...(plan.opts.env ? { env: plan.opts.env } : {}),
+        at: new Date().toISOString(),
+        ...(() => {
+          const source = sourceOf(key, resolved.layers, ctx.vault, openGlobal(), globalVaultName());
+          return source ? { source } : {};
+        })(),
+      });
+      return text(`Sent ${key} to ${dest}. ${host.after}\n\n${host.bin}'s output (values masked):\n${pushed.output.trim() || "(none)"}`);
+    }
+
     case "hush_run": {
       const command = requireArg(args, "command", "hush_run");
       checkCommand(ctx.policy, command);
@@ -435,6 +498,11 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       checkScopes(ctx.policy, resolved.layers);
       const secrets = resolved.secrets;
       for (const k of ctx.policy.denyKeys) delete secrets[k];
+      // One value to the command's standard input, never its command line.
+      const stdinKey = typeof args.stdin === "string" && args.stdin ? args.stdin : undefined;
+      if (stdinKey !== undefined && !(stdinKey in secrets)) {
+        return errText(`hush_run stdin: this project's run does not get ${stdinKey}. hush_list_sets shows what it has.`);
+      }
 
       // Same schema gate as the CLI, and no way to skip it from here.
       const runSchema = loadSchema(ctx.root);
@@ -457,6 +525,7 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
           detail: [
             `Using sets:  ${resolved.layers.join(", ") || "(none)"}`,
             `Injects:  ${Object.keys(secrets).join(", ") || "(nothing)"}`,
+            ...(stdinKey ? [`Stdin:  the value of ${stdinKey}`] : []),
             `Directory:  ${args.cwd || ctx.root}`,
             approvalCoverageLine(ctx.policy, command, resolved.layers),
           ],
@@ -491,6 +560,7 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
         capture: true,
         timeoutMs: ctx.policy.maxRunMs,
         redactOmit,
+        ...(stdinKey ? { stdinText: secrets[stdinKey] } : {}),
       });
       audit(ctx.hushDir, {
         actor: "mcp",

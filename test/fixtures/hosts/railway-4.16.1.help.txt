@@ -1,0 +1,8 @@
+error: unrecognized subcommand 'variable'
+
+  tip: a similar subcommand exists: 'variables'
+
+Usage: railway [COMMAND]
+
+For more information, try '--help'.
+

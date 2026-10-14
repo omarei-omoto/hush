@@ -335,6 +335,76 @@ async function reveal(where,scope,key,bar,plain,btn){
   bar._hide=hide;
 }
 
+/* ------------------------------------------------------ sending to a host -- */
+
+/* The hosts hush can send to, and which this project's files name (GET-like /api/push-hosts). */
+let PUSH_HOSTS=null;
+async function pushHosts(){if(!PUSH_HOSTS||PUSH_HOSTS.root!==currentRoot()){PUSH_HOSTS=await api("/api/push-hosts",{});PUSH_HOSTS.root=currentRoot()}return PUSH_HOSTS}
+
+/**
+ * Send one key's value to a host: hush runs the host's own CLI on this
+ * machine with the value on its standard input (src/push.ts). preset picks
+ * the host, target and environment — "send it again" from where it went.
+ */
+async function pushDialog(where,set,key,preset){
+  preset=preset||{};
+  const ph=await pushHosts();
+  const detected=ph.detected||[];
+  const here=ph.hosts.filter(function(x){return detected.some(function(d){return d.id===x.id})});
+  const rest=ph.hosts.filter(function(x){return here.indexOf(x)<0});
+  const sel=h("select",{class:"input"});
+  if(here.length){const g=h("optgroup",{label:"This project deploys to"});here.forEach(function(x){g.append(h("option",{value:x.id},x.label))});sel.append(g)}
+  const g2=h("optgroup",{label:here.length?"Other hosts":"Hosts"});rest.forEach(function(x){g2.append(h("option",{value:x.id},x.label))});sel.append(g2);
+  sel.value=preset.host||(here[0]||rest[0]).id;
+  const target=h("input",{class:"input mono",autocomplete:"off",spellcheck:"false"});
+  const targetName=h("span");
+  const targetHint=h("small");
+  const targetWrap=h("label",{class:"field"},targetName,target,targetHint);
+  const envName=h("span");
+  const envBox=h("div");
+  const envWrap=h("label",{class:"field"},envName,envBox);
+  let envCtl=null;
+  const deploy=h("input",{type:"checkbox"});
+  const deployWrap=h("label",{class:"check"},deploy,h("span",{text:"Deploy now, as part of setting it"}));
+  const note=h("p",{class:"muted",style:"margin:0;font-size:13px"});
+  function host(){return ph.hosts.find(function(x){return x.id===sel.value})}
+  function sync(first){
+    const x=host();
+    const found=detected.find(function(d){return d.id===x.id});
+    targetWrap.hidden=!x.target;
+    if(x.target){
+      targetName.textContent=x.target.noun.charAt(0).toUpperCase()+x.target.noun.slice(1)+(x.target.required?"":" (optional)");
+      target.value=(first&&preset.target)||(found&&found.target)||"";
+      targetHint.textContent=found&&found.target?"From this project's own config.":x.target.required?"":"Leave empty for the one its CLI is linked to.";
+    }
+    envWrap.hidden=!x.env;
+    clear(envBox);envCtl=null;
+    if(x.env){
+      envName.textContent=x.env.noun.charAt(0).toUpperCase()+x.env.noun.slice(1)+(x.env.required?"":" (optional)");
+      if(x.env.choices){envCtl=h("select",{class:"input"});x.env.choices.forEach(function(c){envCtl.append(h("option",{value:c},c))});envCtl.value=(first&&preset.env)||x.env.default||x.env.choices[0]}
+      else envCtl=h("input",{class:"input mono",autocomplete:"off",spellcheck:"false",value:(first&&preset.env)||""});
+      envBox.append(envCtl);
+    }
+    deployWrap.hidden=x.deploys!=="optional";
+    note.textContent=x.after;
+  }
+  sel.onchange=function(){sync(false)};sync(true);
+  dialog({title:"Send "+key+" to a host",
+    lead:"hush runs that host's own CLI here, with the value on its standard input — never on a command line, and never through this page. It refuses a value the CLI would change, and an old CLI.",
+    submit:"Send",body:[field("Host",sel),targetWrap,envWrap,deployWrap,note],
+    onSubmit:async function(){
+      const r=await api("/api/push",{where:where,set:set.name,key:key,to:sel.value,
+        target:target.value.trim()||undefined,env:envCtl&&envCtl.value.trim()?envCtl.value.trim():undefined,deploy:!deployWrap.hidden&&deploy.checked});
+      await refresh(r);
+      toast(r.done,r.ok?null:{error:true});
+      if(!r.ok&&r.output&&r.output.trim())cliOutputDialog(host().label,r.output);
+    }});
+}
+function cliOutputDialog(label,output){
+  dialog({title:label+" said",lead:"Its output, with the value masked.",noSubmit:true,cancel:"Close",wide:true,
+    body:[h("pre",{class:"cliout mono",text:output.trim().slice(-6000)})]});
+}
+
 /* ------------------------------------------------------------- set cards */
 
 /** link: what this project lists to get the set the row is in (its own name, a group, …), when it does. */
@@ -348,6 +418,13 @@ function keyRow(where,set,s,win,link){
   const sub=[];
   if(s.note)sub.push(h("span",{class:"tag",text:s.note}));
   if(over)sub.push(h("span",{text:"overridden by "+win[s.key].label}));
+  // Where this value was sent (hush push), and whether it changed since.
+  (S.pushes||[]).filter(function(p){return p.key===s.key&&(!p.set||p.set===set.name)}).forEach(function(p){
+    sub.push(h("button",{type:"button",class:"sent"+(p.stale?" stale":""),
+      title:(p.stale?"Changed since it was sent — click to send the new value. ":"Sent ")+ago(p.at)+(p.stale?"":" — click to send it again"),
+      onclick:function(){pushDialog(where,set,s.key,{host:p.host,target:p.target,env:p.env})}},
+      icon("arrowup"),p.label+(p.target?" · "+p.target:"")+(p.env?" ("+p.env+")":""),p.stale?" · old value there":""));
+  });
   // A global key can be dragged onto any project; one of this project's own goes global first.
   const global=where==="library"&&!set.own&&set.name.indexOf("#")<0;
   const own=isOwn(where,set);
@@ -359,6 +436,7 @@ function keyRow(where,set,s,win,link){
     h("div",{class:"kact"},rv,moreButton("More for "+s.key,function(){return [
       own&&onProject?{label:"Make global…",run:function(){makeGlobalKeyDialog(where,set,s.key)}}:null,
       global&&usedHere?{label:"Keep for "+folderName()+" only",run:function(){place({action:"here",set:set.name,key:s.key})}}:null,
+      onProject&&set.name.indexOf("#")<0?{label:"Send to a host…",run:function(){pushDialog(where,set,s.key)}}:null,
       global?{label:"Use in a project…",run:function(){giveKeyDialog({kind:"key",set:set.name,key:s.key})}}:null,
       {label:"Replace value…",run:function(){replaceDialog(where,set.name,s.key)}},
       where==="project"?{label:s.note?"Edit tag…":"Add a tag…",run:function(){tagDialog(set.name,s.key,s.note)}}:null,

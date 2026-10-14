@@ -1,0 +1,10 @@
+# From the published reference, not a local install:
+# https://www.fastly.com/documentation/reference/cli/secret-store-entry/create/
+# and the flag definitions in https://github.com/fastly/cli/blob/main/pkg/commands/secretstoreentry/create.go
+fastly secret-store-entry create
+  --name        Secret name
+  --store-id    Store ID
+  --file        Read secret value from file instead of prompt
+  --recreate    Recreate secret by name (errors if secret doesn't already exist)
+  --recreate-allow  Create or recreate secret by name
+  --stdin       Read secret value from STDIN instead of prompt

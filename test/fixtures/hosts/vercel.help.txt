@@ -1,0 +1,78 @@
+Vercel CLI 59.16.0 (Node.js 22.22.1)
+
+  ▲ vercel env add name [environment] [options]
+
+  Add an Environment Variable                                                   
+
+  Options:
+
+       --force                 Overwrite an existing variable for the same target    
+       --git-branch <NAME>     Set the Git branch for a Preview Environment Variable 
+       --guidance              Show command suggestions after completion             
+       --no-sensitive          Store the value as Config                             
+       --project <NAME_OR_ID>  Project name or ID (defaults to the linked project)   
+       --sensitive             Store the value as a Secret                           
+       --type <TYPE>           Set the Environment Variable type (`config` or        
+                               `secret`)                                             
+       --value <VALUE>         Set the variable value for non-interactive use;       
+                               otherwise use stdin or the prompt                     
+  -y,  --yes                   Accept default choices when adding an Environment     
+                               Variable                                              
+
+
+  Global Options:
+
+       --cwd <DIR>            Sets the current working directory for a single   
+                              run of a command                                  
+  -d,  --debug                Debug mode (default off)                          
+  -Q,  --global-config <DIR>  Path to the global `.vercel` directory            
+  -h,  --help                 Output usage information                          
+  -A,  --local-config <FILE>  Path to the local `vercel.json` file              
+       --no-color             No color mode (default off)                       
+       --non-interactive      Run without interactive prompts; when an agent is 
+                              detected this is the default                      
+  -S,  --scope                Set a custom scope                                
+  -t,  --token <TOKEN>        Login token                                       
+  -v,  --version              Output the version number                         
+
+
+  Examples:
+
+  - Add a new variable (prompts for value and Environments)
+
+    $ vercel env add <name>
+    $ vercel env add API_TOKEN
+
+  - Add a new Environment Variable to a specific Environment
+
+    $ vercel env add <name> <production | preview | development>
+    $ vercel env add DB_PASS production
+
+  - Add one variable to multiple Environments (comma-separated)
+
+    $ vercel env add <name> <environment>[,<environment>]
+    $ vercel env add API_URL production,preview,development
+
+  - Override an existing Environment Variable of same target (production, preview, deployment)
+
+    $ vercel env add API_TOKEN --force
+
+  - Add a Config Environment Variable that remains readable later
+
+    $ vercel env add API_TOKEN --no-sensitive
+
+  - Add a new Environment Variable for a specific Environment and Git Branch
+
+    $ vercel env add <name> <production | preview | development> --git-branch <name>
+    $ vercel env add DB_PASS preview --git-branch feat1
+
+  - Add a new Environment Variable from stdin
+
+    $ cat <file> | vercel env add <name> <production | preview | development>
+    $ cat ~/.npmrc | vercel env add NPM_RC preview
+    $ vercel env add API_URL production < url.txt
+
+  - Add with --value for non-interactive use
+
+    $ vercel env add API_TOKEN production --value "<value>" --yes
+

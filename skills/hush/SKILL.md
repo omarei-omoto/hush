@@ -105,6 +105,26 @@ response comes back with any reflected value masked as `[redacted:NAME]`.
   another route.
 - A non-2xx status is a normal result, not a failed tool call: read it.
 
+## Sending a key to where the app runs
+
+When a deploy needs a secret on Cloudflare, Vercel, Convex, Fly, Railway,
+Firebase, GitHub Actions, GitLab CI, Google Cloud, Koyeb, Fastly, Pulumi or SST,
+don't tell the user to paste it into a dashboard, and don't build
+`sh -c 'printf … | wrangler secret put …'` (`sh` is denied anyway):
+
+```
+hush_push { key: "SHOPIFY_API_SECRET", to: "cloudflare" }
+```
+
+hush runs that host's own CLI with the value on its standard input; the user
+approves it in a dialog that names where it goes. The Worker, app or project
+comes from the repo's own config (wrangler.jsonc, fly.toml, .firebaserc) unless
+you pass `target`. Vercel needs `env` ("production", "preview" or "development").
+If hush refuses — the CLI is missing or too old, or the value has whitespace at
+an end the CLI would strip — tell the user what it said; don't work around it.
+For any other CLI that reads one secret from stdin, `hush_run` takes
+`stdin: "KEY"`.
+
 ## Setting a tool up from scratch
 
 When the user says "set up the fal CLI with my personal set":
@@ -172,6 +192,7 @@ that needs re-entering with `hush_add_secret`. Do not retry the same call.
 | `hush_add_secret` | Have the user enter a new key, off-transcript |
 | `hush_run` | Actually run something with credentials injected |
 | `hush_request` | Make an API call with a secret injected; the response comes back masked |
+| `hush_push` | Send a secret to Cloudflare, Vercel, Fly, GitHub… through their CLI, value on stdin |
 
 `hush_list_accounts` still answers — it is a deprecated alias for
 `hush_list_sets` that returns exactly the same thing, kept so a skill file

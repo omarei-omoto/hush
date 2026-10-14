@@ -1,0 +1,12 @@
+wrangler 4.151.0
+convex 1.46.0
+firebase 15.33.0
+sst 4.17.2
+gh version 2.102.0 (2026-09-30)
+glab 1.120.0 (78790114c)
+fly v0.4.112 darwin/
+59.16.0
+Google Cloud SDK 444.0.0
+railway 4.16.1
+
+railway 5.68.0 (npx @railway/cli@latest)

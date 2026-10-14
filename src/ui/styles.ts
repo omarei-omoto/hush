@@ -347,6 +347,12 @@ textarea.input{height:auto;min-height:96px;padding:8px 10px;font-family:var(--mo
 .krow.over .k{color:var(--muted);text-decoration:line-through;text-decoration-thickness:1px}
 .kact{display:flex;align-items:center;gap:2px}
 .tag{display:inline-block;padding:0 6px;border-radius:5px;background:var(--sunken);color:var(--ink-2);font-size:11px;line-height:17px}
+/* Where a key was sent (hush push): click to send it again. */
+.sent{display:inline-flex;align-items:center;gap:3px;padding:0 6px;border:0;border-radius:5px;background:var(--sunken);color:var(--ink-2);font:inherit;font-size:11px;line-height:17px;cursor:pointer}
+.sent svg{width:11px;height:11px}
+.sent:hover{color:var(--ink)}
+.sent.stale{background:var(--warn-bg);color:var(--warn)}
+.cliout{max-height:50vh;overflow:auto;margin:0;padding:12px;border-radius:8px;background:var(--sunken);font-size:12px;white-space:pre-wrap;word-break:break-word}
 
 /* The one memorable element: every value is under a redaction bar, and only
    Reveal lifts it — for fifteen seconds, then it falls back into place. */

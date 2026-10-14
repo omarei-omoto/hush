@@ -1537,6 +1537,93 @@ test("/api/move carves one pile into named sets", async () => {
   });
 });
 
+describe("ui server — sending a key to a host", { skip: process.platform === "win32" && "stand-in CLI is a POSIX script" }, () => {
+  // Its own server, because the stand-in wrangler has to be on the PATH it starts with.
+  let child: ChildProcess;
+  let base: string;
+  let token: string;
+  let home: string;
+  let root: string;
+  let bin: string;
+  const callApi = async (path: string, body?: unknown) => {
+    const r = await fetch(base + path, {
+      method: body ? "POST" : "GET",
+      headers: { "x-hush-token": token, "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: r.status, body: (await r.json()) as any };
+  };
+
+  before(async () => {
+    home = mkdtempSync(join(tmpdir(), "hush-push-home-"));
+    root = realpathSync(mkdtempSync(join(tmpdir(), "hush-push-proj-")));
+    bin = mkdtempSync(join(tmpdir(), "hush-push-bin-"));
+    mkdirSync(join(root, ".hush"), { recursive: true });
+    const id = generateIdentity();
+    const vault = Vault.create(join(root, ".hush", "vault.json"), "pushtest", { name: "tester", pub: id.pub });
+    vault.set(id, "default", "SHOPIFY_API_SECRET", "shpss_push_value_123456");
+    vault.save();
+    writeFileSync(join(root, "wrangler.jsonc"), '{ "name": "linkdaisy" }');
+    writePolicies(home, root, { requireApproval: [], biometry: "off" });
+    const help = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "hosts", "cloudflare.help.txt"), "utf8");
+    writeFileSync(join(bin, "wrangler"), `#!${process.execPath}
+const fs = require("fs"); const argv = process.argv.slice(2);
+if (argv[0] === "--version") { console.log("4.151.0"); process.exit(0); }
+if (argv.join(" ") === "secret put --help") { process.stdout.write(${JSON.stringify(help)}); process.exit(0); }
+const stdin = fs.readFileSync(0, "utf8");
+fs.appendFileSync(${JSON.stringify(join(bin, "calls.jsonl"))}, JSON.stringify({ argv, stdin }) + "\\n");
+console.log("Success! the value was " + stdin);
+`, { mode: 0o755 });
+    child = spawn(process.execPath, [CLI, "ui", "--no-open", "--port", "0"], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HUSH_HOME: home, HUSH_IDENTITY: encodeSecret(id), HUSH_BIOMETRY: "off", HUSH_NO_KEYCHAIN: "1", HUSH_NO_DIALOG: "1", NO_COLOR: "1" },
+    });
+    const url: string = await new Promise((resolve, reject) => {
+      let out = "";
+      const timer = setTimeout(() => reject(new Error("ui did not start: " + out)), 15000);
+      child.stdout!.on("data", (d) => {
+        out += d;
+        const m = out.match(/(http:\/\/127\.0\.0\.1:\d+\/#t=[A-Za-z0-9_-]+)/);
+        if (m) { clearTimeout(timer); resolve(m[1]); }
+      });
+    });
+    const parsed = new URL(url);
+    base = parsed.origin;
+    token = parsed.hash.replace(/^#t=/, "");
+  });
+
+  after(() => {
+    child?.kill();
+    for (const d of [home, root, bin]) rmSync(d, { recursive: true, force: true });
+  });
+
+  test("the hosts, with the one this project deploys to; a push sends the value on stdin and is shown under the key", async () => {
+    const hosts = await callApi("/api/push-hosts", {});
+    assert.equal(hosts.status, 200, JSON.stringify(hosts.body));
+    assert.ok(hosts.body.hosts.some((h: any) => h.id === "cloudflare" && h.target.noun === "Worker"));
+    assert.deepEqual(hosts.body.detected.find((d: any) => d.id === "cloudflare"), { id: "cloudflare", target: "linkdaisy" });
+
+    const r = await callApi("/api/push", { where: "project", set: "default", key: "SHOPIFY_API_SECRET", to: "cloudflare" });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.ok, true, r.body.output);
+    const [call] = readFileSync(join(bin, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(call.argv, ["secret", "put", "SHOPIFY_API_SECRET", "--name", "linkdaisy"]);
+    assert.equal(call.stdin, "shpss_push_value_123456");
+    assert.ok(!JSON.stringify(r.body).includes("shpss_push_value_123456"), "the value came back to the page");
+    assert.deepEqual(
+      r.body.pushes.map((p: any) => [p.key, p.host, p.target, p.set, p.stale]),
+      [["SHOPIFY_API_SECRET", "cloudflare", "linkdaisy", "default", false]],
+    );
+
+    // Refused before anything runs: a host it does not drive, a CLI that is not there.
+    assert.equal((await callApi("/api/push", { where: "project", set: "default", key: "SHOPIFY_API_SECRET", to: "netlify" })).status, 400);
+    const missing = await callApi("/api/push", { where: "project", set: "default", key: "SHOPIFY_API_SECRET", to: "fastly", target: "store1" });
+    assert.equal(missing.status, 400);
+    assert.match(missing.body.error, /not installed here/);
+  });
+});
+
 describe("ui server — any folder", () => {
   /**
    * The third state a folder can be in: no .hush anywhere above it at all.

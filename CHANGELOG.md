@@ -2,7 +2,7 @@
 
 All notable changes to hush. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [semver](https://semver.org). Pre-1.0, minor versions may break things — each entry says so when it does.
 
-## Unreleased
+## 0.13.0 — 2026-10-14
 
 ### The app is a hub of all your projects
 

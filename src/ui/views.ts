@@ -146,17 +146,17 @@ function projectGroupDialog(p){
   const sel=h("select",{class:"input"});
   sel.append(h("option",{value:"",text:"No group"}));
   groups.forEach(function(g){sel.append(h("option",{value:g.label},g.label))});
-  sel.append(h("option",{value:"\u0000new",text:"New group…"}));
-  sel.value=p.group||(groups[0]?groups[0].label:"\u0000new");
+  sel.append(newOption("New group…"));
+  if(p.group||groups[0])sel.value=p.group||groups[0].label;else pickNew(sel);
   const name=h("input",{class:"input",placeholder:"e.g. Clients"});
   const wrap=field("New group's name",name);
-  function sync(){wrap.hidden=sel.value!=="\u0000new"}
+  function sync(){wrap.hidden=!newPicked(sel)}
   sel.onchange=sync;sync();
   dialog({title:"Put "+p.name+" in a group",lead:"Groups keep the project list tidy. Drag a global key onto a group and every project in it gets it.",
     submit:"Save",body:[field("Group",sel),wrap],
     onSubmit:async function(){
-      const label=sel.value==="\u0000new"?name.value.trim():sel.value;
-      if(sel.value==="\u0000new"&&!label){toast("name the group",{error:true});name.focus();return false}
+      const label=newPicked(sel)?name.value.trim():sel.value;
+      if(newPicked(sel)&&!label){toast("name the group",{error:true});name.focus();return false}
       await fileProjects([p.root],label);
     }});
 }

@@ -144,22 +144,30 @@ function addSecretDialog(prefill){
   });
 }
 
+/*
+ * "New…" in a list of names: marked by an attribute rather than a value, so
+ * no group or set a person names can ever be taken for it.
+ */
+function newOption(text){return h("option",{value:"","data-new":"1",text:text})}
+function newPicked(sel){const o=sel.options[sel.selectedIndex];return Boolean(o&&o.hasAttribute("data-new"))}
+function pickNew(sel){[].forEach.call(sel.options,function(o){if(o.hasAttribute("data-new"))o.selected=true})}
+
 /** A group to file a global set under: one there is, a new one, or none. */
 function groupChooser(current){
   const sel=h("select",{class:"input"});
   sel.append(h("option",{value:"",text:"No group"}));
   (S.groups||[]).forEach(function(g){sel.append(h("option",{value:g.label},g.label))});
-  sel.append(h("option",{value:"\u0000new",text:"New group…"}));
+  sel.append(newOption("New group…"));
   sel.value=current||"";
   const name=h("input",{class:"input",placeholder:"e.g. AI stack"});
   const nameWrap=field("New group's name",name);
-  function sync(){nameWrap.hidden=sel.value!=="\u0000new"}
+  function sync(){nameWrap.hidden=!newPicked(sel)}
   sel.onchange=sync;sync();
   const box=h("div",{class:"stack"},field("Group (optional)",sel,"A folder for your global keys. A project given the group gets every set in it."),nameWrap);
   return {
     el:box,
     /* "" for no group; null when "New group…" is picked but not named yet. */
-    value:function(){return sel.value==="\u0000new"?(name.value.trim()||null):sel.value},
+    value:function(){return newPicked(sel)?(name.value.trim()||null):sel.value},
   };
 }
 
@@ -213,20 +221,20 @@ function makeGlobalSetDialog(where,set){
 function makeGlobalKeyDialog(where,set,k){
   const sel=h("select",{class:"input"});
   globalSets().filter(function(s){return s.name!=="default"}).forEach(function(s){sel.append(h("option",{value:s.name},s.label+(s.group?"  · "+s.group:"")))});
-  sel.append(h("option",{value:"\u0000new",text:"New global set…"}));
+  sel.append(newOption("New global set…"));
   const service=S.catalog.find(function(c){return c.vars.indexOf(k)>-1});
   const fits=globalSets().find(function(s){return service&&s.label.toLowerCase()===service.label.toLowerCase()});
-  sel.value=fits?fits.name:"\u0000new";
+  if(fits)sel.value=fits.name;else pickNew(sel);
   const name=h("input",{class:"input",placeholder:"e.g. Stripe",value:service?service.label:""});
   const nameWrap=field("New set's name",name);
   const grp=groupChooser("");
-  function sync(){const isNew=sel.value==="\u0000new";nameWrap.hidden=!isNew;grp.el.hidden=!isNew}
+  function sync(){const isNew=newPicked(sel);nameWrap.hidden=!isNew;grp.el.hidden=!isNew}
   sel.onchange=sync;
   dialog({title:"Make "+k+" global",
     lead:"It joins your global keys, in the set you pick, and stays part of "+folderName()+". Every project that uses that set gets it too.",
     submit:"Make it global",body:[field("Into",sel),nameWrap,grp.el],
     onSubmit:async function(){
-      const isNew=sel.value==="\u0000new";
+      const isNew=newPicked(sel);
       if(isNew&&!name.value.trim()){toast("name the new set",{error:true});name.focus();return false}
       await place({action:"global",where:where,set:set.name,key:k,to:isNew?undefined:sel.value,toLabel:isNew?name.value.trim():undefined,group:isNew?(grp.value()||undefined):undefined});
     }});

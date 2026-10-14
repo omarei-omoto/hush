@@ -15,6 +15,11 @@
  * person supplies their own. Copying would also mean two copies that drift, and
  * a rotation that silently only half-applied.
  *
+ * A library set can instead belong to one project (EnvMeta.project): kept
+ * "only in this project", it is not one of your global keys, and hush refuses
+ * it anywhere else. placement.ts moves sets and keys between the two, and
+ * files global sets into groups.
+ *
  * Resolution order is least specific first: global links, then the project's
  * own environment, then any service accounts chosen for the run. The project
  * wins over the library, and an explicit `--with` wins over both.
@@ -22,7 +27,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, onlyInAllows, assertScopeName, assertKeyName, type EnvMeta } from "./vault.ts";
+import { Vault, namedVaultPath, ValidationError, loadUse, assertProjectHushDir, onlyInAllows, assertScopeName, assertKeyName, slugifyEnv, type EnvMeta } from "./vault.ts";
 import { hushHome } from "./identity.ts";
 import type { Opener } from "./crypto.ts";
 import { setNameFor } from "./services.ts";
@@ -141,6 +146,72 @@ const librarySetOf = (link: string): string => (link === LIBRARY_DEFAULT ? "defa
 
 export const keyLinkName = (set: string, key: string): string => `${set === "default" ? LIBRARY_DEFAULT : set}#${key}`;
 
+// ------------------------------------------------------------------ groups
+
+/**
+ * A group of library sets — "AI stack", holding fal, OpenAI and Anthropic —
+ * is a folder for your global keys (EnvMeta.group), and a project can use one
+ * whole: "group:<slug>" in its list. Every set filed under the group reaches
+ * it, including one filed there later. A set name cannot contain ":"
+ * (assertScopeName), so a group link can never be read as a set.
+ */
+export const GROUP_PREFIX = "group:";
+
+export const groupSlug = (label: string): string => slugifyEnv(label);
+
+export const groupLinkName = (label: string): string => GROUP_PREFIX + groupSlug(label);
+
+/** The group a link names, by its slug, or null for any other link. */
+export function parseGroupLink(link: string): string | null {
+  return link.startsWith(GROUP_PREFIX) && link.length > GROUP_PREFIX.length ? link.slice(GROUP_PREFIX.length) : null;
+}
+
+/** The project a library set is kept for (EnvMeta.project), or null for a global one. */
+export function ownerOf(vault: Vault | null, name: string): string | null {
+  const p = vault?.hasSet(name) ? vault.envMeta(name).project : undefined;
+  return typeof p === "string" && p ? p : null;
+}
+
+/** Two absolute folders are the same one: separators and a trailing slash aside, and case aside where the file system ignores it. */
+export function sameFolder(a: string, b: string, platform: string = process.platform): boolean {
+  const tidy = (p: string) => {
+    let s = p.replace(/\\/g, "/");
+    while (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
+    return platform === "darwin" || platform === "win32" ? s.toLowerCase() : s;
+  };
+  return tidy(a) === tidy(b);
+}
+
+/**
+ * The library sets filed under a group, by exact name, in label order. A set
+ * kept for one project is never part of a group, whatever its metadata says.
+ */
+export function setsInGroup(library: Vault | null, slug: string): string[] {
+  if (!library) return [];
+  return library
+    .envNames()
+    .filter((n) => {
+      const m = library.envMeta(n);
+      return typeof m.group === "string" && !m.project && groupSlug(m.group) === slug;
+    })
+    .sort((a, b) => library.envLabel(a).localeCompare(library.envLabel(b)));
+}
+
+/** Every group in the library: its slug, the label it shows, and its sets. */
+export function libraryGroups(library: Vault | null): { slug: string; label: string; link: string; sets: string[] }[] {
+  if (!library) return [];
+  const bySlug = new Map<string, string>();
+  for (const n of library.envNames()) {
+    const m = library.envMeta(n);
+    if (typeof m.group !== "string" || m.project) continue;
+    const label = m.group.trim();
+    if (label && !bySlug.has(groupSlug(label))) bySlug.set(groupSlug(label), label);
+  }
+  return [...bySlug.entries()]
+    .map(([slug, label]) => ({ slug, label, link: GROUP_PREFIX + slug, sets: setsInGroup(library, slug) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** The name to record in envs.json for a set living in `where`. */
 export function linkNameFor(where: "library" | "project", name: string): string {
   return where === "library" && name === "default" ? LIBRARY_DEFAULT : name;
@@ -194,7 +265,7 @@ export const onlyInMessage = (label: string, onlyIn: readonly string[], place: s
   `Set "${label}" is only for ${onlyIn.join(", ")}, and this is ${place}. ` +
   `Use it from one of those folders, or change where it may be used: hush env describe "${label}" --only-in <folder>`;
 
-export function saveLinks(hushDir: string, use: string[]): void {
+export function saveLinks(hushDir: string, use: string[], opts: { confirm?: boolean } = {}): void {
   assertProjectHushDir(hushDir);
   // A set that is only for other folders is refused here, when it is linked,
   // rather than only later when a run skips it. Sets already linked are left
@@ -207,6 +278,13 @@ export function saveLinks(hushDir: string, use: string[]): void {
     const project = existsSync(vaultFile) ? Vault.open(vaultFile) : null;
     const library = openGlobal();
     for (const link of added) {
+      // A group's sets are checked one by one when a run resolves them: one
+      // kept for other folders is skipped then, not a reason to refuse the rest.
+      const group = parseGroupLink(link);
+      if (group !== null) {
+        assertScopeName(group);
+        continue;
+      }
       const pick = parseKeyLink(link);
       if (pick) {
         if (pick.set !== LIBRARY_DEFAULT) assertScopeName(pick.set);
@@ -225,7 +303,8 @@ export function saveLinks(hushDir: string, use: string[]): void {
   // which is how "hush use <set>" on an already-used set makes it win.
   writeFileSync(linksPath(hushDir), JSON.stringify({ use: lastMentionWins(use) }, null, 2) + "\n");
   // Linking a set yourself is confirming it for this project on this machine.
-  if (added.length) confirmLinks(hushDir, added);
+  // A link hush rewrites on its own (a group renamed) says confirm: false.
+  if (added.length && opts.confirm !== false) confirmLinks(hushDir, added);
 }
 
 /**
@@ -392,6 +471,24 @@ export function composeSets(
   const names = lastMentionWins([...usedSets(hushDir), ...extra]);
 
   for (const name of names) {
+    // A group: every set filed under it now, in label order, each under the
+    // same folder rules as a set used by name. The group is what was
+    // confirmed for this project, so it is confirmed once.
+    const group = parseGroupLink(name);
+    if (group !== null) {
+      const members = setsInGroup(library, group);
+      if (!members.length) {
+        missing.push(name);
+        continue;
+      }
+      if (!confirmedHere(name)) continue;
+      for (const set of members) {
+        if (!fitsHere(library!, set, "")) continue;
+        Object.assign(secrets, library!.materialize(id, set));
+        layers.push(`${globalVaultName()}:${set}`);
+      }
+      continue;
+    }
     // One key from a library set (a key link): only that key, under the same
     // confirmation and folder rules as the whole set.
     const pick = parseKeyLink(name);
@@ -585,6 +682,10 @@ export interface LibrarySet {
   source?: string;
   /** Folders it may be used in; absent means anywhere. */
   onlyIn?: string[];
+  /** The group it is filed under, if any. */
+  group?: string;
+  /** The project it belongs to, when it is kept only there: not one of your global keys. */
+  project?: string;
   keys: string[];
 }
 
@@ -607,6 +708,8 @@ export function librarySets(): LibrarySet[] {
       whenToUse: s.whenToUse,
       source: s.source,
       ...(s.onlyIn ? { onlyIn: s.onlyIn } : {}),
+      ...(s.group && !s.project ? { group: s.group } : {}),
+      ...(s.project ? { project: s.project } : {}),
       keys: s.keys,
     }));
 }

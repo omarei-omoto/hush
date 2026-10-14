@@ -12,7 +12,7 @@ export const FOUNDATIONS = String.raw`<div class="app">
     <a class="level" id="level" href="#agent"></a>
   </aside>
   <main class="main"><div class="page" id="page"></div></main>
-  <aside class="keys" id="keys" aria-label="Global keys"></aside>
+  <aside class="keyside" id="keys" aria-label="Global keys"></aside>
 </div>
 <button type="button" class="keystab" id="keystab" aria-controls="keys" aria-label="Global keys" title="Global keys"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7a4 4 0 1 1-3.9 4.9L4 19v2h3v-2h2v-2h2l1.1-1.1A4 4 0 0 1 15 7zM16.5 9.5h.01"/></svg><span>Keys</span></button>
 <div class="drop" id="drop" aria-hidden="true">Drop to import<small>.env files — nothing is saved until you review them</small></div>
@@ -89,6 +89,8 @@ const ICONS={
   more:"M5 12h.01M12 12h.01M19 12h.01",
   up:"M6 15l6-6 6 6",
   down:"M6 9l6 6 6-6",
+  right:"M9 6l6 6-6 6",
+  arrowup:"M12 19V5M6 11l6-6 6 6",
   eye:"M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
   eyeoff:"M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.2M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2",
   copy:"M9 9h10v10H9zM5 15V5h10",
@@ -128,6 +130,9 @@ async function api(path,body){
   return j;
 }
 async function refresh(next){
+  if(next&&next.hub)HUB=next.hub;
+  // Which global sets only one project uses can change with anything: ask again when it is shown.
+  TIDY=null;
   if(next&&next.folder){S=next}
   else{
     try{S=await api("/api/state")}
@@ -138,6 +143,8 @@ async function refresh(next){
     }
   }
   if(!HUB)HUB=await api("/api/hub");
+  // A change that did not bring the project list with it: refresh its counts in the background.
+  else if(next&&next.folder&&!next.hub)api("/api/hub").then(function(hub){HUB=hub;renderShell()},function(){});
   // The library's default set is its catch-all; "default" beside this
   // project's own default would read as the same thing.
   S.library.forEach(function(x){if(x.name==="default"&&x.label==="default")x.label="Catch-all"});
@@ -159,13 +166,19 @@ function openProject(root){setProject(root);location.hash="#project";refresh()}
 /* ------------------------------------------------- dragging global keys -- */
 
 const KEY_MIME="application/x-hush-key";
-/** A global key you can drag onto a project in the sidebar or on the home screen. */
-function draggableKey(el,set,key){
+/**
+ * Something global you can drag onto a project in the sidebar, on Home, or on
+ * an open project's page: one key {kind:"key",set,key}, a whole set
+ * {kind:"set",set}, or a whole group {kind:"group",group}.
+ */
+function draggable(el,what){
   el.draggable=true;
   el.classList.add("drag");
   el.addEventListener("dragstart",function(ev){
-    ev.dataTransfer.setData(KEY_MIME,JSON.stringify({set:set,key:key}));
-    ev.dataTransfer.setData("text/plain",key);
+    // A key inside a set inside a group: the innermost one is what moves.
+    ev.stopPropagation();
+    ev.dataTransfer.setData(KEY_MIME,JSON.stringify(what));
+    ev.dataTransfer.setData("text/plain",what.key||what.set||what.group);
     ev.dataTransfer.effectAllowed="link";
     document.body.classList.add("dragging-key");
   });
@@ -174,6 +187,7 @@ function draggableKey(el,set,key){
     [].forEach.call(document.querySelectorAll(".drop-on"),function(x){x.classList.remove("drop-on")});
   });
 }
+function draggableKey(el,set,key){draggable(el,{kind:"key",set:set,key:key})}
 /** project is the project, or a function giving the one to use when the key lands (null: not here). */
 function dropTarget(el,project){
   const which=function(){return typeof project==="function"?project():project};
@@ -188,37 +202,94 @@ function dropTarget(el,project){
     const p=which();
     if(!raw||!p)return;
     ev.preventDefault();ev.stopPropagation();
-    const k=JSON.parse(raw);
-    giveKey(p,k.set,k.key);
+    const what=JSON.parse(raw);
+    if(what.kind===undefined)what.kind="key";
+    giveKey(p,what);
   });
 }
-/** Make a global key part of a project: a key link, yours, nothing written into its repo's vault. */
-async function giveKey(project,set,key){
-  const r=await api("/api/assign",{project:project.root,set:set,key:key});
+/** What a dragged thing is called: the key, the set's label, or the group's. */
+function giveName(what){
+  if(what.kind==="group"){const g=(S.groups||[]).find(function(x){return x.name===what.group});return g?g.label:what.group}
+  if(what.kind==="set")return setLabel("library",what.set);
+  return what.key;
+}
+/** Make a global key, set or group part of a project: a link, yours, nothing written into its repo's vault. */
+async function giveKey(project,what){
+  const r=await api("/api/assign",{project:project.root,kind:what.kind,set:what.set,key:what.key,group:what.group});
   HUB=r;
-  toast(r.assigned==="already"?project.name+" already gets "+key:key+" is now part of "+project.name);
+  const n=giveName(what);
+  toast(r.assigned==="already"?project.name+" already gets "+n:n+" is now part of "+project.name);
   if(project.root===currentRoot())await refresh();else render();
 }
-/** The same, without a mouse: pick the project from a list. */
-function giveKeyDialog(set,key){
+/** Pick one of the projects hush knows, then run(project). */
+function pickProjectDialog(title,lead,run){
   let dlg=null;
   const list=h("div",{class:"card list"});
   (HUB?HUB.projects:[]).forEach(function(p){
-    list.append(h("button",{type:"button",class:"li pick",onclick:function(){dlg.close();giveKey(p,set,key)}},
+    list.append(h("button",{type:"button",class:"li pick",onclick:function(){dlg.close();run(p)}},
       icon("folder"),h("div",{class:"body"},h("div",{class:"t",text:p.name}),h("div",{class:"d mono",text:tildePath(p.root)})),
       h("span",{class:"badge",text:plural(p.keys,"key")})));
   });
-  dlg=dialog({title:"Use "+key+" in a project",noSubmit:true,cancel:"Close",lead:"It stays one of your global keys; the project gets it when it runs. Nothing goes into the project's repository.",
+  dlg=dialog({title:title,noSubmit:true,cancel:"Close",lead:lead,
     body:[HUB&&HUB.projects.length?list:h("p",{class:"muted",text:"hush doesn't know any projects yet. Run hush in one, or add a folder from the sidebar."})]});
 }
+/** Giving without a mouse: pick the project from a list. */
+function giveKeyDialog(what){
+  pickProjectDialog("Use "+giveName(what)+" in a project",
+    "It stays global; the project gets it when it runs. Nothing goes into the project's repository.",
+    function(p){giveKey(p,what)});
+}
+
+/* ---------------------------------------------- global or this project -- */
+
+/**
+ * Move a set or key up (action "global") or down ("here"). When that would
+ * take it from teammates or other projects, the server changes nothing and
+ * names them; this asks, then sends the same move with force.
+ */
+async function place(body){
+  const r=await api("/api/place",body);
+  if(!r.confirm)return placed(r);
+  const c=r.confirm;
+  const what=body.key||setLabel(body.where==="project"?"project":"library",body.set);
+  if(c.teammates){
+    confirmDialog("Take "+what+" out of the repository?",
+      "It's in this project's vault, which "+plural(c.teammates.length,"teammate")+" also read"+(c.teammates.length?" ("+c.teammates.join(", ")+")":"")+". As a global key it's yours alone, so they stop getting it from the repository. Your copy doesn't change.",
+      "Make it global",
+      async function(){await placed(await api("/api/place",Object.assign({},body,{force:true})))});
+    return;
+  }
+  const names=c.projects.map(function(u){return u.name+(u.viaGroup?" (through its group)":"")});
+  const target=body.project?((HUB&&HUB.projects.find(function(p){return p.root===body.project}))||{name:"one project"}).name:folderName();
+  const one=c.projects.length===1;
+  confirmDialog("Keep "+what+" for "+target+" only?",
+    names.join(", ")+(one?" gets":" get")+" it too. Kept for "+target+" only, "+(one?"it stops":"they stop")+" getting it: hush takes it out of "+(one?"its list":"their lists")+". Nothing is deleted.",
+    "Keep it for "+target,
+    async function(){await placed(await api("/api/place",Object.assign({},body,{force:true})))});
+}
+async function placed(r){await refresh(r);toast(r.done)}
 function tildePath(p){const m=/^(\/Users\/[^/]+|\/home\/[^/]+)(\/.*)?$/.exec(p);return m?"~"+(m[2]||""):p}
 const VAULT_MADE="made this project's vault — commit .hush/vault.json so the team gets it";
 
 /* ------------------------------------------------------------ the model -- */
 
+/** Your global sets: the library's, less those kept for this project only. */
+function globalSets(){return S.library.filter(function(x){return !x.own})}
+/** What a project lists to use a library set. */
+function linkOf(set){return set.link||(set.name==="default"?"library:default":set.name)}
+/** This project's own sets: kept for it in your library, and those in its repository's vault. */
+function isOwn(where,set){return where==="project"||Boolean(set&&set.own)}
+
 /** Every set a run gets, in the order they apply, with the card data for each. */
 function usedSets(){
   return S.used.map(function(name,i){
+    // A whole group of global sets: every set filed under it.
+    if(name.indexOf("group:")===0){
+      const g=(S.groups||[]).find(function(x){return x.link===name});
+      if(!g)return {missing:name.slice(6)+" (a group)",link:name,index:i};
+      const sets=g.sets.map(function(n){return S.library.find(function(x){return x.name===n})}).filter(Boolean);
+      return {group:g,sets:sets,where:"library",link:name,index:i};
+    }
     // One key from a global set (dragged onto this project): a one-key entry.
     const at=name.indexOf("#");
     if(at>0){
@@ -243,10 +314,16 @@ function usedSets(){
   }).filter(Boolean);
 }
 
+/** What each entry a project uses gives it: [{key, label, from}] — from: the set the value is in. */
+function provides(u){
+  if(u.group)return [].concat.apply([],u.sets.map(function(s){return s.keys.map(function(k){return {key:k,label:s.label,from:"library:"+s.name}})}));
+  if(u.keyLink)return u.set.keys.map(function(k){return {key:k,label:u.fromSet.label,from:"library:"+u.fromSet.name}});
+  return u.set?u.set.keys.map(function(k){return {key:k,label:u.set.label,from:u.where+":"+u.set.name}}):[];
+}
 /** KEY -> the label of the set whose value a run actually gets (the last one to define it). */
 function winners(){
   const w={};
-  usedSets().forEach(function(u){if(u.set)u.set.keys.forEach(function(k){w[k]={label:u.set.label,link:u.link}})});
+  usedSets().forEach(function(u){provides(u).forEach(function(p){w[p.key]={label:p.label,link:u.link}})});
   return w;
 }
 
@@ -254,8 +331,8 @@ function winners(){
 function sourceFor(key){
   const p=S.project.find(function(x){return S.used.indexOf(x.name)<0&&x.keys.indexOf(key)>-1});
   if(p)return {set:p,link:p.name};
-  const l=S.library.find(function(x){const link=x.name==="default"?"library:default":x.name;return S.used.indexOf(link)<0&&x.keys.indexOf(key)>-1});
-  return l?{set:l,link:l.name==="default"?"library:default":l.name}:null;
+  const l=S.library.find(function(x){return S.used.indexOf(linkOf(x))<0&&x.keys.indexOf(key)>-1});
+  return l?{set:l,link:linkOf(l)}:null;
 }
 
 function setLabel(where,name){

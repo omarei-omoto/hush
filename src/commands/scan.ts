@@ -3,7 +3,7 @@
  */
 import { resolve as resolvePath } from "node:path";
 import { scanTree, reconcile } from "../scan.ts";
-import { parseKeyLink, usedSets, librarySets } from "../library.ts";
+import { parseKeyLink, parseGroupLink, usedSets, librarySets, setsInGroup, openGlobal } from "../library.ts";
 import { type Args, bool } from "../cli/args.ts";
 import { ctxLoose } from "../cli/context.ts";
 import { collectExtraSets } from "../cli/sets.ts";
@@ -28,8 +28,17 @@ export async function cmdScan(a: Args): Promise<void> {
   const keysOf = new Map<string, string[]>();
   for (const s of librarySets()) keysOf.set(s.name, s.keys);
   for (const s of loose.vault?.sets() ?? []) keysOf.set(s.name, s.keys);
-  // A single key taken from a library set (set#KEY) provides just that key.
-  const vaultKeys = [...new Set(names.flatMap((n) => parseKeyLink(n) ? [parseKeyLink(n)!.key] : (keysOf.get(n) ?? [])))];
+  // A single key taken from a library set (set#KEY) provides just that key;
+  // a group (group:<slug>) every key of every set in it.
+  const library = openGlobal();
+  const keysFor = (n: string): string[] => {
+    const pick = parseKeyLink(n);
+    if (pick) return [pick.key];
+    const group = parseGroupLink(n);
+    if (group !== null) return setsInGroup(library, group).flatMap((set) => keysOf.get(set) ?? []);
+    return keysOf.get(n) ?? [];
+  };
+  const vaultKeys = [...new Set(names.flatMap(keysFor))];
 
   const r = reconcile(usages, vaultKeys);
 

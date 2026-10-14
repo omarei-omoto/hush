@@ -124,6 +124,10 @@ export abstract class VaultValues extends VaultCore {
     source?: string;
     /** Folders it may be used in; absent means anywhere. */
     onlyIn?: string[];
+    /** The group it is filed under, in a library. */
+    group?: string;
+    /** The one project it belongs to, when it is kept only there. */
+    project?: string;
     keys: string[];
     /** Has a key of its own, so scoped members can be given it (or kept out). */
     restricted: boolean;
@@ -147,6 +151,8 @@ export abstract class VaultValues extends VaultCore {
           ...(Array.isArray(meta.onlyIn) && meta.onlyIn.length
             ? { onlyIn: meta.onlyIn.map((p) => safeText(p, 300) ?? "?") }
             : {}),
+          ...(safeText(meta.group, 80) ? { group: safeText(meta.group, 80) } : {}),
+          ...(safeText(meta.project, 300) ? { project: safeText(meta.project, 300) } : {}),
           keys: Object.keys(this.data.envs[name] ?? {})
             .sort()
             .map((key) => safeText(key, 64) ?? "<unprintable>"),
@@ -178,12 +184,18 @@ export abstract class VaultValues extends VaultCore {
     this.data.meta ??= {};
     const current = this.data.meta[env] ?? {};
     const next: EnvMeta = { ...current };
-    for (const field of ["label", "description", "whenToUse", "source"] as const) {
+    for (const field of ["label", "description", "whenToUse", "source", "group"] as const) {
       // A field that was not given is left alone; an empty one is cleared.
       if (meta[field] === undefined) continue;
-      const value = safeText(meta[field], field === "label" ? 80 : 500);
+      const value = safeText(meta[field], field === "label" || field === "group" ? 80 : 500);
       if (value) next[field] = value;
       else delete next[field];
+    }
+    if (meta.project !== undefined) {
+      if (meta.project) {
+        assertOnlyInPattern(meta.project);
+        next.project = meta.project.trim();
+      } else delete next.project;
     }
     if (meta.onlyIn !== undefined) {
       for (const p of meta.onlyIn) assertOnlyInPattern(p);

@@ -7,7 +7,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
-import { type Composed, composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt } from "./library.ts";
+import { type Composed, composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt, libraryGroups, sameFolder } from "./library.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
 import {
   checkEnv, checkScopes, checkCommand, checkHost, runScope, requestScope,
@@ -119,6 +119,9 @@ interface ListedSet {
   keys: string[];
   where: "library" | "project";
   used: boolean;
+  /** A library set kept for this project only, not one of the person's global keys. */
+  own?: boolean;
+  group?: string;
 }
 
 /**
@@ -142,16 +145,22 @@ function listSets(ctx: Ctx): ListedSet[] {
     where: "project",
     used: used.has(s.name),
   }));
-  const library: ListedSet[] = librarySets().map((s) => ({
-    name: s.name,
-    label: s.label,
-    description: s.description,
-    whenToUse: s.whenToUse,
-    onlyIn: s.onlyIn,
-    keys: s.keys,
-    where: "library",
-    used: used.has(linkNameFor("library", s.name)),
-  }));
+  const place = placeOf(ctx.hushDir);
+  // Another project's own sets are not this agent's to know about, let alone pick.
+  const library: ListedSet[] = librarySets()
+    .filter((s) => !s.project || sameFolder(s.project, place))
+    .map((s) => ({
+      name: s.name,
+      label: s.label,
+      description: s.description,
+      whenToUse: s.whenToUse,
+      onlyIn: s.project ? undefined : s.onlyIn,
+      keys: s.keys,
+      where: "library",
+      used: used.has(linkNameFor("library", s.name)),
+      ...(s.project ? { own: true } : {}),
+      ...(s.group ? { group: s.group } : {}),
+    }));
   return [...project, ...library].sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -201,7 +210,7 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       const all = listSets(ctx);
       if (!all.length) return text("No sets in this vault or library yet.");
       const lines = all.map((s) => {
-        const flags = [s.where, s.used ? "used by this project" : null].filter(Boolean).join(", ");
+        const flags = [s.own ? "only this project" : s.where, s.group ? `group: ${s.group}` : null, s.used ? "used by this project" : null].filter(Boolean).join(", ");
         const label = s.label === s.name ? s.name : `${s.label} (${s.name})`;
         const limit = s.onlyIn
           ? allowedAt(s.onlyIn, placeOf(ctx.hushDir))
@@ -217,8 +226,12 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
         name === "hush_list_accounts"
           ? "\n\n(hush_list_accounts is deprecated and will be removed in hush 2.0; use hush_list_sets — this is the same list.)"
           : "";
+      const groups = libraryGroups(openGlobal());
+      const groupLines = groups.length
+        ? `\n\nGroups (each gives every set in it): ${groups.map((g) => `${g.label} = group:${g.slug} (${g.sets.join(", ")})`).join("; ")}`
+        : "";
       return text(
-        `${all.length} set(s) available:\n${lines.join("\n")}\n\n` +
+        `${all.length} set(s) available:\n${lines.join("\n")}${groupLines}\n\n` +
           `Pass one to hush_run as sets: ["<name>"].` +
           footer,
       );

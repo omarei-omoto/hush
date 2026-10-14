@@ -15,7 +15,7 @@ import { assess } from "./posture.ts";
 import { biometryStatus } from "./biometry.ts";
 import { AGENTS, mcpRegistrations } from "./agents.ts";
 import { Vault, ValidationError } from "./vault.ts";
-import { librarySets, openGlobal, usedSets, globalVaultName, globalVaultExists, namedVaults, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor, placeOf, allowedAt, parseKeyLink } from "./library.ts";
+import { librarySets, openGlobal, usedSets, globalVaultName, globalVaultExists, namedVaults, ensureProjectVault, suggestSets, LIBRARY_DEFAULT, linkNameFor, placeOf, allowedAt, parseKeyLink, parseGroupLink, libraryGroups, setsInGroup, sameFolder } from "./library.ts";
 import { requireIdentity, publicKeyOf, hushHome, type ResolvedIdentity } from "./identity.ts";
 import { CATALOG } from "./services.ts";
 import { preview } from "./redact.ts";
@@ -156,10 +156,16 @@ function resolutionLines(vault: Vault | null, libraryVault: Vault | null, used: 
     }
     const projSet = vault?.sets().find((s) => s.name === name);
     if (projSet) { push(projSet.label, "(this folder)", true); return; }
+    const group = parseGroupLink(name);
+    if (group !== null) {
+      const g = libraryGroups(libraryVault).find((x) => x.slug === group);
+      push(g ? g.label : group, g ? "(global group)" : "(not found)", true);
+      return;
+    }
     const pick = parseKeyLink(name);
     if (pick) { push(pick.key, "(global key)", true); return; }
     const libSet = libraryVault?.sets().find((s) => s.name === name);
-    if (libSet) { push(libSet.label, "(library)", true); return; }
+    if (libSet) { push(libSet.label, libSet.project ? "(only this project)" : "(library)", true); return; }
     push(name, "(not found)", true);
   });
   return lines;
@@ -296,7 +302,8 @@ export function state(ctx: UiCtx) {
   let libraryError = "";
   let libraryVault: Vault | null = null;
   try {
-    library = librarySets();
+    // Another project's own sets are its business: not offered, not shown, not previewed here.
+    library = librarySets().filter((s) => !s.project || sameFolder(s.project, place));
     libraryVault = openGlobal();
   } catch (e) {
     libraryError = (e as Error).message.split("\n")[0];
@@ -312,6 +319,9 @@ export function state(ctx: UiCtx) {
     onlyIn: s.onlyIn ?? [],
     usableHere: usableHere(s.onlyIn),
     keys: s.keys,
+    group: s.group ?? "",
+    // Kept for this project only: listed with its own keys, not among your global ones.
+    own: Boolean(s.project),
     secrets: libraryVault ? describe(libraryVault, s.name) : [],
     // What the page sends to /api/link: the library's default is recorded as
     // library:default, because a plain "default" means this folder's own.
@@ -378,6 +388,15 @@ export function state(ctx: UiCtx) {
     // not work on the keys inside it, and the state everyone starts in is one
     // big unnamed pile that needs carving up.
     library: librarySetsOut,
+    // Folders of global sets: a project can use one whole ("group:<slug>").
+    groups: libraryGroups(libraryVault).map((g) => ({
+      name: g.slug,
+      label: g.label,
+      link: g.link,
+      sets: g.sets,
+      used: used.includes(g.link),
+      position: positionOf(g.link),
+    })),
     // Fed to the "for a service…" hint on the new-set form, so naming a set
     // for a known service (e.g. twilio) can prefill its variable names.
     catalog: Object.entries(CATALOG).map(([id2, d]) => ({ id: id2, label: d.label, vars: d.vars })),
@@ -469,8 +488,15 @@ export function hubState(startedRoot: string): {
 } {
   crawlOnce();
   const library = librarySets();
-  const globalKeys = new Set(library.flatMap((s) => s.keys));
-  const keysOfLibrarySet = (name: string): string[] => library.find((s) => s.name === name)?.keys ?? [];
+  let libraryVault: Vault | null = null;
+  try {
+    libraryVault = openGlobal();
+  } catch {
+    // An unreadable library still leaves a list of projects to show.
+  }
+  // A set kept for one project is that project's, not one of your global keys.
+  const globalKeys = new Set(library.filter((s) => !s.project).flatMap((s) => s.keys));
+  const librarySet = (name: string) => library.find((s) => s.name === name);
   const listed = listProjects();
   const realStart = (() => {
     try {
@@ -489,11 +515,15 @@ export function hubState(startedRoot: string): {
     const hushDir = join(root, ".hush");
     const vaultPath = join(hushDir, "vault.json");
     const own = new Set<string>();
+    const projectSets = new Set<string>();
     let state: HubProject["state"] = p.hush ? "links-only" : "codebase";
     if (existsSync(vaultPath)) {
       state = "vault";
       try {
-        for (const s of Vault.open(vaultPath).sets()) for (const k of s.keys) own.add(k);
+        for (const s of Vault.open(vaultPath).sets()) {
+          projectSets.add(s.name);
+          for (const k of s.keys) own.add(k);
+        }
       } catch {
         // A vault this machine cannot open still belongs on the list.
       }
@@ -501,10 +531,17 @@ export function hubState(startedRoot: string): {
     const global = new Set<string>();
     if (p.hush) {
       for (const link of usedSets(hushDir)) {
-        if (link === "default") continue;
+        if (link === "default" || projectSets.has(link)) continue;
+        const group = parseGroupLink(link);
         const pick = parseKeyLink(link);
-        if (pick) global.add(pick.key);
-        else for (const k of keysOfLibrarySet(link === LIBRARY_DEFAULT ? "default" : link)) global.add(k);
+        if (group !== null) {
+          for (const set of setsInGroup(libraryVault, group)) for (const k of librarySet(set)?.keys ?? []) global.add(k);
+        } else if (pick) global.add(pick.key);
+        else {
+          const s = librarySet(link === LIBRARY_DEFAULT ? "default" : link);
+          // Its own keys, kept in your library only for it, count as its own.
+          for (const k of s?.keys ?? []) (s?.project && sameFolder(s.project, root) ? own : global).add(k);
+        }
       }
     }
     const all = new Set([...own, ...global]);

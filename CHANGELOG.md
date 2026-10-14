@@ -43,6 +43,46 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   not. A project page offers only the global sets that hold something its code
   is missing, not every set you own.
 
+### Global keys, a project's own keys, and groups
+
+- **Every key is either global or one project's own.** A global key is kept
+  once and is part of any project you give it to. A project's own key is kept
+  for that project alone: it is not among your global keys, and hush refuses it
+  in any other folder, for you and your agent. Both stay in your library under
+  `~/.hush`, never in a repository. A project page shows the two apart: **Only
+  <project>** and **From your global keys**.
+- **Move a key either way.** A project's own set or key has **Make global**:
+  it joins your global keys (a key goes into a global set you pick) and the
+  project keeps getting it. A global set or key has **Keep for <project>
+  only**; if other projects use it, hush names them and asks before taking it
+  from them. A set in the repository's vault (`.hush/vault.json`) can be made
+  global too, and hush asks first when teammates read it there. In the
+  terminal: `hush env global <set>`, `hush env here <set>`, and
+  `--from <set>` for one key.
+- **Groups of global sets.** File global sets into a group, such as "AI
+  stack", from a set's ⋯ menu or **New group**. Drag a group onto a project and
+  it gets every set in it, including sets you add to the group later (recorded
+  as `group:<name>` in its list of sets). Groups can be renamed, and ungrouping
+  keeps each project's sets. In the terminal: `hush env group <set> "<group>"`
+  and `hush use "<group>"`.
+- **The keys sidebar shows groups, then sets, then keys**, and you can drag
+  any of them onto a project. Global keys lists sets by group.
+- **Importing a `.env` on a project keeps it as that project's own** by
+  default, named after the project; importing on Global keys makes it global.
+  Where the project already has a vault, you can still put it in the
+  repository for the team.
+- **Tidy up**: Global keys points out global sets that only one project uses
+  as a whole (likely that project's `.env`, imported before keys could belong
+  to one project) and offers to make them that project's own.
+- **When two sets give a project the same key**, its page says which one
+  wins, with a link to let the other win. This replaces the up and down arrows.
+- `hush ls` shows your global keys by group, then this project's own sets,
+  the sets in its repository's vault, and what it uses from your global keys.
+  `hush_list_sets` marks a set that is only this project's, names its group,
+  and lists groups. Neither shows another project's own sets.
+- **Fixed:** closing the keys sidebar also hid the keys inside every set card
+  on the page.
+
 ## 0.12.0 — 2026-10-04
 
 Fixes from a deep review of 0.11.1 (docs/AUDIT.md, sixteenth pass): 33 findings,

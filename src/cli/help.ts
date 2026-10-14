@@ -56,6 +56,11 @@ ${bold("sets")}          — a set you name, describe and reuse
   hush env describe <name> [--description <t>] [--when <t>]
   hush env describe <name> --only-in "~/code/modio-*"   usable only in those folders (--anywhere undoes it)
   hush env move <KEY>… --to <set>      carve one big pile into named sets
+  hush env global <set> [--group <g>]  one of this project's own sets becomes a global key
+  hush env global <KEY> --from <set> --to <global set>   just one key of it
+  hush env here <set> [--from <set>]   a global set (or one key) kept for this project only
+  hush env group <set> "<group>"       file a global set in a group (--none, --rename, --ungroup)
+  hush use "<group>"                   this project uses every set in a group
   hush global [<vault>|--create]       which vault holds your library
 
 ${bold("sharing")}

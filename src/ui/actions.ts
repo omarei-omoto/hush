@@ -21,15 +21,29 @@ async function useHere(link,label,use){
   toast(use===false?"stopped using "+label+" here":label+" is now used here",
     use===false?null:{action:{label:"Undo",run:function(){useHere(link,label,false)}}});
 }
-async function moveOrder(index,delta){
-  const order=S.used.slice();
-  const j=index+delta;
-  if(j<0||j>=order.length)return;
-  const t=order[j];order[j]=order[index];order[index]=t;
+/* Two things this project uses give the same key: the later one wins, so move this one last. */
+async function letWin(link,label){
+  const order=S.used.filter(function(l){return l!==link}).concat([link]);
   await refresh(await api("/api/link",{order:order}));
+  toast(label+" wins now");
 }
 async function ensureLibrary(){
   if(!S.global.exists){await api("/api/global",{create:true})}
+}
+
+/**
+ * This project's own set for single keys: the one named after it, in your
+ * library and kept for this project only. Made, and used here, the first
+ * time a key needs it. Returns its name.
+ */
+async function ownSetName(){
+  const name=folderName();
+  const have=S.library.find(function(x){return x.own&&x.label===name});
+  if(have)return have.name;
+  await ensureLibrary();
+  const c=await api("/api/env",{action:"create",where:"library",own:true,label:name});
+  await api("/api/link",{name:c.created,use:true});
+  return c.created;
 }
 
 /** Add a secret: the one thing people come here to do most. */
@@ -47,34 +61,43 @@ function addSecretDialog(prefill){
   }},"Multi-line value");
   const reveal=h("button",{type:"button",class:"linkbtn",onclick:function(){single.type=single.type==="password"?"text":"password";reveal.textContent=single.type==="password"?"Show":"Hide"}},"Show");
 
-  // Where it goes: the sets this project uses first, then its other sets, then the library.
+  // Where it goes: this project's own keys first, then your global ones.
+  const name0=folderName();
   const sel=h("select",{class:"input"});
-  const used=usedSets().filter(function(u){return u.set&&!u.placeholder});
-  const g1=h("optgroup",{label:"Used here"});
-  used.forEach(function(u){g1.append(h("option",{value:u.where+"|"+u.set.name},u.set.label+(u.where==="library"?"  · library":"")))});
-  if(!used.some(function(u){return u.where==="project"&&u.set.name==="default"}))g1.append(h("option",{value:"project|default"},"default  · this project"));
+  const own=S.library.filter(function(x){return x.own});
+  const g1=h("optgroup",{label:"Only "+name0});
+  if(!own.some(function(x){return x.label===name0}))g1.append(h("option",{value:"own|"},name0+"  · its own keys"));
+  own.forEach(function(s){g1.append(h("option",{value:"library|"+s.name},s.label))});
+  S.project.forEach(function(s){g1.append(h("option",{value:"project|"+s.name},s.label+"  · in the repo, shared with the team"))});
+  g1.append(h("option",{value:"new|own"},"New set for "+name0+" only…"));
   sel.append(g1);
-  const others=S.project.filter(function(s){return S.used.indexOf(s.name)<0});
-  if(others.length){const g=h("optgroup",{label:"This project"});others.forEach(function(s){g.append(h("option",{value:"project|"+s.name},s.label))});sel.append(g)}
-  const lib=S.library.filter(function(s){return S.used.indexOf(s.name==="default"?"library:default":s.name)<0});
-  if(lib.length){const g=h("optgroup",{label:"Library"});lib.forEach(function(s){g.append(h("option",{value:"library|"+s.name},s.label))});sel.append(g)}
-  sel.append(h("optgroup",{label:"New"},h("option",{value:"new|project"},"New set in this project…"),h("option",{value:"new|library"},"New set in my library…")));
-  if(prefill.target)sel.value=prefill.target;
+  const g2=h("optgroup",{label:"Global — any project can use it"});
+  globalSets().forEach(function(s){g2.append(h("option",{value:"library|"+s.name},s.label+(s.group?"  · "+s.group:"")))});
+  if(!globalSets().some(function(s){return s.name==="default"}))g2.append(h("option",{value:"library|default"},"Catch-all"));
+  g2.append(h("option",{value:"new|library"},"New global set…"));
+  sel.append(g2);
+  sel.value=prefill.target||(route()==="library"?"library|default":(own.find(function(x){return x.label===name0})?"library|"+own.find(function(x){return x.label===name0}).name:"own|"));
   const newName=h("input",{class:"input",placeholder:"e.g. Stripe live"});
   const newWrap=field("New set name",newName);
   const useIt=h("input",{type:"checkbox",checked:true});
-  const useWrap=h("label",{class:"check"},useIt,h("span",null,"Use this set in ",h("b",{text:folderName()})));
+  const useWrap=h("label",{class:"check"},useIt,h("span",null,"Use this set in ",h("b",{text:name0})));
   const warn=h("div",{class:"banner warn",hidden:true});
   const note=h("input",{class:"input",placeholder:"e.g. live, read-only, expires June"});
 
   function target(){const v=sel.value.split("|");return {kind:v[0],where:v[0]==="new"?v[1]:v[0],name:v.slice(1).join("|")}}
+  function pick(t){
+    if(t.kind==="library")return S.library.find(function(x){return x.name===t.name});
+    if(t.kind==="project")return S.project.find(function(x){return x.name===t.name});
+    if(t.kind==="own")return own.find(function(x){return x.label===name0});
+    return null;
+  }
   function check(){
     const t=target();
     newWrap.hidden=t.kind!=="new";
-    const link=t.kind==="library"?(t.name==="default"?"library:default":t.name):t.name;
-    useWrap.hidden=!(t.kind==="new"||(t.kind==="library"&&S.used.indexOf(link)<0)||(t.kind==="project"&&S.used.indexOf(t.name)<0));
-    const list=t.where==="library"?S.library:S.project;
-    const s=t.kind==="new"?null:list.find(function(x){return x.name===t.name});
+    const s=pick(t);
+    // A project's own keys are always used there; a global set or a repo set only when you say so.
+    const ownTarget=t.where==="own"||(s&&s.own);
+    useWrap.hidden=ownTarget||!(t.kind==="new"||(s&&S.used.indexOf(t.kind==="library"?linkOf(s):s.name)<0)||(!s&&t.kind==="library"));
     const exists=s&&s.keys.indexOf(key.value)>-1;
     warn.hidden=!exists;
     clear(warn);if(exists)warn.append(icon("alert"),h("span",{text:key.value+" is already in "+s.label+" — saving replaces it."}));
@@ -97,50 +120,117 @@ function addSecretDialog(prefill){
       if(!KEY_RE.test(k)){toast("a name is letters, digits and _, not starting with a digit",{error:true});key.focus();return false}
       if(!v){toast("paste a value first",{error:true});return false}
       const t=target();
-      let where=t.where,scope=t.name;
-      if(t.kind==="new"){
+      let where=t.kind==="project"?"project":"library",scope=t.name,link=false;
+      if(t.kind==="own"){
+        scope=await ownSetName();
+      }else if(t.kind==="new"){
         if(!newName.value.trim()){toast("name the new set",{error:true});newName.focus();return false}
-        if(where==="library")await ensureLibrary();
-        const c=await api("/api/env",{action:"create",where:where,label:newName.value.trim()});
+        await ensureLibrary();
+        const c=await api("/api/env",{action:"create",where:"library",own:t.where==="own",label:newName.value.trim()});
         scope=c.created;
-      }else if(where==="library")await ensureLibrary();
+        link=t.where==="own"||useIt.checked;
+      }else{
+        if(where==="library")await ensureLibrary();
+        const s=pick(t);
+        const used=S.used.indexOf(where==="library"?(s?linkOf(s):scope):scope)>-1;
+        link=!used&&(s&&s.own?true:!useWrap.hidden&&useIt.checked);
+      }
       const r=await api("/api/secret",{scope:scope,key:k,value:v,where:where,note:note.value.trim()||undefined});
       let next=r;
-      if(!useWrap.hidden&&useIt.checked){
-        next=await api("/api/link",{name:where==="library"&&scope==="default"?"library:default":scope,use:true});
-      }
+      if(link)next=await api("/api/link",{name:where==="library"&&scope==="default"?"library:default":scope,use:true});
       await refresh(next);
       toast(r.vaultCreated?VAULT_MADE:"saved "+k);
     },
   });
 }
 
+/** A group to file a global set under: one there is, a new one, or none. */
+function groupChooser(current){
+  const sel=h("select",{class:"input"});
+  sel.append(h("option",{value:"",text:"No group"}));
+  (S.groups||[]).forEach(function(g){sel.append(h("option",{value:g.label},g.label))});
+  sel.append(h("option",{value:"\u0000new",text:"New group…"}));
+  sel.value=current||"";
+  const name=h("input",{class:"input",placeholder:"e.g. AI stack"});
+  const nameWrap=field("New group's name",name);
+  function sync(){nameWrap.hidden=sel.value!=="\u0000new"}
+  sel.onchange=sync;sync();
+  const box=h("div",{class:"stack"},field("Group (optional)",sel,"A folder for your global keys. A project given the group gets every set in it."),nameWrap);
+  return {
+    el:box,
+    /* "" for no group; null when "New group…" is picked but not named yet. */
+    value:function(){return sel.value==="\u0000new"?(name.value.trim()||null):sel.value},
+  };
+}
+
+/** where: "own" (only this project, in your library), "library" (global) or "project" (the repository's vault). */
 function newSetDialog(where){
-  const name=h("input",{class:"input",placeholder:where==="library"?"e.g. Personal OpenAI":"e.g. Staging"});
+  const own=where==="own";
+  const name=h("input",{class:"input",placeholder:where==="library"?"e.g. Personal OpenAI":"e.g. Stripe test"});
   const desc=h("input",{class:"input",placeholder:"Live Stripe and Postgres for deploys"});
   const svc=h("select",{class:"input"},h("option",{value:""},"No — I'll add keys myself"));
   S.catalog.forEach(function(c){svc.append(h("option",{value:c.id},c.label+"  ("+c.vars.join(", ")+")"))});
-  const useIt=h("input",{type:"checkbox",checked:where==="project"});
+  const onProject=route()==="project"&&S.folder.state!=="unset";
+  const useIt=h("input",{type:"checkbox",checked:where==="project"||onProject});
+  const grp=where==="library"?groupChooser(""):null;
   dialog({
-    title:where==="library"?"New set in your library":"New set in this project",
-    lead:where==="library"?"Yours alone, on this machine. Any project can add it later."
+    title:own?"New set for "+folderName():where==="library"?"New global set":"New set in the repository",
+    lead:own?"Only "+folderName()+" gets it, and hush refuses it anywhere else. Yours alone, never in the repository."
+      :where==="library"?"Yours alone. Any project can use it: drag it onto one."
       :"Committed with the project, so everyone on the team gets it.",
     submit:"Create set",
     body:[field("Name",name),field("What is it for? (optional)",desc,"Your agent reads this to pick the right set."),
       field("For a known service?",svc,"hush asks for exactly the variables it needs."),
-      h("label",{class:"check"},useIt,h("span",null,"Use it in ",h("b",{text:folderName()})))],
+      grp?grp.el:null,
+      own?null:h("label",{class:"check"},useIt,h("span",null,"Use it in ",h("b",{text:folderName()})))],
     onSubmit:async function(){
       const label=name.value.trim();
       if(!label){toast("give it a name",{error:true});name.focus();return false}
-      if(where==="library")await ensureLibrary();
-      const r=await api("/api/env",{action:"create",where:where,label:label,description:desc.value.trim()||undefined,service:svc.value||undefined});
+      if(where!=="project")await ensureLibrary();
+      const r=await api("/api/env",{action:"create",where:own?"library":where,own:own,label:label,description:desc.value.trim()||undefined,service:svc.value||undefined});
       let next=r;
-      if(useIt.checked)next=await api("/api/link",{name:where==="library"&&r.created==="default"?"library:default":r.created,use:true});
+      if(grp&&grp.value())next=await api("/api/group",{action:"file",set:r.created,group:grp.value()});
+      if(own||useIt.checked)next=await api("/api/link",{name:where!=="project"&&r.created==="default"?"library:default":r.created,use:true});
       await refresh(next);
       toast(r.vaultCreated?VAULT_MADE:"created "+label);
-      if(r.vars&&r.vars.length)serviceValuesDialog(where,r.created,label,r.vars);
+      if(r.vars&&r.vars.length)serviceValuesDialog(where==="project"?"project":"library",r.created,label,r.vars);
     },
   });
+}
+
+/* ---------------------------------------------------- making things global -- */
+
+/** One of this project's own sets, made global: up into your global keys, still part of this project. */
+function makeGlobalSetDialog(where,set){
+  const grp=groupChooser("");
+  const n=set.keys.length;
+  dialog({title:"Make "+set.label+" global",
+    lead:"Its "+plural(n,"key")+" join your global keys, so you can drag "+(n===1?"it":"them")+" onto any project. "+folderName()+" keeps getting "+(n===1?"it":"them")+"."+(where==="project"?" "+(n===1?"It leaves":"They leave")+" the repository's vault: global keys are yours alone.":""),
+    submit:"Make it global",body:[grp.el],
+    onSubmit:async function(){await place({action:"global",where:where,set:set.name,group:grp.value()||undefined})}});
+}
+/** One key of this project's own, made global: into a global set you pick, or a new one. */
+function makeGlobalKeyDialog(where,set,k){
+  const sel=h("select",{class:"input"});
+  globalSets().filter(function(s){return s.name!=="default"}).forEach(function(s){sel.append(h("option",{value:s.name},s.label+(s.group?"  · "+s.group:"")))});
+  sel.append(h("option",{value:"\u0000new",text:"New global set…"}));
+  const service=S.catalog.find(function(c){return c.vars.indexOf(k)>-1});
+  const fits=globalSets().find(function(s){return service&&s.label.toLowerCase()===service.label.toLowerCase()});
+  sel.value=fits?fits.name:"\u0000new";
+  const name=h("input",{class:"input",placeholder:"e.g. Stripe",value:service?service.label:""});
+  const nameWrap=field("New set's name",name);
+  const grp=groupChooser("");
+  function sync(){const isNew=sel.value==="\u0000new";nameWrap.hidden=!isNew;grp.el.hidden=!isNew}
+  sel.onchange=sync;
+  dialog({title:"Make "+k+" global",
+    lead:"It joins your global keys, in the set you pick, and stays part of "+folderName()+". Every project that uses that set gets it too.",
+    submit:"Make it global",body:[field("Into",sel),nameWrap,grp.el],
+    onSubmit:async function(){
+      const isNew=sel.value==="\u0000new";
+      if(isNew&&!name.value.trim()){toast("name the new set",{error:true});name.focus();return false}
+      await place({action:"global",where:where,set:set.name,key:k,to:isNew?undefined:sel.value,toLabel:isNew?name.value.trim():undefined,group:isNew?(grp.value()||undefined):undefined});
+    }});
+  sync();
 }
 
 function serviceValuesDialog(where,scope,label,vars){
@@ -201,8 +291,13 @@ function replaceDialog(where,scope,key){
   });
 }
 
+/* Within one kind: global to global, this project's own to its own. "Make global" crosses over. */
+function sameKind(where,set){
+  if(where==="project")return S.project;
+  return S.library.filter(function(x){return Boolean(x.own)===Boolean(set.own)});
+}
 function moveDialog(where,fromSet,key){
-  const list=(where==="library"?S.library:S.project).filter(function(x){return x.name!==fromSet.name});
+  const list=sameKind(where,fromSet).filter(function(x){return x.name!==fromSet.name});
   const sel=h("select",{class:"input"});
   list.forEach(function(s){sel.append(h("option",{value:s.name},s.label))});
   dialog({
@@ -242,6 +337,7 @@ async function reveal(where,scope,key,bar,plain,btn){
 
 /* ------------------------------------------------------------- set cards */
 
+/** link: what this project lists to get the set the row is in (its own name, a group, …), when it does. */
 function keyRow(where,set,s,win,link){
   const over=win&&win[s.key]&&win[s.key].link!==link;
   const plain=h("div",{class:"plain"});
@@ -252,20 +348,24 @@ function keyRow(where,set,s,win,link){
   const sub=[];
   if(s.note)sub.push(h("span",{class:"tag",text:s.note}));
   if(over)sub.push(h("span",{text:"overridden by "+win[s.key].label}));
-  // A global key (one of the library's, shown in its own set) can be dragged
-  // onto any project; a key link entry on a project page cannot.
-  const global=where==="library"&&set.name.indexOf("#")<0;
+  // A global key can be dragged onto any project; one of this project's own goes global first.
+  const global=where==="library"&&!set.own&&set.name.indexOf("#")<0;
+  const own=isOwn(where,set);
+  const onProject=route()==="project"&&S.folder.state!=="unset";
+  const usedHere=onProject&&link&&S.used.indexOf(link)>-1;
   const row=h("div",{class:"krow"+(over?" over":"")},
     h("div",{class:"kname"},h("div",{class:"kline"},global?h("span",{class:"grip","aria-hidden":"true"},icon("grip")):null,h("span",{class:"k",text:s.key,title:global?"Drag onto a project to use it there":s.key})),sub.length?h("div",{class:"sub"},sub):null),
     bar,
-    h("div",{class:"kact"},rv,moreButton("More for "+s.key,[
-      global?{label:"Use in a project…",run:function(){giveKeyDialog(set.name,s.key)}}:null,
+    h("div",{class:"kact"},rv,moreButton("More for "+s.key,function(){return [
+      own&&onProject?{label:"Make global…",run:function(){makeGlobalKeyDialog(where,set,s.key)}}:null,
+      global&&usedHere?{label:"Keep for "+folderName()+" only",run:function(){place({action:"here",set:set.name,key:s.key})}}:null,
+      global?{label:"Use in a project…",run:function(){giveKeyDialog({kind:"key",set:set.name,key:s.key})}}:null,
       {label:"Replace value…",run:function(){replaceDialog(where,set.name,s.key)}},
       where==="project"?{label:s.note?"Edit tag…":"Add a tag…",run:function(){tagDialog(set.name,s.key,s.note)}}:null,
-      (where==="library"?S.library:S.project).length>1?{label:"Move to another set…",run:function(){moveDialog(where,set,s.key)}}:null,
+      sameKind(where,set).length>1?{label:"Move to another set…",run:function(){moveDialog(where,set,s.key)}}:null,
       "-",
       {label:"Delete "+s.key,danger:true,run:function(){confirmDialog("Delete "+s.key+"?","It is removed from "+set.label+". This cannot be undone.","Delete",function(){return setSecret(set.name,s.key,null,where)})}},
-    ])));
+    ]})));
   if(global)draggableKey(row,set.name,s.key);
   return row;
 }
@@ -297,48 +397,60 @@ function addKeyRow(where,set){
 
 /**
  * One set: its name and where it lives, what it is for, and every key in it.
- * ctx.order adds the position badge and up/down; ctx.useToggle adds the
- * library's use-here button.
+ * ctx.here: shown on a project page as one it uses (ctx.link is how it is
+ * listed there). ctx.useToggle adds Global keys' use-here button.
  */
 function setCard(where,set,ctx){
   ctx=ctx||{};
-  const link=ctx.link||set.name;
+  const link=ctx.link||(where==="library"?linkOf(set):set.name);
+  const own=isOwn(where,set);
+  const global=where==="library"&&!set.own;
+  const onProject=route()==="project"&&S.folder.state!=="unset";
+  const usedHere=S.used.indexOf(link)>-1;
+  const floor=where==="project"&&set.name==="default";
   const tools=h("div",{class:"tools"});
-  if(ctx.order){
-    tools.append(h("button",{type:"button",class:"iconbtn","aria-label":"Apply "+set.label+" earlier",disabled:ctx.order.index===0,
-      onclick:function(){moveOrder(ctx.order.index,-1)}},icon("up")));
-    tools.append(h("button",{type:"button",class:"iconbtn","aria-label":"Apply "+set.label+" later",disabled:ctx.order.index===S.used.length-1,
-      onclick:function(){moveOrder(ctx.order.index,1)}},icon("down")));
+  if(ctx.here&&own&&set.keys.length){
+    tools.append(h("button",{type:"button",class:"btn sm",title:"Make "+set.label+" one of your global keys — "+folderName()+" keeps getting it",
+      onclick:function(){makeGlobalSetDialog(where,set)}},icon("arrowup"),"Make global"));
   }
-  if(ctx.useToggle&&set.usableHere===false&&S.used.indexOf(link)<0){
+  // Already used here as part of a group it is in.
+  const viaGroup=global&&set.group?(S.groups||[]).find(function(g){return g.used&&g.sets.indexOf(set.name)>-1}):null;
+  if(ctx.useToggle&&set.usableHere===false&&!usedHere){
     // Kept for other folders: say so where the button would be, not after a click.
     tools.append(h("button",{type:"button",class:"btn sm",disabled:true,title:"Only for "+set.onlyIn.join(", ")},"Other folders only"));
-  }else if(ctx.useToggle){
-    const used=S.used.indexOf(link)>-1;
-    tools.append(h("button",{type:"button",class:"btn sm"+(used?" on":""),onclick:function(){useHere(link,set.label,!used)},
-      title:used?"Stop using it in "+folderName():null},used?[icon("check"),"Used here"]:"Use here"));
+  }else if(ctx.useToggle&&viaGroup&&!usedHere){
+    tools.append(h("button",{type:"button",class:"btn sm on",disabled:true,title:folderName()+" uses the whole group "+viaGroup.label},icon("check"),"Used through "+viaGroup.label));
+  }else if(ctx.useToggle&&S.folder.state!=="unset"){
+    tools.append(h("button",{type:"button",class:"btn sm"+(usedHere?" on":""),onclick:function(){useHere(link,set.label,!usedHere)},
+      title:usedHere?"Stop using it in "+folderName():"Use it in "+folderName()},usedHere?[icon("check"),"Used here"]:"Use here"));
   }
-  const floor=where==="project"&&set.name==="default";
   tools.append(moreButton("More for "+set.label,function(){return [
-    {label:"Add a key…",run:function(){addSecretDialog({target:where+"|"+set.name})}},
+    {label:"Add a key…",run:function(){addSecretDialog({target:(where==="project"?"project|":"library|")+set.name})}},
     {label:"Edit name and description…",run:function(){editSetDialog(where,set)}},
-    ctx.order&&!floor?{label:"Stop using here",run:function(){useHere(link,set.label,false)}}:null,
+    own&&onProject&&set.keys.length?{label:"Make global…",run:function(){makeGlobalSetDialog(where,set)}}:null,
+    global&&set.name!=="default"?{label:set.group?"Move to another group…":"Put in a group…",run:function(){groupPickDialog(set)}}:null,
+    global?{label:"Use in a project…",run:function(){giveKeyDialog({kind:"set",set:set.name})}}:null,
+    global&&set.name!=="default"&&onProject&&usedHere?{label:"Keep for "+folderName()+" only",run:function(){place({action:"here",set:set.name})}}:null,
+    ctx.here&&!floor?{label:"Stop using here",run:function(){useHere(link,set.label,false)}}:null,
     "-",
     floor?null:{label:"Delete set…",danger:true,run:function(){deleteSetDialog(where,set)}},
   ]}));
 
+  const badge=where==="project"?h("span",{class:"badge",title:"In .hush/vault.json: everyone on the team who can open it gets these"},"In the repo")
+    :set.own?h("span",{class:"badge"},"Only here")
+    :h("span",{class:"badge ok"},"Global");
   const top=h("div",{class:"top"},
-    ctx.order?h("div",{class:"ord",title:"Applied in position "+(ctx.order.index+1)},String(ctx.order.index+1)):null,
-    h("div",{class:"title"},h("b",{text:set.label}),
-      h("span",{class:"badge"},where==="library"?"Library":"Project"),
+    h("div",{class:"title"},h("b",{text:set.label}),badge,
+      global&&set.group?h("span",{class:"badge"},icon("folder"),set.group):null,
       h("span",{class:"count",text:plural(set.keys.length,"key")})),
     tools);
-  const card=h("article",{class:"card set"+(ctx.order?" ordered":""),"aria-label":set.label},top);
+  const card=h("article",{class:"card set","aria-label":set.label},top);
   const bits=[];
   if(set.description)bits.push(set.description);
   if(set.whenToUse)bits.push("Use for: "+set.whenToUse);
-  if(set.onlyIn&&set.onlyIn.length)bits.push("Only in "+set.onlyIn.join(", ")+(set.usableHere===false?" — not usable in this folder":""));
-  if(floor&&!set.description)bits.push("Always applied first. Keys that only this project needs go here.");
+  // A set kept for this project carries its folder as its only-in rule; saying so again is noise.
+  if(!set.own&&set.onlyIn&&set.onlyIn.length)bits.push("Only in "+set.onlyIn.join(", ")+(set.usableHere===false?" — not usable in this folder":""));
+  if(floor&&!set.description)bits.push("Committed in the repository's vault: everyone on the team gets these.");
   if(bits.length)card.append(h("div",{class:"desc",text:bits.join(" · ")}));
   if(set.secrets&&set.secrets.length){
     const keys=h("div",{class:"keys"});

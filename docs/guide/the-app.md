@@ -30,22 +30,41 @@ machine, not just the folder you started it in.
   and looking through your folders won't add it back — adding the folder again
   does. Neither touches the project's files, and using hush in a project never
   undoes either.
-- **Global keys** are yours, kept once, never in a repository. They sit in the
-  **right sidebar**, grouped by set, with a search when there are more than a
-  few. **Drag a key onto a project** — in the left sidebar, on Home, or anywhere
-  on an open project's page — and it is part of that project: it
-  gets the key whenever it runs. Nothing goes into the project's repository, and
-  rotating the key is one edit that every project picks up. Without a mouse, a
-  key's ⋯ menu has **Use in a project…**. Close the sidebar with its ×; the
-  **Keys** tab on the right edge opens it again (on a narrow window it opens
-  over the page). A project can take just that one key
-  from a set, or the whole set.
-- **Keys here**, for the project you are looking at: what a run gets, in the
-  order the sets apply; the global keys it uses, each with **Remove**; and what
-  its code reads. Only variables that look like credentials (`…_KEY`,
-  `…_TOKEN`, `DATABASE_URL`, …) or that you already keep are listed, so
-  `NODE_ENV` and `PORT` are never "missing". Your global sets are offered only
-  when they hold something the code is missing.
+- **Global keys** are yours, kept once, never in a repository, and part of
+  any project you give them to. They sit in the **right sidebar** by group,
+  then set, then key, with a search when there are more than a few. **Drag a
+  key, a set or a whole group onto a project** (in the left sidebar, on Home,
+  or anywhere on an open project's page) and the project gets it whenever it
+  runs. Nothing goes into the project's repository, and rotating a key is one
+  edit that every project picks up. A group gives a project every set in it,
+  including sets you add to it later. Without a mouse, each ⋯ menu has **Use
+  in a project…**. Close the sidebar with its ×; the **Keys** tab on the right
+  edge opens it again (on a narrow window it opens over the page).
+- **Groups** are folders for your global sets, such as "AI stack": **New
+  group** in the sidebar or on Global keys, or **Put in a group…** on a set.
+  A group can be renamed or ungrouped from its ⋯ menu, and a project that used
+  it keeps each set either way.
+- **A project's page** shows what a run gets, in two parts. **Only
+  <project>** is its own keys: kept for it alone, refused anywhere else, never
+  in its repository, plus any sets in its repository's vault. **From your
+  global keys** lists the groups, sets and single keys it uses, each with
+  **Stop using here** or **Remove**. When two of them give the same key, a note
+  says which one wins and lets the other win instead. Below that is what its
+  code reads. Only variables that look like credentials (`…_KEY`, `…_TOKEN`,
+  `DATABASE_URL`, …) or that you already keep are listed, so `NODE_ENV` and
+  `PORT` are never "missing". Your global sets are offered only when they hold
+  something the code is missing.
+- **Moving between the two:** a project's own set or key has **Make global**.
+  It joins your global keys (a single key goes into a global set you pick) and
+  the project keeps getting it. A global set or key has **Keep for <project>
+  only**. If other projects use it, the app names them and asks before taking
+  it from them. A set in the repository's vault can be made global too; if
+  teammates read that vault, the app asks first, since they stop getting the
+  key from the repository.
+- **Tidy up:** Global keys points out global sets that only one project uses
+  as a whole, which is most likely that project's `.env` imported before keys
+  could belong to one project. **Review** lets you make them that project's
+  own.
 - **Team** is who can decrypt. **Agent** shows what your coding agent is
   connected to and what it must ask you first. **Activity** is the audit log in
   plain sentences.
@@ -60,8 +79,11 @@ reveal to the audit log.
 
 **Dropping in a `.env`.** Drag files anywhere onto the page, or use **Import
 .env**. Nothing is saved until you review it. The common case is one click:
-name it, and it becomes a set, in your library if you have one, and used by
-this project straight away. For a file that mixes things, tick **File them into
+name it (a project's own `.env` is named after the project), and it becomes a
+set that this project uses straight away. On a project it is **Only
+<project>** by default; choose **Global** to make it one of your global keys,
+or, where the project already has a vault, **The repo, for the team**.
+Importing on Global keys makes a global set. For a file that mixes things, tick **File them into
 existing sets instead** to choose a set and a tag per key. Multi-line values
 (PEM keys) survive intact. **Values never come back to the browser**: the review
 gets names and masked previews only, and the plaintext stays server-side until

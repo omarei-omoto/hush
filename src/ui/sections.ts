@@ -91,6 +91,57 @@ function offerRow(where,set,link){
       :h("button",{type:"button",class:"btn sm",onclick:function(){useHere(link,set.label,true)}},icon("plus"),"Use here"));
 }
 
+/** Two things a project uses that give the same key: which one wins, and a way to switch. */
+function conflictsBanner(all){
+  const by={};
+  all.forEach(function(u){provides(u).forEach(function(p){(by[p.key]=by[p.key]||[]).push({link:u.link,label:p.label,from:p.from})})});
+  const pairs={};
+  Object.keys(by).sort().forEach(function(k){
+    const list=by[k];
+    const w=list[list.length-1];
+    // The same value reached two ways (a key, and the set or group it is in) is no conflict.
+    const losers=list.slice(0,-1).filter(function(x){return x.link!==w.link&&x.from!==w.from});
+    if(!losers.length)return;
+    const sig=w.link+"|"+losers.map(function(x){return x.link}).join(",");
+    (pairs[sig]=pairs[sig]||{w:w,losers:losers,keys:[]}).keys.push(k);
+  });
+  const sigs=Object.keys(pairs);
+  if(!sigs.length)return null;
+  const lines=h("div",{class:"stack",style:"gap:6px"});
+  sigs.forEach(function(sig){
+    const p=pairs[sig];
+    const other=p.losers[p.losers.length-1];
+    lines.append(h("div",null,h("b",{text:p.w.label})," wins for ",h("span",{class:"mono",text:p.keys.join(", ")}),
+      " over "+p.losers.map(function(x){return x.label}).join(" and ")+". ",
+      h("button",{type:"button",class:"linkbtn",onclick:function(){letWin(other.link,other.label)}},"Let "+other.label+" win")));
+  });
+  return h("div",{class:"banner",style:"margin-bottom:14px"},icon("info"),lines);
+}
+
+/** A whole global group this project uses: every set in it, with its keys. */
+function groupCard(u,win){
+  const g=u.group;
+  const card=h("article",{class:"card set","aria-label":g.label},
+    h("div",{class:"top"},
+      h("div",{class:"title"},icon("folder"),h("b",{text:g.label}),h("span",{class:"badge ok"},"Global group"),h("span",{class:"count",text:plural(u.sets.length,"set")})),
+      h("div",{class:"tools"},moreButton("More for "+g.label,function(){return [
+        {label:"Stop using here",run:function(){useHere(u.link,g.label,false)}},
+      ]}))));
+  card.append(h("div",{class:"desc",text:"Every set in the group, including ones you put in it later."}));
+  u.sets.forEach(function(set){
+    const keys=h("div",{class:"keys"});
+    (set.secrets||[]).forEach(function(s){keys.append(keyRow("library",set,s,win,u.link))});
+    card.append(h("div",{class:"subset"},
+      h("div",{class:"subhead"},h("b",{text:set.label}),h("span",{class:"count",text:plural(set.keys.length,"key")}),
+        moreButton("More for "+set.label,function(){return [
+          set.name==="default"?null:{label:"Keep for "+folderName()+" only",run:function(){place({action:"here",set:set.name})}},
+          {label:"Use in a project…",run:function(){giveKeyDialog({kind:"set",set:set.name})}},
+        ]})),
+      keys));
+  });
+  return card;
+}
+
 function renderProject(page){
   const fstate=S.folder.state;
   const name=folderName();
@@ -111,59 +162,77 @@ function renderProject(page){
   if(nc)page.append(nc);
 
   const all=usedSets();
-  // Global keys dropped onto this project (key links) are listed on their own, below.
-  const picks=all.filter(function(u){return u.keyLink});
-  const used=all.filter(function(u){return !u.keyLink});
   const win=winners();
-  const sec=h("section",{class:"section"},
+  const cb=conflictsBanner(all);
+  if(cb)page.append(cb);
+
+  // Its own: kept for it in your library, or in its repository's vault.
+  const own=all.filter(function(u){return u.set&&!u.keyLink&&!u.placeholder&&isOwn(u.where,u.set)&&!(u.where==="project"&&u.set.name==="default"&&!u.set.keys.length)});
+  const ownSec=h("section",{class:"section"},
     h("div",{class:"sechead"},
-      h("div",null,h("h2",{text:"Injected when you run"}),h("p",{text:used.length>1?"Applied top to bottom — when two sets share a key, the lower one wins.":"The sets this project uses."})),
-      h("button",{type:"button",class:"btn sm",onclick:function(){newSetDialog("project")}},icon("plus"),"New set")));
-  const stack=h("div",{class:"stack"});
-  used.forEach(function(u){
+      h("div",null,h("h2",{text:"Only "+name}),h("p",{text:"Its own keys, kept for "+name+" alone: hush refuses them anywhere else. Make one global to use it in other projects too."})),
+      h("button",{type:"button",class:"btn sm",onclick:function(){newSetDialog("own")}},icon("plus"),"New set")));
+  if(own.length){
+    const stack=h("div",{class:"stack"});
+    own.forEach(function(u){stack.append(setCard(u.where,u.set,{here:true,winners:win,link:u.link}))});
+    ownSec.append(stack);
+  }else{
+    ownSec.append(h("div",{class:"card"},h("div",{class:"offer"},
+      h("div",{class:"what"},h("b",null,"No keys of its own yet"),h("div",{text:"A key only "+name+" needs goes here: yours alone, never in its repository."})),
+      h("button",{type:"button",class:"btn sm",onclick:function(){addSecretDialog()}},icon("plus"),"Add a key"),
+      h("button",{type:"button",class:"btn sm ghost",onclick:function(){DROP_WHERE="own";document.getElementById("picker").click()}},icon("upload"),"Import .env"))));
+  }
+  page.append(ownSec);
+
+  // From your global keys: groups, sets and single keys.
+  const fromGlobal=all.filter(function(u){return u.missing||u.group||u.keyLink||(u.set&&u.where==="library"&&!u.set.own)});
+  const gSec=h("section",{class:"section"},
+    h("div",{class:"sechead"},h("div",null,h("h2",{text:"From your global keys"}),
+      h("p",{text:fromGlobal.length?"Kept once for any project you give them to: rotating one updates them all. Nothing is in "+name+"'s repository."
+        :"None yet. Drag a key, a set or a whole group from Global keys on the right onto this project."}))));
+  const gStack=h("div",{class:"stack"});
+  const singles=h("div",{class:"card list"});
+  let singleCount=0;
+  fromGlobal.forEach(function(u){
     if(u.missing){
-      stack.append(h("div",{class:"banner warn"},icon("alert"),h("span",null,"This project uses ",h("b",{text:u.missing}),", which isn't in your library. Teammates each supply their own copy. ",
+      gStack.append(h("div",{class:"banner warn"},icon("alert"),h("span",null,"This project uses ",h("b",{text:u.missing}),", which isn't in your global keys. Teammates each supply their own copy. ",
         h("button",{type:"button",class:"linkbtn",onclick:function(){useHere(u.link,u.missing,false)}},"Stop using it"))));
       return;
     }
-    if(u.placeholder){
-      stack.append(h("div",{class:"card"},h("div",{class:"offer"},h("div",{class:"ord"},String(u.index+1)),
-        h("div",{class:"what"},h("b",null,"default"),h("div",{text:fstate==="links-only"
-          ?"This project has no vault of its own yet — the first key you add here makes one."
-          :"Keys only this project needs go here."})),
-        h("button",{type:"button",class:"btn sm",onclick:function(){addSecretDialog({target:"project|default"})}},icon("plus"),"Add key"))));
+    if(u.group){gStack.append(groupCard(u,win));return}
+    if(u.keyLink){
+      const s=u.set.secrets[0];
+      const k=u.set.label;
+      singleCount++;
+      singles.append(h("div",{class:"li"},icon("key"),
+        h("div",{class:"body"},h("div",{class:"t mono",text:k}),h("div",{class:"d",text:"One key from your global "+u.fromSet.label+(s?" · "+s.preview:"")})),
+        h("button",{type:"button",class:"btn sm ghost",onclick:async function(){
+          const r=await api("/api/unassign",{project:currentRoot(),link:u.link});
+          HUB={projects:r.projects,hidden:r.hidden,crawl:r.crawl,roots:r.roots,rootsChosen:r.rootsChosen,platform:r.platform};await refresh(r.state);toast(k+" is no longer part of "+name);
+        }},"Remove"),
+        moreButton("More for "+k,function(){return [
+          {label:"Keep for "+name+" only",run:function(){place({action:"here",set:u.fromSet.name,key:k})}},
+          {label:"Use in another project…",run:function(){giveKeyDialog({kind:"key",set:u.fromSet.name,key:k})}},
+        ]})));
       return;
     }
-    stack.append(setCard(u.where,u.set,{order:{index:u.index},winners:win,link:u.link}));
+    gStack.append(setCard("library",u.set,{here:true,winners:win,link:u.link}));
   });
-  sec.append(stack);
-  page.append(sec);
+  if(singleCount)gStack.append(singles);
+  if(fromGlobal.length)gSec.append(gStack);
+  page.append(gSec);
 
-  const picked=h("div",{class:"card list"});
-  picks.forEach(function(u){
-    const s=u.set.secrets[0];
-    picked.append(h("div",{class:"li"},icon("key"),
-      h("div",{class:"body"},h("div",{class:"t mono",text:u.set.label}),h("div",{class:"d",text:"From your global "+u.fromSet.label+(s?" · "+s.preview:"")})),
-      h("button",{type:"button",class:"btn sm ghost",onclick:async function(){
-        const r=await api("/api/unassign",{project:currentRoot(),link:u.link});
-        HUB={projects:r.projects};await refresh(r.state);toast(u.set.label+" is no longer part of "+folderName());
-      }},"Remove")));
-  });
-  page.append(h("section",{class:"section"},
-    h("div",{class:"sechead"},h("div",null,h("h2",{text:"Global keys used here"}),
-      h("p",{text:picks.length?"Yours, kept once in Global keys; this project gets them when it runs. Nothing is in its repository.":"None yet. Drag a key from Global keys onto this project in the sidebar, or use a key's menu: Use in a project…"}))),
-    picks.length?picked:null));
-
-  const unusedProject=S.project.filter(function(s){return S.used.indexOf(s.name)<0});
-  add(page,offersCard("Other sets in this project","In the vault, but not applied when you run.",unusedProject.map(function(s){return offerRow("project",s,s.name)})));
+  const unusedOwn=S.library.filter(function(s){return s.own&&S.used.indexOf(linkOf(s))<0}).map(function(s){return offerRow("library",s,linkOf(s))})
+    .concat(S.project.filter(function(s){return S.used.indexOf(s.name)<0}).map(function(s){return offerRow("project",s,s.name)}));
+  add(page,offersCard("Its other sets","Kept for this project, but not applied when it runs.",unusedOwn));
 
   // Only the global sets that hold something this project's code is missing.
   // Offering every set you own on every project read as "not assigned".
   const lacking=(S.needs||[]).filter(function(n){return !win[n.name]}).map(function(n){return n.name});
-  const lib=S.library.filter(function(s){return S.used.indexOf(s.name==="default"?"library:default":s.name)<0});
+  const lib=globalSets().filter(function(s){return S.used.indexOf(linkOf(s))<0});
   const helpful=lib.filter(function(s){return s.keys.some(function(k){return lacking.indexOf(k)>-1})});
   if(S.global.exists&&helpful.length){
-    add(page,offersCard("Your global keys can fill these in","Sets that hold something this project's code reads and doesn't have yet.",helpful.map(function(s){return offerRow("library",s,s.name==="default"?"library:default":s.name)})));
+    add(page,offersCard("Your global keys can fill these in","Sets that hold something this project's code reads and doesn't have yet.",helpful.map(function(s){return offerRow("library",s,linkOf(s))})));
   }
 }
 
@@ -182,9 +251,9 @@ function setupPanel(){
 
   const checks={};
   const radios={};
-  if(S.library.length){
+  if(globalSets().length){
     const box=h("div",{class:"card",style:"margin-top:14px"});
-    S.library.forEach(function(set){
+    globalSets().forEach(function(set){
       const covered=Object.keys(sug.provider).filter(function(k){return sug.provider[k]===set.name});
       // Kept for other folders: shown, so it is not a mystery, but not offered.
       const here=set.usableHere!==false;
@@ -197,7 +266,7 @@ function setupPanel(){
     });
     card.append(box);
   }else{
-    card.append(h("div",{class:"banner",style:"margin-top:14px"},icon("info"),h("span",{text:"Your library is empty. Import a .env or add a secret — hush keeps it in this project, encrypted."})));
+    card.append(h("div",{class:"banner",style:"margin-top:14px"},icon("info"),h("span",{text:"You have no global keys yet. Import a .env or add a secret — hush keeps it for this project, encrypted, never in its repository."})));
   }
   sug.ambiguous.forEach(function(a){
     const g=h("div",{class:"seg",role:"radiogroup","aria-label":a.key});
@@ -213,10 +282,10 @@ function setupPanel(){
   }
   const agent=h("input",{type:"checkbox"});
   // Nothing to pick from: lead with the two ways a first key gets in.
-  if(!S.library.length){
+  if(!globalSets().length){
     card.append(h("div",{style:"display:flex;gap:8px;flex-wrap:wrap;margin-top:18px"},
       h("button",{type:"button",class:"btn primary",onclick:function(){document.getElementById("picker").click()}},icon("upload"),"Import a .env"),
-      h("button",{type:"button",class:"btn",onclick:function(){addSecretDialog({target:"project|default"})}},icon("plus"),"Add one secret")));
+      h("button",{type:"button",class:"btn",onclick:function(){addSecretDialog({target:"own|"})}},icon("plus"),"Add one secret")));
     return card;
   }
   card.append(h("label",{class:"check",style:"margin-top:16px"},agent,h("span",null,h("b",null,"An AI agent will use secrets here"),h("br"),
@@ -231,7 +300,7 @@ function setupPanel(){
   function sync(){const n=chosen().length;go.disabled=!n;go.textContent=n?"Use "+plural(n,"set")+" here":"Use these here"}
   const form=h("form",{style:"display:flex;gap:8px;flex-wrap:wrap;margin-top:18px"},go,
     h("button",{type:"button",class:"btn",onclick:function(){document.getElementById("picker").click()}},icon("upload"),"Import .env instead"),
-    h("button",{type:"button",class:"btn ghost",onclick:function(){addSecretDialog({target:"project|default"})}},"Add one secret"));
+    h("button",{type:"button",class:"btn ghost",onclick:function(){addSecretDialog({target:"own|"})}},"Add one secret"));
   form.onsubmit=async function(ev){
     ev.preventDefault();
     const use=chosen();if(!use.length)return;
@@ -245,28 +314,78 @@ function setupPanel(){
 
 /* ---------------------------------------------------------------- library */
 
+/* Global sets only one project uses (GET-like /api/tidy): null until asked, then the list. */
+let TIDY=null;
+function tidyBanner(){
+  if(TIDY===null){
+    TIDY="asking";
+    api("/api/tidy",{action:"list"}).then(function(r){TIDY=r.offers;if(route()==="library"&&TIDY.length)render()},function(){TIDY=[]});
+    return null;
+  }
+  if(!Array.isArray(TIDY)||!TIDY.length)return null;
+  return h("div",{class:"banner",style:"margin-bottom:14px"},icon("info"),
+    h("span",null,plural(TIDY.length,"global set")+(TIDY.length===1?" is":" are")+" used by one project only — most likely "+(TIDY.length===1?"that project's":"each project's")+" own. ",
+      h("button",{type:"button",class:"linkbtn",onclick:tidyDialog},"Review")));
+}
+function tidyDialog(){
+  const rows=TIDY.map(function(o){return {o:o,cb:h("input",{type:"checkbox",checked:true})}});
+  const list=h("div",{class:"card list"});
+  rows.forEach(function(r){
+    list.append(h("label",{class:"offer",style:"cursor:pointer"},r.cb,
+      h("div",{class:"what"},h("b",{text:r.o.label}),h("div",{text:"only "+r.o.name+" uses it · "+plural(r.o.keys,"key")}))));
+  });
+  dialog({title:"Keep these for the one project using each?",
+    lead:"Each is used by one project and no other — most likely imported before keys could belong to one project. Kept for its project, it leaves your global keys and hush refuses it anywhere else. That project keeps getting it, and nothing is deleted.",
+    submit:"Keep them there",body:[list],
+    onSubmit:async function(){
+      const picks=rows.filter(function(r){return r.cb.checked}).map(function(r){return {set:r.o.set,root:r.o.root}});
+      if(!picks.length){toast("nothing ticked");return false}
+      const r=await api("/api/tidy",{action:"apply",picks:picks});
+      await refresh(r);toast("kept "+plural(r.done.length,"set")+" for "+(r.done.length===1?"its project":"their projects"));
+    }});
+}
+
 function renderLibrary(page){
+  const sets=globalSets();
   page.append(h("header",{class:"head"},
-    h("div",null,h("h1",null,"Global keys"),h("p",{text:"Yours alone, kept once, never in a repository. Drag any key onto a project in the sidebar to use it there."})),
+    h("div",null,h("h1",null,"Global keys"),h("p",{text:"Yours alone, kept once, never in a repository. Drag a key, a set or a whole group onto any project; rotating a key updates every project that uses it."})),
     h("div",{class:"actions"},
       h("button",{type:"button",class:"btn",onclick:function(){DROP_WHERE="library";document.getElementById("picker").click()}},icon("upload"),"Import .env"),
+      sets.length>1?h("button",{type:"button",class:"btn",onclick:function(){newGroupDialog()}},icon("folder"),"New group"):null,
       h("button",{type:"button",class:"btn",onclick:function(){newSetDialog("library")}},icon("plus"),"New set"),
       h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog({target:"library|default"})}},icon("key"),"Save a global key"))));
   if(S.global.error){page.append(h("div",{class:"banner warn"},icon("alert"),h("span",{text:S.global.error})));return}
-  if(!S.global.exists||!S.library.length){
+  if(!S.global.exists||!sets.length){
     const others=S.global.others||[];
     page.append(h("div",{class:"card"},h("div",{class:"empty"},
-      h("h3",null,S.global.exists?"Your library is empty":"You don't have a library yet"),
-      h("p",{text:"Keep a key once — your personal OpenAI key, a client's Stripe account — and add it to any project in one click. Rotating it is one edit."}),
+      h("h3",null,S.global.exists?"No global keys yet":"You don't have a library yet"),
+      h("p",{text:"Keep a key once — your personal OpenAI key, a client's Stripe account — and add it to any project in one drag. Rotating it is one edit."}),
       h("div",{class:"actions"},
         h("button",{type:"button",class:"btn primary",onclick:function(){newSetDialog("library")}},icon("plus"),"Create a set"),
         h("button",{type:"button",class:"btn",onclick:function(){DROP_WHERE="library";document.getElementById("picker").click()}},icon("upload"),"Import a .env"),
         others.map(function(v){return h("button",{type:"button",class:"btn ghost",onclick:async function(){await refresh(await api("/api/global",{name:v}));toast("your library is now "+v)}},"Use my “"+v+"” vault")})))));
     return;
   }
-  const stack=h("div",{class:"stack"});
-  S.library.forEach(function(set){stack.append(setCard("library",set,{useToggle:true,link:set.name==="default"?"library:default":set.name}))});
-  page.append(stack);
+  add(page,tidyBanner());
+  (S.groups||[]).forEach(function(g){
+    const members=g.sets.map(function(n){return sets.find(function(x){return x.name===n})}).filter(Boolean);
+    const stack=h("div",{class:"stack"});
+    members.forEach(function(set){stack.append(setCard("library",set,{useToggle:true}))});
+    const head=h("div",{class:"sechead"},
+      h("div",null,h("h2",null,icon("folder")," ",g.label),h("p",{text:plural(members.length,"set")+". Drag the group onto a project and it gets every set in it, including ones you put in later."})),
+      h("div",{class:"tools"},
+        S.folder.state!=="unset"?h("button",{type:"button",class:"btn sm"+(g.used?" on":""),onclick:function(){useHere(g.link,g.label,!g.used)}},g.used?[icon("check"),"Used here"]:"Use here"):null,
+        moreButton("More for "+g.label,function(){return groupMenu(g)})));
+    draggable(head,{kind:"group",group:g.name});
+    page.append(h("section",{class:"section"},head,stack));
+  });
+  const loose=sets.filter(function(s){return !s.group});
+  if(loose.length){
+    const stack=h("div",{class:"stack"});
+    loose.forEach(function(set){stack.append(setCard("library",set,{useToggle:true}))});
+    page.append(h("section",{class:"section"},
+      (S.groups||[]).length?h("div",{class:"sechead"},h("div",null,h("h2",{text:"Not in a group"}))):null,stack));
+  }
 }
 
 /* ------------------------------------------------------------------- team */

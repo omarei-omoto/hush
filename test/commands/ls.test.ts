@@ -36,7 +36,7 @@ describe("hush ls", () => {
       assert.equal(p.run(["use", "work-fal"]).code, 0);
 
       const out = p.run(["ls"]).out;
-      assert.match(out, /YOUR LIBRARY/);
+      assert.match(out, /GLOBAL KEYS/);
       assert.match(out, /THIS PROJECT/);
       assert.match(out, /●[^\n]*work-fal/, `expected work-fal marked used:\n${out}`);
     } finally {

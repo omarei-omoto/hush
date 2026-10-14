@@ -12,7 +12,8 @@ import { parseEnvFile } from "./scan.ts";
 import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
-import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
+import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName, libraryGroups, placeOf, sameFolder } from "./library.ts";
+import { fileUnder, keepHere, makeGlobal, renameGroup, soleUsers, tidy, ungroup } from "./placement.ts";
 import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, removeProject, rescanProject, setCrawlRoots, showProject, startCrawl } from "./projects.ts";
 import { fileManagerCommand } from "./platform.ts";
 import { chooseFolder, detectBackend } from "./dialogs.ts";
@@ -197,19 +198,113 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
      */
     case "/api/assign": {
       const root = knownRoot(body.project);
+      const kind = body.kind === "group" || body.kind === "set" ? body.kind : "key";
       const set = String(body.set ?? "");
       const key = String(body.key ?? "");
-      const lib = librarySets().find((s) => s.name === set);
-      if (!lib || !lib.keys.includes(key)) return json(res, 400, { error: `${key} is not in your global set ${set}` });
       const hushDir = join(root, ".hush");
+      const links = loadLinks(hushDir);
+      const groups = libraryGroups(openGlobal());
+      // What the project gets: a whole group, a whole set, or one key of a set.
+      let link: string;
+      let covered: boolean;
+      if (kind === "group") {
+        const g = groups.find((x) => x.slug === String(body.group ?? ""));
+        if (!g) return json(res, 400, { error: "no such group in your global keys" });
+        link = g.link;
+        covered = links.includes(link);
+      } else {
+        const lib = librarySets().find((s) => s.name === set && !s.project);
+        if (!lib) return json(res, 400, { error: `${set} is not one of your global sets` });
+        const whole = linkNameFor("library", set);
+        const inGroup = lib.group ? groups.find((g) => g.sets.includes(set)) : undefined;
+        const viaGroup = Boolean(inGroup && links.includes(inGroup.link));
+        if (kind === "set") {
+          link = whole;
+          covered = links.includes(whole) || viaGroup;
+        } else {
+          if (!lib.keys.includes(key)) return json(res, 400, { error: `${key} is not in your global set ${set}` });
+          link = keyLinkName(set, key);
+          covered = links.includes(link) || links.includes(whole) || viaGroup;
+        }
+      }
       // A codebase not set up yet becomes a hush project here: its first key.
       if (!existsSync(hushDir)) writeProjectDotfiles(hushDir);
-      const link = keyLinkName(set, key);
-      const links = loadLinks(hushDir);
-      const covered = links.includes(link) || links.includes(set === "default" ? "library:default" : set);
-      if (!covered) saveLinks(hushDir, [...links, link]);
-      audit(hushDir, { actor: "ui", action: "key.assign", set, key });
+      if (!covered) {
+        // Single keys of a set the project now gets whole are said twice: keep one.
+        const whole = kind === "group" ? groups.find((g) => g.link === link)!.sets : kind === "set" ? [set] : [];
+        const picks = new Set(whole.map((n) => keyLinkName(n, "")));
+        saveLinks(hushDir, [...links.filter((l) => ![...picks].some((p) => l.startsWith(p))), link]);
+      }
+      audit(hushDir, { actor: "ui", action: "key.assign", kind, link });
       return json(res, 200, { ...hubState(startedRoot), assigned: covered ? "already" : "added" });
+    }
+
+    /**
+     * Where a set or key lives: "global" makes one of this project's own (in
+     * your library, or in its repository's vault) one of your global keys;
+     * "here" keeps a global set or key for one project only. Either way the
+     * project keeps getting it. When the move would take something from
+     * teammates or other projects, nothing changes and the answer names them
+     * under `confirm`; the same request with force: true goes ahead.
+     */
+    case "/api/place": {
+      const action = String(body.action ?? "");
+      const set = String(body.set ?? "");
+      const key = typeof body.key === "string" && body.key ? body.key : undefined;
+      const force = body.force === true;
+      if (!set) return json(res, 400, { error: "set is required" });
+      // "here" may name another project — keeping a set for one from the keys sidebar.
+      const root = body.project ? knownRoot(body.project) : null;
+      const hushDir = root ? join(root, ".hush") : ctx.hushDir;
+      let r: ReturnType<typeof makeGlobal>;
+      if (action === "global") {
+        r = makeGlobal({
+          id,
+          hushDir,
+          where: body.where === "project" ? "project" : "library",
+          set,
+          key,
+          to: typeof body.to === "string" && body.to ? body.to : undefined,
+          toLabel: typeof body.toLabel === "string" ? body.toLabel : undefined,
+          group: typeof body.group === "string" && body.group.trim() ? body.group : undefined,
+          force,
+        });
+      } else if (action === "here") {
+        r = keepHere({ id, hushDir, set, key, force });
+      } else {
+        return json(res, 400, { error: 'action must be "global" or "here"' });
+      }
+      if ("confirm" in r) return json(res, 200, { confirm: r.confirm });
+      audit(hushDir, { actor: "ui", action: action === "global" ? "set.global" : "set.here", set, ...(key ? { key } : {}) });
+      const here = root === null || sameFolder(placeOf(hushDir), placeOf(ctx.hushDir));
+      return json(res, 200, { ...state(ctx), hub: hubState(startedRoot), done: r.done, ...(here ? {} : { elsewhere: true }) });
+    }
+
+    /** Groups of global sets: file a set under one (or none), rename one, or take every set out of one. */
+    case "/api/group": {
+      const action = String(body.action ?? "");
+      let done: string;
+      if (action === "file") done = fileUnder(String(body.set ?? ""), typeof body.group === "string" ? body.group : null);
+      else if (action === "rename") done = renameGroup(String(body.group ?? ""), String(body.label ?? ""));
+      else if (action === "ungroup") done = ungroup(String(body.group ?? ""));
+      else return json(res, 400, { error: 'action must be "file", "rename" or "ungroup"' });
+      audit(ctx.hushDir, { actor: "ui", action: `group.${action}`, group: body.group ?? null, set: body.set ?? null });
+      return json(res, 200, { ...state(ctx), hub: hubState(startedRoot), done });
+    }
+
+    /**
+     * Global sets only one project uses — most likely that project's own,
+     * imported before a key could belong to one project. "list" offers them;
+     * "apply" keeps the chosen ones for their project.
+     */
+    case "/api/tidy": {
+      if (body.action === "apply") {
+        const picks = Array.isArray(body.picks) ? body.picks : [];
+        const done = tidy(id, picks.map((p: { set?: unknown; root?: unknown }) => ({ set: String(p?.set ?? ""), root: String(p?.root ?? "") })));
+        audit(ctx.hushDir, { actor: "ui", action: "tidy", moved: done.length });
+        return json(res, 200, { ...state(ctx), hub: hubState(startedRoot), done });
+      }
+      return json(res, 200, { offers: soleUsers() });
     }
 
     /** Take a global key (or a whole global set) back off a project. */
@@ -355,13 +450,22 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
         const spelling = String(label ?? name ?? "").trim();
         if (!spelling) return json(res, 400, { error: "give it a name" });
         const v = open();
-        const slug = slugifyEnv(spelling);
-        if (v.data.envs[slug]) return json(res, 409, { error: '"' + spelling + '" already exists' });
+        // Only this project's: a set in your library that belongs to this
+        // folder, kept out of your global keys and refused anywhere else.
+        const own = inLibrary && body.own === true;
+        let slug = slugifyEnv(spelling);
+        if (v.data.envs[slug]) {
+          if (!own) return json(res, 409, { error: '"' + spelling + '" already exists' });
+          // A global set may already have the name a project gives its own.
+          for (let i = 2; v.data.envs[slug]; i++) slug = slugifyEnv(spelling).slice(0, 44) + "-" + i;
+        }
+        const place = placeOf(ctx.hushDir);
         v.ensureEnvExists(slug);
         v.describeEnv(slug, {
           label: spelling,
           description: typeof description === "string" ? description : undefined,
           whenToUse: typeof whenToUse === "string" ? whenToUse : undefined,
+          ...(own ? { project: place, onlyIn: [place] } : {}),
         });
         v.save();
         audit(ctx.hushDir, { actor: "ui", action: "env.create", where, name: slug });

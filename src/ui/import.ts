@@ -86,17 +86,24 @@ function stagingPanel(){
   let total=0;STAGES.forEach(function(st){total+=st.entries.length});
   const files=STAGES.map(function(st){return st.file}).join(", ");
   const guess=STAGES.length===1?(STAGES[0].file||"").replace(/^\.env\.?/,"").replace(/[-_.]+/g," ").trim():"";
-  const name=h("input",{class:"input",placeholder:"e.g. Acme Production",value:guess?guess.charAt(0).toUpperCase()+guess.slice(1):""});
+  // A plain .env on a project is most likely that project's own keys: named after it.
+  const name=h("input",{class:"input",placeholder:"e.g. Acme Production",value:guess?guess.charAt(0).toUpperCase()+guess.slice(1):(route()!=="library"&&S.folder.state!=="unset"?folderName():"")});
   const desc=h("input",{class:"input",placeholder:"What is it for? (optional)"});
-  // The library first when there is one: a dropped .env is usually yours.
+  // A project's .env is that project's own; Global keys' import makes global ones.
+  // The repository's vault is offered where the project already shares one.
+  const onProject=S.folder.state!=="unset"||route()==="project";
   const dest=h("div",{class:"seg",role:"radiogroup","aria-label":"Where to keep it"},
-    h("label",null,h("input",{type:"radio",name:"dest",value:"library"}),h("span",null,"My library")),
-    h("label",null,h("input",{type:"radio",name:"dest",value:"project"}),h("span",null,"This project")));
-  const destValue=function(){const c=dest.querySelector("input:checked");return c?c.value:"project"};
-  dest.querySelector("input[value="+(DROP_WHERE||(S.global.exists?"library":"project"))+"]").checked=true;
+    h("label",null,h("input",{type:"radio",name:"dest",value:"own"}),h("span",null,"Only "+folderName())),
+    h("label",null,h("input",{type:"radio",name:"dest",value:"library"}),h("span",null,"Global")),
+    S.folder.state==="vault"?h("label",null,h("input",{type:"radio",name:"dest",value:"project"}),h("span",null,"The repo, for the team")):null);
+  const destValue=function(){const c=dest.querySelector("input:checked");return c?c.value:"own"};
+  const first=DROP_WHERE||(route()==="library"||!onProject?"library":"own");
+  (dest.querySelector("input[value="+first+"]")||dest.querySelector("input")).checked=true;
   DROP_WHERE=null;
   const destHint=h("small",{class:"muted"});
-  function hint(){destHint.textContent=destValue()==="library"?"Yours alone. This project starts using it right away.":"Committed with the project — the whole team gets it."}
+  function hint(){const d=destValue();destHint.textContent=d==="own"?"Only "+folderName()+" gets these, and hush refuses them anywhere else. Yours alone, never in its repository."
+    :d==="library"?"Yours alone, for any project: drag the set onto one. "+folderName()+" starts using it right away."
+    :"Committed with the project — everyone on the team gets it."}
   dest.addEventListener("change",hint);hint();
 
   const rows=h("div");
@@ -149,12 +156,15 @@ function stagingPanel(){
   };
 }
 
+/* where: "own" (only this project, in your library), "library" (global) or "project" (the repository's vault). */
 async function saveAsNamedSet(label,description,where){
   if(!label){toast("give the set a name first",{error:true});return}
   if(importing)return;importing=true;
+  const own=where==="own";
+  if(own)where="library";
   try{
     if(where==="library")await ensureLibrary();
-    const created=await api("/api/env",{action:"create",where:where,label:label,description:description||undefined});
+    const created=await api("/api/env",{action:"create",where:where,own:own,label:label,description:description||undefined});
     const scope=created.created;
     const batches=STAGES.map(function(st){
       const assignments={};
@@ -168,7 +178,7 @@ async function saveAsNamedSet(label,description,where){
     if(reviewDlg)reviewDlg.close();
     await refresh(next);
     toast("saved "+plural(r.imported.length,"key")+" as "+label+(r.vaultCreated?" — commit .hush/vault.json":""));
-    location.hash=where==="library"?"#library":"#project";
+    location.hash=where==="library"&&!own?"#library":"#project";
   }catch(e){/* api() already said why; the review stays open */}
   finally{importing=false}
 }
@@ -249,7 +259,7 @@ function renderShell(){
 
   const nav=document.getElementById("nav");clear(nav);
   const cur=route();
-  const keyCount=S.library.reduce(function(n,x){return n+x.keys.length},0);
+  const keyCount=globalSets().reduce(function(n,x){return n+x.keys.length},0);
   nav.append(navLink("home","Home","home"),
     navLink("library","Global keys","key",keyCount?h("span",{class:"count",text:String(keyCount)}):null));
 
@@ -405,7 +415,7 @@ function matches(p,q){
 function renderHome(page){
   page.append(h("header",{class:"head"},
     h("div",null,h("h1",null,"Your projects"),
-      h("p",{text:"Every codebase in the folders hush looks in, and every project it's used in. Drag a global key from the right onto one to make it part of it — it stays yours, and nothing goes into the repository."})),
+      h("p",{text:"Every codebase in the folders hush looks in, and every project it's used in. Drag a global key, set or group from the right onto one to make it part of it — it stays yours, and nothing goes into the repository."})),
     h("div",{class:"actions"},
       h("button",{type:"button",class:"btn",onclick:addFolderDialog},icon("plus"),"Add a folder"))));
 

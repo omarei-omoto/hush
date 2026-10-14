@@ -1,9 +1,13 @@
 /**
- * `hush env` — rename, describe and move keys between sets.
+ * `hush env` — rename, describe and move keys between sets; make one global
+ * or keep it for one project (placement.ts); file global sets into groups.
  */
 import { Vault, resolveVaultPath, slugifyEnv } from "../vault.ts";
 import { requireIdentity } from "../identity.ts";
-import { loadLinks, saveLinks, openGlobal, globalVaultName, namedVaults } from "../library.ts";
+import { loadLinks, saveLinks, openGlobal, globalVaultName, namedVaults, ownerOf, placeOf, sameFolder, libraryGroups, groupSlug } from "../library.ts";
+import { fileUnder, keepHere, makeGlobal, renameGroup, ungroup, type Placed } from "../placement.ts";
+import { consent } from "../cli/consent.ts";
+import { ctxLoose } from "../cli/context.ts";
 import { type Args, bool, repeat, str } from "../cli/args.ts";
 import { cmdEnvs } from "../commands/ls.ts";
 import { ctx, resolveSetName } from "../cli/context.ts";
@@ -166,7 +170,83 @@ export async function cmdEnv(a: Args): Promise<void> {
       return cmdUse({ _: [], rest: [], flags: { not: name } });
     }
 
+    /**
+     * `hush env global <set>` — one of this project's own sets becomes one of
+     * your global keys; `hush env global <KEY> --from <set> --to <global set>`
+     * does the same for one key. The project keeps getting it either way.
+     */
+    case "global": {
+      const name = rest[0];
+      if (!name) die("Usage: hush env global <set> [--group <name>]", "   or: hush env global <KEY> --from <set> --to <global set>");
+      const loose = ctxLoose(a);
+      const id = requireIdentity();
+      const from = str(a, "from");
+      const set = from ?? name;
+      const lib = openGlobal();
+      const place = placeOf(loose.hushDir);
+      const owned = lib?.hasSet(set) && ownerOf(lib, set) && sameFolder(ownerOf(lib, set)!, place);
+      const where = owned ? "library" : loose.vault?.hasSet(set) ? "project" : null;
+      if (!where) die(`"${set}" is not one of this project's own sets.`, "hush ls shows them under THIS PROJECT");
+      const to = str(a, "to");
+      if (from && !to) die(`Say which global set ${name} goes into:  hush env global ${name} --from ${from} --to <global set>`);
+      // An existing global set by that name, or a new one called that.
+      const existing = to && lib?.hasSet(slugifyEnv(to)) && !ownerOf(lib, slugifyEnv(to)) ? slugifyEnv(to) : undefined;
+      const go = (force: boolean): Placed =>
+        makeGlobal({ id, hushDir: loose.hushDir, where, set, key: from ? name : undefined, to: existing, toLabel: existing ? undefined : to, group: str(a, "group"), force });
+      let r = go(false);
+      if ("confirm" in r) {
+        const ok = await consent(`Take ${from ? name : set} out of this project's vault? ${r.confirm.teammates!.join(", ")} read it there, and a global key is yours alone.`, { hushDir: loose.hushDir, yes: bool(a, "yes") });
+        if (!ok) die("Nothing was moved.");
+        r = go(true);
+      }
+      if ("done" in r) info(`${green("✓")} ${r.done}`);
+      return;
+    }
+
+    /**
+     * `hush env here <set>` — one of your global sets, kept for this project
+     * only: out of your global keys, refused anywhere else. `--from <set>`
+     * keeps just one key of it. Other projects using it are named first.
+     */
+    case "here": {
+      const name = rest[0];
+      if (!name) die("Usage: hush env here <set>", "   or: hush env here <KEY> --from <global set>");
+      const loose = ctxLoose(a);
+      const id = requireIdentity();
+      const from = str(a, "from");
+      const go = (force: boolean): Placed => keepHere({ id, hushDir: loose.hushDir, set: from ?? name, key: from ? name : undefined, force });
+      let r = go(false);
+      if ("confirm" in r) {
+        const who = r.confirm.projects!.map((u) => u.name + (u.viaGroup ? " (through its group)" : "")).join(", ");
+        const ok = await consent(`${who} use ${name} too. Keep it for this project only, and take it from them?`, { hushDir: loose.hushDir, yes: bool(a, "yes") });
+        if (!ok) die("Nothing was moved.");
+        r = go(true);
+      }
+      if ("done" in r) info(`${green("✓")} ${r.done}`);
+      return;
+    }
+
+    /**
+     * `hush env group <set> <group>` files a global set under a group (a
+     * folder a project can use whole); `--none` takes it out. `--rename <new>`
+     * renames the group named first; `--ungroup` empties it.
+     */
+    case "group": {
+      const [first, second] = rest;
+      if (!first) {
+        const groups = libraryGroups(openGlobal());
+        if (!groups.length) return info(dim('No groups yet.  hush env group <set> "<group>"'));
+        for (const g of groups) info(`${bold(g.label)} ${dim(`(group:${g.slug})`)}  ${g.sets.join(", ")}`);
+        return;
+      }
+      const rename = str(a, "rename");
+      if (rename !== undefined) return info(`${green("✓")} ${renameGroup(groupSlug(first), rename)}`);
+      if (bool(a, "ungroup")) return info(`${green("✓")} ${ungroup(groupSlug(first))}`);
+      if (!second && !bool(a, "none")) die('Usage: hush env group <set> "<group>"   (--none takes it out of its group)');
+      return info(`${green("✓")} ${fileUnder(first, bool(a, "none") ? null : second)}`);
+    }
+
     default:
-      die(`Unknown: hush env ${sub}`, "Try: ls, new, rename, describe, move, use, drop");
+      die(`Unknown: hush env ${sub}`, "Try: ls, new, rename, describe, move, global, here, group, use, drop");
   }
 }

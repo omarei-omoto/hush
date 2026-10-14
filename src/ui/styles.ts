@@ -45,7 +45,7 @@ svg.i{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-
 .app{display:grid;grid-template-columns:240px minmax(0,1fr) 280px;min-height:100vh;
   background:linear-gradient(to right,transparent 239px,var(--line) 239px 240px,transparent 240px)}
 .app.keys-closed{grid-template-columns:240px minmax(0,1fr)}
-.app.keys-closed .keys{display:none}
+.app.keys-closed .keyside{display:none}
 .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:22px;padding:22px 16px}
 .brand{display:flex;align-items:center;padding:2px 8px 0;color:var(--ink)}
 .brand .lockup{height:21px;width:auto;display:block}
@@ -80,21 +80,35 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .pcard .pmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 /* The keys sidebar: every global key, ready to drag onto a project. */
-.keys{position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:22px 14px 22px 16px;border-left:1px solid var(--line);background:var(--bg)}
+.keyside{position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:22px 14px 22px 16px;border-left:1px solid var(--line);background:var(--bg)}
 .khead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
 .khead h2{margin:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em}
 .khead p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
-.keys .input{width:100%}
+.keyside .input{width:100%}
 .klist{display:flex;flex-direction:column;gap:14px}
 .kgroup{display:flex;flex-direction:column;gap:1px}
-.kset{padding:0 6px 4px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.kitem{display:flex;align-items:center;gap:6px;padding:3px 3px 3px 6px;border:1px solid transparent;border-radius:8px}
-.kitem:hover{background:var(--surface);border-color:var(--line)}
-.kitem .k{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
-.kitem .iconbtn{width:24px;height:24px;opacity:0}
-.kitem:hover .iconbtn,.kitem:focus-within .iconbtn,.kitem .iconbtn[aria-expanded=true]{opacity:1}
-.kempty{margin:0;font-size:13px}
+/* A group (folder) holds sets; a set holds keys. Each can be dragged whole. */
+.kfold{display:flex;flex-direction:column;gap:8px}
+.kfold>.kgroup{margin-left:14px;padding-left:8px;border-left:1px solid var(--line)}
+.kfolder,.kset,.kitem{display:flex;align-items:center;gap:6px;padding:3px 3px 3px 6px;border:1px solid transparent;border-radius:8px;min-width:0}
+.kfolder{padding-left:0;font-weight:600;font-size:13px;color:var(--ink)}
+.kfolder .fold{width:22px;height:22px;opacity:1}
+.kset{font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.kfolder:hover,.kset:hover,.kitem:hover{background:var(--surface);border-color:var(--line)}
+.kfolder .kname,.kset .kname,.kitem .k{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kitem .k{font-size:12.5px}
+.kfolder .count,.kset .count{font-size:11.5px;font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)}
+.kset .grip,.kitem .grip{opacity:.55}
+.kfolder>.iconbtn:last-child,.kset .iconbtn,.kitem .iconbtn{width:24px;height:24px;opacity:0}
+.kfolder:hover>.iconbtn,.kfolder:focus-within>.iconbtn,.kset:hover .iconbtn,.kset:focus-within .iconbtn,.kitem:hover .iconbtn,.kitem:focus-within .iconbtn,.keyside .iconbtn[aria-expanded=true]{opacity:1}
+.kempty{margin:0;font-size:13px;padding-left:6px}
+.kfoot{display:flex;flex-wrap:wrap;gap:6px}
 .kadd{align-self:flex-start}
+/* A group used by a project: each of its sets, under a small heading. */
+.subset+.subset{border-top:1px solid var(--line)}
+.subhead{display:flex;align-items:center;gap:8px;padding:8px 14px 0 16px;font-size:13px}
+.subhead .count{color:var(--muted);font-size:12px}
+.subhead .iconbtn{margin-left:auto}
 .keystab{display:none;position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:40;flex-direction:column;align-items:center;gap:6px;padding:12px 7px;
   border:1px solid var(--line);border-right:0;border-radius:10px 0 0 10px;background:var(--surface);color:var(--ink-2);font:inherit;font-size:12px;font-weight:600;cursor:pointer;box-shadow:var(--shadow-lg)}
 .keystab span{writing-mode:vertical-rl}
@@ -234,13 +248,10 @@ textarea.input{height:auto;min-height:96px;padding:8px 10px;font-family:var(--mo
 
 /* --------------------------------------------------------------- set card */
 .set .top{display:flex;align-items:center;gap:10px;padding:12px 14px 12px 16px}
-.ord{width:22px;height:22px;border-radius:50%;background:var(--sunken);color:var(--muted);display:flex;align-items:center;justify-content:center;
-  font:600 11.5px var(--mono);flex:0 0 auto}
 .set .title{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
 .set .title b{font-weight:600;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .set .title .count{color:var(--muted);font-size:12.5px;white-space:nowrap}
 .set .desc{padding:0 16px 10px 16px;margin-top:-6px;color:var(--muted);font-size:13px}
-.set.ordered .desc{padding-left:48px}
 .set .desc em{font-style:normal;color:var(--ink-2)}
 .set .tools{display:flex;align-items:center;gap:2px;flex:0 0 auto}
 .keys{border-top:1px solid var(--line)}
@@ -336,11 +347,11 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
 /* Not enough room for three columns: the keys open as a drawer over the page. */
 @media (max-width:1180px){
   .app,.app.keys-closed{grid-template-columns:240px minmax(0,1fr)}
-  .keys{position:fixed;top:0;right:0;bottom:0;height:auto;width:300px;z-index:45;box-shadow:var(--shadow-lg)}
+  .keyside{position:fixed;top:0;right:0;bottom:0;height:auto;width:300px;z-index:45;box-shadow:var(--shadow-lg)}
 }
 @media (max-width:860px){
   .app,.app.keys-closed{grid-template-columns:1fr}
-  .keys{width:min(320px,88vw);padding-bottom:96px}
+  .keyside{width:min(320px,88vw);padding-bottom:96px}
   .projrow{display:none}
   .app{grid-template-columns:1fr}
   .app{background:none}

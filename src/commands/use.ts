@@ -1,7 +1,7 @@
 /**
  * `hush use` — which sets this project uses, in order.
  */
-import { parseKeyLink, usedSets, librarySets, loadLinks, saveLinks, writeProjectDotfiles, LIBRARY_DEFAULT, confirmLinks, confirmedLinks, placeOf } from "../library.ts";
+import { parseKeyLink, parseGroupLink, usedSets, librarySets, loadLinks, saveLinks, writeProjectDotfiles, LIBRARY_DEFAULT, confirmLinks, confirmedLinks, placeOf, libraryGroups, openGlobal, groupSlug, GROUP_PREFIX } from "../library.ts";
 import { consent } from "../cli/consent.ts";
 import { type Args, bool, list } from "../cli/args.ts";
 import { ctxLoose, dieNotSetUp, interactiveSetup, isSetUp, runSetupDialogue } from "../cli/context.ts";
@@ -22,8 +22,9 @@ export async function cmdUse(a: Args): Promise<void> {
   if (bool(a, "confirm")) {
     const lib = new Set(librarySets().map((s) => s.name));
     const done = confirmedLinks(loose.hushDir);
-    // Whole library sets, and single keys taken from one (set#KEY).
+    // Whole library sets, groups of them, and single keys taken from one (set#KEY).
     const inLibrary = (l: string) => {
+      if (parseGroupLink(l) !== null) return true;
       const pick = parseKeyLink(l);
       const set = pick ? pick.set : l;
       return set === LIBRARY_DEFAULT || lib.has(set);
@@ -64,27 +65,36 @@ export async function cmdUse(a: Args): Promise<void> {
     }
     info(bold("This project uses:") + dim("  (in resolution order — later wins)"));
     const width = Math.max(...used.map((n) => n.length));
+    const groups = libraryGroups(openGlobal());
     for (const name of used) {
-      const source = name === LIBRARY_DEFAULT
-        ? library.some((s) => s.name === "default") ? "library" : "missing"
-        : loose.vault?.hasSet(name) ? "project" : library.some((s) => s.name === name) ? "library" : "missing";
+      const group = parseGroupLink(name);
+      const own = library.find((s) => s.name === name)?.project;
+      const source = group !== null
+        ? groups.some((g) => g.slug === group) ? "group of global sets" : "missing"
+        : name === LIBRARY_DEFAULT
+          ? library.some((s) => s.name === "default") ? "library" : "missing"
+          : loose.vault?.hasSet(name) ? "project" : own ? "only this project" : library.some((s) => s.name === name) ? "library" : "missing";
       info(`  ${name.padEnd(width)}  ${dim(source)}`);
     }
     return;
   }
 
   const library = librarySets();
+  const groups = libraryGroups(openGlobal());
   // `default` is this project's own; the library's is `default --library`
   // (recorded as library:default), since nothing from the library reaches a
-  // folder until the folder asks for it.
-  const names = a._.map(convertLegacyPin).map((n) =>
-    n === "default" && (bool(a, "library") || !loose.vault?.hasSet("default")) && library.some((s) => s.name === "default")
-      ? LIBRARY_DEFAULT
-      : n,
-  );
+  // folder until the folder asks for it. A name that is no set but is a
+  // group of global sets ("AI stack", or group:ai-stack) means the group.
+  const names = a._.map(convertLegacyPin).map((n) => {
+    if (n === "default" && (bool(a, "library") || !loose.vault?.hasSet("default")) && library.some((s) => s.name === "default")) return LIBRARY_DEFAULT;
+    if (loose.vault?.hasSet(n) || library.some((s) => s.name === n)) return n;
+    const slug = parseGroupLink(n) ?? groupSlug(n);
+    return groups.some((g) => g.slug === slug) ? GROUP_PREFIX + slug : n;
+  });
   const unknown = names.filter(
     (n) =>
       !loose.vault?.hasSet(n) &&
+      !groups.some((g) => g.link === n) &&
       !library.some((s) => s.name === n || (n === LIBRARY_DEFAULT && s.name === "default")),
   );
   if (unknown.length) {
@@ -98,6 +108,9 @@ export async function cmdUse(a: Args): Promise<void> {
   saveLinks(loose.hushDir, [...loadLinks(loose.hushDir), ...names]);
   // Naming a set yourself confirms it for this project, even one already listed.
   confirmLinks(loose.hushDir, names);
-  for (const n of names) info(`${green("✓")} this project now uses ${bold(n)}`);
+  for (const n of names) {
+    const g = groups.find((x) => x.link === n);
+    info(`${green("✓")} this project now uses ${bold(g ? g.label : n)}${g ? dim(` — every set in the group (${g.sets.join(", ")})`) : ""}`);
+  }
   info(dim("\n  recorded in .hush/envs.json — commit it so the team resolves the same sets"));
 }

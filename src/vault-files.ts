@@ -125,6 +125,18 @@ export interface EnvMeta {
    * project whose folder matches, and every folder inside one.
    */
   onlyIn?: string[];
+  /**
+   * The group a library set is filed under, by its label ("AI stack"): a
+   * folder for organising your global keys, which a project can also use as a
+   * whole — a "group:<slug>" link (library.ts).
+   */
+  group?: string;
+  /**
+   * The one project a library set belongs to — its folder's real path — for a
+   * set kept "only in this project". It stays out of your global keys, and
+   * onlyIn names the same folder, so hush refuses it anywhere else.
+   */
+  project?: string;
 }
 
 export interface VaultFile {
@@ -937,6 +949,16 @@ export function assertVaultShape(data: VaultFile, path: string): void {
           } catch {
             bad(`set "${env.slice(0, 40)}" is kept to a folder pattern hush would not write`);
           }
+        }
+      }
+      if (m.group !== undefined && (typeof m.group !== "string" || m.group.length > 80)) {
+        bad(`the group of set "${env.slice(0, 40)}" is not a name hush writes`);
+      }
+      if (m.project !== undefined) {
+        try {
+          assertOnlyInPattern(m.project);
+        } catch {
+          bad(`set "${env.slice(0, 40)}" belongs to a project folder hush would not write`);
         }
       }
     }

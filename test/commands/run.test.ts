@@ -152,7 +152,7 @@ describe("pass-through", () => {
     try {
       const r = p.run(["ls"]);
       assert.equal(r.code, 0, r.out);
-      assert.match(r.out, /YOUR LIBRARY/);
+      assert.match(r.out, /GLOBAL KEYS/);
       assert.match(r.out, /THIS PROJECT/);
       assert.ok(!/\.hush\b/.test(r.out), "looked like a directory listing, not hush's ls");
     } finally {

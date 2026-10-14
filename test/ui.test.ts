@@ -665,7 +665,7 @@ describe("the page script itself", () => {
   test("this project's default set cannot be stopped or deleted from the page", async () => {
     const { js } = await pageSource();
     assert.match(js, /const floor=where==="project"&&set\.name==="default"/);
-    assert.match(js, /ctx\.order&&!floor\?\{label:"Stop using here"/, "the floor can be switched off");
+    assert.match(js, /ctx\.here&&!floor\?\{label:"Stop using here"/, "the floor can be switched off");
     assert.match(js, /floor\?null:\{label:"Delete set…"/, "the floor can be deleted");
   });
 
@@ -678,16 +678,21 @@ describe("the page script itself", () => {
     assert.match(js, /onClose:function\(\)\{reviewDlg=null;if\(STAGES\.length&&!importing\)\{discardStages\(\)/);
   });
 
-  test("the import review keeps a dropped .env in the library when there is one", async () => {
+  test("the import review keeps a project's .env as that project's own, and Global keys' as global", async () => {
     const { js } = await pageSource();
     const start = js.indexOf("function stagingPanel(");
     assert.ok(start > -1, "stagingPanel() is missing");
     const panel = js.slice(start, js.indexOf("\nfunction ", start + 1));
+    const ownAt = panel.indexOf('value:"own"');
     const libAt = panel.indexOf('value:"library"');
     const projAt = panel.indexOf('value:"project"');
-    assert.ok(libAt > -1 && projAt > -1, "the review is missing a destination");
-    assert.ok(libAt < projAt, "the library is not offered first");
-    assert.match(panel, /S\.global\.exists\?"library":"project"/, "no fallback to the project when there is no library");
+    assert.ok(ownAt > -1 && libAt > -1 && projAt > -1, "the review is missing a destination");
+    assert.ok(ownAt < libAt && libAt < projAt, "this project's own keys are not offered first");
+    assert.match(panel, /route\(\)==="library"\|\|!onProject\?"library":"own"/, "the default is not the project's own, or global from Global keys");
+    // The repository is only offered where the project already shares a vault.
+    assert.match(panel, /S\.folder\.state==="vault"\?h\("label",null,h\("input",\{type:"radio",name:"dest",value:"project"\}\)/);
+    // "Only this project" is a library set kept for it: created with own, never in the repository.
+    assert.match(js, /const own=where==="own";\n  if\(own\)where="library";/);
   });
 
   test("on a phone the sections move to a bottom tab bar and key rows stack", async () => {
@@ -1398,6 +1403,74 @@ test("/api/move carves one pile into named sets", async () => {
       const given = await libApi("/api/assign", { project: other, set: "hub-test", key: "HUB_TWO" });
       assert.equal(given.status, 200, JSON.stringify(given.body));
       assert.deepEqual(JSON.parse(readFileSync(join(other, ".hush", "envs.json"), "utf8")).use, ["hub-test#HUB_TWO"]);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  test("a project's own keys and global ones: kept here, made global, groups given whole, and tidying up (hub)", async () => {
+    const root = realpathSync(libRoot);
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "hush-own-other-")));
+    mkdirSync(join(other, ".hush"), { recursive: true });
+    writeFileSync(join(other, ".hush", "envs.json"), JSON.stringify({ use: [] }));
+    const stateOf = async (at: string) =>
+      (await (await fetch(libBase + "/api/state", { headers: { "x-hush-token": libToken, "x-hush-project": at } })).json()) as any;
+    const linksOf = (at: string) => JSON.parse(readFileSync(join(at, ".hush", "envs.json"), "utf8")).use as string[];
+    try {
+      await libApi("/api/projects", { action: "add", root: other });
+
+      // Only this project's: a set in your library that belongs to it.
+      const made = (await libApi("/api/env", { action: "create", where: "library", own: true, label: "Mine only" })).body;
+      await libApi("/api/link", { name: made.created, use: true });
+      const w = await libApi("/api/secret", { where: "library", scope: made.created, key: "MINE_KEY", value: "mine_value_123456" });
+      assert.equal(w.status, 200, JSON.stringify(w.body));
+      let s = (await libApi("/api/state")).body;
+      assert.equal(s.library.find((x: any) => x.name === made.created).own, true);
+      assert.ok(!(await stateOf(other)).library.some((x: any) => x.name === made.created), "another project was shown this one's own set");
+      assert.equal((await libApi("/api/assign", { project: other, kind: "set", set: made.created })).status, 400, "another project was given this one's own set");
+
+      // Made global, into a group: still used here, and now anyone's to use.
+      let r = await libApi("/api/place", { action: "global", where: "library", set: made.created, group: "Test group" });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.match(r.body.done, /global/);
+      assert.ok(r.body.hub && r.body.folder, "the page cannot refresh both lists from this answer");
+      const now = r.body.library.find((x: any) => x.name === made.created);
+      assert.equal(now.own, false);
+      assert.equal(now.group, "Test group");
+      assert.ok(r.body.used.includes(made.created));
+      assert.deepEqual(r.body.groups.find((g: any) => g.name === "test-group").sets, [made.created]);
+
+      // The whole group, given to the other project.
+      r = await libApi("/api/assign", { project: other, kind: "group", group: "test-group" });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(linksOf(other), ["group:test-group"]);
+      assert.equal((await libApi("/api/assign", { project: other, kind: "set", set: made.created })).body.assigned, "already", "a set its group already gives was added again");
+
+      // Kept for this project again: the other one is named, and nothing changes until confirmed.
+      r = await libApi("/api/place", { action: "here", set: made.created });
+      assert.deepEqual(r.body.confirm.projects.map((u: any) => [u.root, u.viaGroup]), [[other, true]]);
+      assert.equal((await libApi("/api/state")).body.library.find((x: any) => x.name === made.created).own, false);
+      r = await libApi("/api/place", { action: "here", set: made.created, force: true });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(r.body.library.find((x: any) => x.name === made.created).own, true);
+      assert.ok(!(await stateOf(other)).library.some((x: any) => x.name === made.created));
+
+      // A key in the repository's vault, made global: out of the repo, still part of the project.
+      r = await libApi("/api/place", { action: "global", where: "project", set: "default", key: "PROJECT_ONLY", toLabel: "From the repo" });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.ok(!r.body.project.find((x: any) => x.name === "default").keys.includes("PROJECT_ONLY"));
+      assert.deepEqual(r.body.library.find((x: any) => x.name === "from-the-repo").keys, ["PROJECT_ONLY"]);
+      assert.ok(linksOf(root).includes("from-the-repo#PROJECT_ONLY"), "the project lost the key it had");
+
+      // Tidying up offers only sets one project uses whole; values never come back.
+      r = await libApi("/api/tidy", { action: "list" });
+      assert.ok(Array.isArray(r.body.offers));
+      assert.ok(!r.body.offers.some((o: any) => o.set === "from-the-repo"), "a set taken key by key was offered");
+      const all = JSON.stringify([s, r.body, await stateOf(other)]);
+      assert.ok(!all.includes("mine_value_123456") && !all.includes("project_only_value_1234"), "a value came back");
+
+      assert.equal((await libApi("/api/place", { action: "sideways", set: made.created })).status, 400);
+      assert.equal((await libApi("/api/group", { action: "rename", group: "no-such-group", label: "x" })).status, 400);
     } finally {
       rmSync(other, { recursive: true, force: true });
     }

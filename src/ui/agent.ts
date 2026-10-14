@@ -123,6 +123,14 @@ function describeEvent(e){
     case "team.remove":return ["change","Removed "+(e.name||"someone")];
     case "policy.update":return ["change","Changed what asks first"];
     case "setup":return ["change","Set up this folder"];
+    case "set.global":return ["change","Made "+(e.key||nm(e.set))+" a global key"];
+    case "set.here":return ["change","Kept "+(e.key||nm(e.set))+" for one project only"];
+    case "key.assign":return ["change","Gave a project "+String(e.link||e.key||"a global key").replace(/^group:/,"the group ")];
+    case "key.unassign":return ["change","Took "+String(e.link||"a global key").replace(/^group:/,"the group ")+" off a project"];
+    case "group.file":return ["change",e.group?"Filed "+nm(e.set)+" under "+e.group:"Took "+nm(e.set)+" out of its group"];
+    case "group.rename":return ["change","Renamed a group"];
+    case "group.ungroup":return ["change","Took every set out of a group"];
+    case "tidy":return ["change","Kept "+plural(Number(e.moved)||0,"set")+" for the one project using each"];
     case "global.create":return ["change","Created your library"];
     case "global.adopt":return ["change","Switched your library to "+(e.name||"")];
     case "verify":return ["other","Checked the vault"];

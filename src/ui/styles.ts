@@ -451,7 +451,11 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
    arrive rather than appear. */
 body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.035;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
-.main{background:radial-gradient(1100px 420px at 50% -220px,var(--glow-top),transparent 70%) no-repeat}
+.main{position:relative;background:radial-gradient(1100px 420px at 50% -220px,var(--glow-top),transparent 70%) no-repeat}
+/* The flickering dots at the top (motion.ts), behind the page and fading out downwards. */
+.dots{position:absolute;top:0;left:0;width:100%;height:300px;pointer-events:none;color:var(--muted);
+  -webkit-mask-image:radial-gradient(ellipse 60% 100% at 50% 0%,#000 20%,transparent 78%);mask-image:radial-gradient(ellipse 60% 100% at 50% 0%,#000 20%,transparent 78%)}
+.main>.page{position:relative}
 @keyframes rise{from{opacity:0;transform:translateY(8px);filter:blur(5px)}to{opacity:1;transform:none;filter:none}}
 .page.enter>*,.rise{animation:rise .55s cubic-bezier(.2,.75,.25,1) both}
 .page.enter>*:nth-child(2){animation-delay:.05s}

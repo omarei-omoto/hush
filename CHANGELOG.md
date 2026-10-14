@@ -2,6 +2,42 @@
 
 All notable changes to hush. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [semver](https://semver.org). Pre-1.0, minor versions may break things — each entry says so when it does.
 
+## 0.13.1 — 2026-10-14
+
+### The app has a new look
+
+Nothing changes in what the app does or what it can reach; it looks and
+moves like [tryhush.dev](https://tryhush.dev) now. Nothing breaks.
+
+- **Revealing a value decrypts it.** While the approval is up, the redaction
+  bar churns like ciphertext being worked on; the value then resolves out of
+  it, left to right, as the bar lifts, and goes back into ciphertext when the
+  bar falls. It is still set as text, and nothing is left on the page once it
+  hides.
+- **Headings in Manrope**, the face the wordmark is drawn in. The font is
+  embedded in the page (the Latin subset, under the SIL Open Font License), so
+  the app still loads nothing from the network; its Content-Security-Policy
+  gains `font-src data:` for it and nothing else.
+- **Motion where it helps you follow along.** A view rises into place when you
+  open it (not each time it redraws), the line under a project's tabs slides
+  to the one you opened, suggestions have a light running round their border,
+  the protection meter fills in green, and toasts, dialogs and menus arrive
+  rather than appear, each toast with a ✓ or ⚠.
+- **A little texture.** A field of faintly flickering dots at the top of the
+  page, a paper grain, a soft light behind the heading, and project cards lit
+  from wherever the pointer is.
+- **Less motion when you ask for it.** With your system's "reduce motion" on,
+  none of it moves: values appear at once and the dots hold still.
+- **On a phone**, a suggestion's sentence gets the width and its buttons go
+  under it, instead of being squeezed beside them.
+
+### The site
+
+- **tryhush.dev has a home page** with the real app running in a window, on
+  made-up keys: the page `hush ui` serves, with what it asked for recorded
+  from a real server when the site is built. The README is at
+  [/overview/](https://tryhush.dev/overview/).
+
 ## 0.13.0 — 2026-10-14
 
 ### The app is a hub of all your projects

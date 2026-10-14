@@ -1,0 +1,136 @@
+/*
+ * The home page's styles: Tailwind, scoped to that page (the docs keep
+ * Starlight's own), and hush's palette (assets/README.md) — warm paper and
+ * ink, one green — as tokens with shadcn's names, so the components in
+ * src/components/ui read them as they are.
+ */
+@import "@fontsource-variable/manrope";
+@import "tailwindcss" source(none);
+@source "../components";
+@source "../pages/index.astro";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --background: #f2f1ed;
+  --foreground: #111111;
+  --card: #ffffff;
+  --sunken: #eae8e2;
+  --ink-2: #3b3a36;
+  --muted-foreground: #77756e;
+  --border: #dedcd5;
+  --border-strong: #cdcac1;
+  --ok: #2f6b47;
+  --ok-soft: #e3ede4;
+  --glow: rgba(47, 107, 71, 0.18);
+  --grid: #111111;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --background: #0e0e0d;
+  --foreground: #f2f1ed;
+  --card: #1a1a18;
+  --sunken: #242320;
+  --ink-2: #d2d0c9;
+  --muted-foreground: #8f8c84;
+  --border: #2b2a26;
+  --border-strong: #3a3934;
+  --ok: #7fc59a;
+  --ok-soft: rgba(127, 197, 154, 0.12);
+  --glow: rgba(127, 197, 154, 0.16);
+  --grid: #f2f1ed;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-sunken: var(--sunken);
+  --color-ink-2: var(--ink-2);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+}
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, Roboto, "Helvetica Neue", sans-serif;
+  --font-display: "Manrope Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --animate-marquee: marquee var(--duration) infinite linear;
+  --animate-marquee-vertical: marquee-vertical var(--duration) linear infinite;
+  --animate-shiny-text: shiny-text 8s infinite;
+  --animate-caret: caret 1.1s steps(1) infinite;
+  --animate-pulse-ring: pulse-ring 2.4s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(calc(-100% - var(--gap))); }
+  }
+  @keyframes marquee-vertical {
+    from { transform: translateY(0); }
+    to { transform: translateY(calc(-100% - var(--gap))); }
+  }
+  @keyframes shiny-text {
+    0%, 90%, 100% { background-position: calc(-100% - var(--shiny-width)) 0; }
+    30%, 60% { background-position: calc(100% + var(--shiny-width)) 0; }
+  }
+  @keyframes caret {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+  @keyframes pulse-ring {
+    0% { transform: scale(0.85); opacity: 0.7; }
+    100% { transform: scale(1.7); opacity: 0; }
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  ::selection {
+    background: var(--foreground);
+    color: var(--background);
+  }
+  :focus-visible {
+    outline: 2px solid var(--foreground);
+    outline-offset: 2px;
+  }
+}
+
+/* The paper's grain, as on the banner: an SVG noise, very faint, fading out at the bottom. */
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  mask-image: linear-gradient(to bottom, #000 40%, transparent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] .grain::after {
+  opacity: 0.035;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

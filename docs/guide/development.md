@@ -36,9 +36,13 @@ HUSH_TEST_BINARY=$PWD/release/hush-darwin-arm64 npm run test:binary
 ```
 
 The docs site at [tryhush.dev](https://tryhush.dev/) is these Markdown files,
-built with [Starlight](https://starlight.astro.build) in `website/`. It has its
-own dependencies, so the hush package still has none. Edit the Markdown where it
-is; to see the site as you go:
+built with [Starlight](https://starlight.astro.build) in `website/`, and a home
+page of its own (`website/src/pages/index.astro`: React, Tailwind and
+[Magic UI](https://magicui.design) components). The window on the home page runs
+the real app: `scripts/build-demo.mjs` starts `hush ui` on made-up keys, records
+what the page asks it, and saves the page with those answers built in. The site
+has its own dependencies, so the hush package still has none. Edit the Markdown
+where it is; to see the site as you go:
 
 ```bash
 cd website

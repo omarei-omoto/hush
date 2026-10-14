@@ -2,16 +2,25 @@
   "name": "hush-docs",
   "private": true,
   "type": "module",
-  "description": "tryhush.dev: the README and docs/ as a Starlight site. Not part of the hush package.",
+  "description": "tryhush.dev: a home page with the live app, and the README and docs/ as a Starlight site. Not part of the hush package.",
   "scripts": {
-    "content": "node ../scripts/build-docs.mjs",
+    "content": "node ../scripts/build-docs.mjs && node ../scripts/build-demo.mjs",
     "dev": "npm run content && astro dev",
     "build": "npm run content && astro build && node ../scripts/check-site.mjs dist",
     "preview": "astro preview"
   },
   "dependencies": {
+    "@astrojs/react": "7.0.0",
     "@astrojs/starlight": "0.42.5",
-    "astro": "7.3.5"
+    "@fontsource-variable/manrope": "5.3.0",
+    "@tailwindcss/vite": "4.3.3",
+    "astro": "7.3.5",
+    "clsx": "2.1.1",
+    "motion": "13.4.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwind-merge": "3.7.0",
+    "tailwindcss": "4.3.3"
   },
   "overrides": {
     "postcss-selector-parser": "^7.1.6"

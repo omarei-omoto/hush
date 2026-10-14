@@ -1,8 +1,9 @@
 name: Docs
 
-# The docs site on GitHub Pages at tryhush.dev: the README and docs/ as a
-# Starlight site (website/, content from scripts/build-docs.mjs), rebuilt
-# whenever the README, the guide or the docs change on main. No other branch
+# The docs site on GitHub Pages at tryhush.dev: a home page, the README and
+# docs/ as a Starlight site (website/, content from scripts/build-docs.mjs), and
+# the app running on made-up keys (scripts/build-demo.mjs), rebuilt whenever the
+# README, the guide, the docs or the app change on main. No other branch
 # deploys: the site describes what `npm i -g @omarei/hush` installs.
 # One-time setup: Settings → Pages → Source: "GitHub Actions", and
 # Custom domain: tryhush.dev (the DNS records are in RELEASING.md).
@@ -18,9 +19,10 @@ on:
       - "RESEARCH.md"
       - "CODE_OF_CONDUCT.md"
       - "docs/**"
-      - "src/cli/help.ts"
+      - "src/**"
       - "scripts/build-docs.mjs"
       - "scripts/check-site.mjs"
+      - "scripts/build-demo.mjs"
       - "website/**"
       - "assets/**"
       - "scripts/gen-commands.mjs"
@@ -50,8 +52,9 @@ jobs:
       # lockfile. They never touch the hush package, which has none.
       - name: install
         run: npm ci --prefix website
-      # The content, then astro build, then scripts/check-site.mjs: every link
-      # and anchor resolves and no script comes from another host.
+      # The content and the live app, then astro build, then
+      # scripts/check-site.mjs: every link and anchor resolves and no script
+      # comes from another host.
       - name: build
         run: npm run build --prefix website
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

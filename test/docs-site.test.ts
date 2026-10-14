@@ -5,7 +5,9 @@
  *
  * What matters most: nothing git would not commit is ever published — the
  * site is built from a working tree that may hold private notes — and every
- * link between pages lands on a page.
+ * link between pages lands on a page. The home page's live app
+ * (scripts/build-demo.mjs) is the real page on made-up keys, and holds no
+ * value and no path from the machine that built it.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -13,9 +15,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 
 import { REPO, buildContent, convert, pageSources, slugOf } from "../scripts/build-docs.mjs";
 import { checkSite } from "../scripts/check-site.mjs";
+import { DEMO_REFUSAL, buildDemo, demoPage } from "../scripts/build-demo.mjs";
 
 /** A throwaway git repository shaped like hush's docs. */
 function repo() {
@@ -57,8 +61,8 @@ describe("the site's content", () => {
     }
   });
 
-  test("short addresses: the README is the home page, the guide is /guide/", () => {
-    assert.equal(slugOf("README.md"), "");
+  test("short addresses: the README is /overview/ (the home page is the site's own), the guide is /guide/", () => {
+    assert.equal(slugOf("README.md"), "overview");
     assert.equal(slugOf("docs/guide/README.md"), "guide");
     assert.equal(slugOf("docs/guide/sets.md"), "guide/sets");
     assert.equal(slugOf("docs/RED-TEAM.md"), "red-team");
@@ -71,16 +75,18 @@ describe("the site's content", () => {
     try {
       buildContent(site, { dir: r.dir, branch: "beta" });
       const docs = join(site, "src", "content", "docs");
-      const home = readFileSync(join(docs, "index.md"), "utf8");
+      const home = readFileSync(join(docs, "overview.md"), "utf8");
+      assert.match(home, /^---\ntitle: "Overview"\n/);
       assert.match(home, /\]\(\/guide\/sets\/#sets\)/);
       assert.match(home, /\]\(\/relay\/\)/);
       assert.ok(home.includes(`](${REPO}/blob/beta/test/x.test.ts)`), home);
-      assert.match(readFileSync(join(docs, "guide", "sets.md"), "utf8"), /\]\(\/\)/);
+      assert.match(readFileSync(join(docs, "guide", "sets.md"), "utf8"), /\]\(\/overview\/\)/);
       // The sidebar comes from the guide index; a label that is a file name shows the page's title.
       const sidebar = JSON.parse(readFileSync(join(site, "src", "sidebar.json"), "utf8"));
       assert.deepEqual(sidebar[0], {
         label: "Using it",
         items: [
+          { label: "Overview", slug: "overview" },
           { label: "The guide", slug: "guide" },
           { label: "Sets", slug: "guide/sets" },
           { label: "Security policy", slug: "security" },
@@ -128,7 +134,7 @@ describe("the real docs", () => {
     try {
       const written = buildContent(site, { dir: root });
       const slugs = new Set(written.map((w) => w.slug));
-      for (const must of ["", "guide", "guide/sets", "guide/setting-up", "relay", "tailnet", "security"]) assert.ok(slugs.has(must), `/${must} was not built`);
+      for (const must of ["overview", "guide", "guide/sets", "guide/setting-up", "relay", "tailnet", "security"]) assert.ok(slugs.has(must), `/${must} was not built`);
       assert.ok(!written.some((w) => /PLAN-1\.0/.test(w.src)), "a private plan was published");
       let links = 0;
       for (const w of written) {
@@ -180,4 +186,88 @@ describe("checking the built site", () => {
       rmSync(dist, { recursive: true, force: true });
     }
   });
+});
+
+describe("the live app on the home page", () => {
+  /** The demo's data and script, run as a browser would run them, against a stand-in window. */
+  function load(html: string, opts: { parentTheme?: string } = {}) {
+    const data = /<script type="application\/json" id="hush-demo">([\s\S]*?)<\/script>/.exec(html)![1];
+    const script = /<\/script><script>([\s\S]*?)<\/script>/.exec(html)![1];
+    const root = { dataset: {} as Record<string, string> };
+    const stored = new Map([["hush-keys", "open"], ["hush-project", "/somewhere"]]);
+    const window: Record<string, unknown> = { fetch: async () => new Response("{}") };
+    window.parent = opts.parentTheme ? { document: { documentElement: { dataset: { theme: opts.parentTheme } } } } : window;
+    Object.assign(window, {
+      window,
+      document: { documentElement: root, getElementById: () => ({ textContent: data }) },
+      matchMedia: () => ({ matches: false, addEventListener() {} }),
+      localStorage: { removeItem: (k: string) => stored.delete(k) },
+      location: { href: "https://tryhush.dev/demo/index.html" },
+      MutationObserver: class { observe() {} },
+      Response,
+      URL,
+      JSON,
+      Date,
+    });
+    runInNewContext(script, window);
+    const fetch = window.fetch as (url: string, init?: RequestInit) => Promise<Response>;
+    return { fetch, theme: root.dataset.theme, stored };
+  }
+
+  test("it answers the page's reads from what was recorded, and every change with a notice", async () => {
+    const page = '<!doctype html><html><head><meta charset="utf-8"><style>:root{--bg:#fff}@media (prefers-color-scheme:dark){:root{--bg:#111;}}</style></head><body></body></html>';
+    const at = new Date(Date.now() - 3_600_000).toISOString();
+    const html = demoPage(page, { "GET /api/hub ": { projects: [] }, "GET /api/state /p": { seen: at }, "POST /api/audit /p": { entries: [] } }, at);
+    // After the charset, which a browser only looks for in the first kilobyte.
+    assert.ok(html.startsWith('<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex">'), html.slice(0, 120));
+    assert.ok(!html.includes("@media (prefers-color-scheme:dark)"), "the dark palette still follows only the system");
+    assert.match(html, /:root\[data-theme=dark\]\{--bg:#111;\}/);
+
+    const { fetch, theme, stored } = load(html, { parentTheme: "light" });
+    assert.equal(theme, "light", "the app did not take the site's theme");
+    assert.equal(stored.size, 0, "a choice from an earlier visit was kept");
+    const json = async (r: Promise<Response>) => {
+      const res = await r;
+      return { status: res.status, body: (await res.json()) as Record<string, string> };
+    };
+    assert.deepEqual(await json(fetch("/api/hub")), { status: 200, body: { projects: [] } });
+    // A project's own answer, and the folder the app started in for one it never asked about.
+    const state = await json(fetch("/api/state", { headers: { "x-hush-project": "/p" } }));
+    assert.ok(Date.now() - Date.parse(state.body.seen) < 60_000, "a recorded time was not moved up to now");
+    assert.deepEqual((await json(fetch("/api/audit", { method: "POST", headers: { "x-hush-project": "/p" }, body: "{}" }))).body, { entries: [] });
+    assert.deepEqual(await json(fetch("/api/hub", { headers: { "x-hush-project": "/elsewhere" } })), { status: 200, body: { projects: [] } });
+    // Anything that would change something: the notice, never a pretend success.
+    for (const [path, body] of [["/api/secret", '{"key":"A"}'], ["/api/audit", '{"x":1}'], ["/api/reveal", '{"key":"A"}']]) {
+      assert.deepEqual(await json(fetch(path, { method: "POST", headers: { "x-hush-project": "/p" }, body })), { status: 409, body: { error: DEMO_REFUSAL } });
+    }
+  });
+
+  test(
+    "built from the real app on made-up keys: every view it reads, no value, no path from this machine",
+    { skip: process.platform === "win32" ? "the site is built on Linux" : false },
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hush-demo-out-"));
+      try {
+        const out = join(dir, "index.html");
+        const { answers } = await buildDemo(out);
+        const keys = Object.keys(answers);
+        for (const read of ["GET /api/hub ", "GET /api/state ", "POST /api/suggestions ", "POST /api/push-hosts ", "POST /api/audit "]) {
+          assert.ok(keys.includes(read), `${read.trim()} was not recorded`);
+        }
+        assert.equal(keys.filter((k) => k.startsWith("GET /api/state /Users/alex/code/")).length, 5, keys.join("\n"));
+        // What the window is there to show: the app's suggestions, each kind of them.
+        const kinds = (answers["POST /api/suggestions "] as { suggestions: { kind: string }[] }).suggestions.map((s) => s.kind).sort();
+        for (const kind of ["give", "group", "plaintext", "repush"]) assert.ok(kinds.includes(kind), `no "${kind}" suggestion: ${kinds}`);
+        // A Mac set up the way hush start leaves one, wherever this was built.
+        assert.equal((answers["GET /api/hub "] as { platform: string }).platform, "darwin");
+        assert.equal((answers["GET /api/state "] as { posture: { rung: number } }).posture.rung, 3);
+        const html = readFileSync(out, "utf8");
+        assert.ok(!html.includes(tmpdir()) && !html.includes(process.cwd()), "a path from this machine is in the demo");
+        assert.ok(!/not-a-real|not_a_real/.test(html), "a whole value reached the demo");
+        assert.ok(html.includes("<title>hush</title>"), "this is not the app's page");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

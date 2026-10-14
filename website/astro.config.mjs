@@ -1,8 +1,13 @@
-// tryhush.dev. The pages come from the repository's Markdown, written into
-// src/content/docs by ../scripts/build-docs.mjs (`npm run build` runs it first).
+// tryhush.dev. The home page is src/pages/index.astro: React islands, styled
+// with Tailwind, which only that page loads. The docs come from the
+// repository's Markdown, written into src/content/docs by
+// ../scripts/build-docs.mjs, and the live app in the home page's window by
+// ../scripts/build-demo.mjs (`npm run build` runs both first).
 import { readFileSync } from "node:fs";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import react from "@astrojs/react";
+import tailwindcss from "@tailwindcss/vite";
 
 const SITE = "https://tryhush.dev";
 const sidebar = JSON.parse(readFileSync(new URL("./src/sidebar.json", import.meta.url), "utf8"));
@@ -24,5 +29,7 @@ export default defineConfig({
       ],
       expressiveCode: { themes: ["github-dark", "github-light"] },
     }),
+    react(),
   ],
+  vite: { plugins: [tailwindcss()] },
 });

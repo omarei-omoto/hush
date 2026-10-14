@@ -9,7 +9,8 @@
  *
  * The Markdown stays where it is and reads the same on GitHub. Each file
  * becomes a page at a short address — docs/guide/sets.md is /guide/sets/,
- * SECURITY.md is /security/ — its first heading becomes the page title, links
+ * SECURITY.md is /security/, the README is /overview/ (the home page is
+ * website/src/pages/index.astro) — its first heading becomes the page title, links
  * between files become links between pages, GitHub's [!NOTE] alerts become
  * Starlight asides, and a link to anything that is not a page (a test file,
  * the LICENSE) goes to the file on GitHub. Code is never touched.
@@ -40,12 +41,12 @@ export function pageSources(dir = root) {
 }
 
 /**
- * A page's address, without slashes: README.md is "" (the home page),
- * docs/guide/README.md is "guide", docs/guide/sets.md is "guide/sets", and
+ * A page's address, without slashes: README.md is "overview" (the home page
+ * is the site's own, website/src/pages/index.astro), docs/guide/README.md is "guide", docs/guide/sets.md is "guide/sets", and
  * docs/RED-TEAM.md and CODE_OF_CONDUCT.md are "red-team" and "code-of-conduct".
  */
 export function slugOf(src) {
-  if (src === "README.md") return "";
+  if (src === "README.md") return "overview";
   const kebab = (s) => s.toLowerCase().replace(/_/g, "-");
   if (src.startsWith("docs/guide/")) {
     const name = src.slice("docs/guide/".length, -".md".length);
@@ -55,7 +56,7 @@ export function slugOf(src) {
 }
 
 export const urlOf = (slug) => (slug ? `/${slug}/` : "/");
-const fileOf = (slug) => (slug === "" ? "index.md" : slug === "guide" ? "guide/index.md" : `${slug}.md`);
+const fileOf = (slug) => (slug === "guide" ? "guide/index.md" : `${slug}.md`);
 
 /** A heading's text without its Markdown: what a title or a sidebar label shows. */
 const plain = (s) =>
@@ -130,18 +131,10 @@ function rewriteLinks(lines, link) {
   });
 }
 
-/** The home page's top: the README's header (banner, tagline, badges) is GitHub's; the site has a hero instead. */
-const HOME = {
-  title: "Secrets your AI agent can use but never read",
-  hero: {
-    title: "Secrets your AI agent can use but never read",
-    tagline: "Envelope-encrypted team secrets that live in your repo. No server, no account, no shared password.",
-    actions: [
-      { text: "Get started", link: "/guide/setting-up/", icon: "right-arrow" },
-      { text: "Read the guide", link: "/guide/", variant: "minimal" },
-      { text: "GitHub", link: REPO, icon: "github", variant: "minimal" },
-    ],
-  },
+/** The README's page: its header (banner, tagline, badges) is GitHub's, and it has no heading of its own. */
+const OVERVIEW = {
+  title: "Overview",
+  description: "Envelope-encrypted team secrets your AI agent can use but never read: what hush is, how to install it, and where to start.",
 };
 
 /**
@@ -179,8 +172,8 @@ export function convert(md, src, { published, branch = "main", dir = root }) {
       break;
     }
   }
-  const home = src === "README.md";
-  if (home) {
+  const readme = src === "README.md";
+  if (readme) {
     // Drop the GitHub header: leading HTML blocks, badge lines and blank lines.
     let i = 0;
     while (i < lines.length && (lines[i].trim() === "" || /^\s*<|^\[!\[/.test(lines[i]))) i++;
@@ -188,8 +181,8 @@ export function convert(md, src, { published, branch = "main", dir = root }) {
   }
   lines = outsideCode(lines, (prose) => rewriteLinks(asides(prose), link));
 
-  const front = home
-    ? { ...HOME, template: "splash", editUrl: `${REPO}/edit/${branch}/${src}` }
+  const front = readme
+    ? { ...OVERVIEW, editUrl: `${REPO}/edit/${branch}/${src}` }
     : { title: title ?? posix.basename(src, ".md"), editUrl: `${REPO}/edit/${branch}/${src}` };
   return { title: front.title, body: `---\n${yaml(front)}---\n\n${lines.join("\n").trim()}\n` };
 }
@@ -222,8 +215,8 @@ export function sidebar(published, titles, dir = root) {
   }
   const project = ["CONTRIBUTING.md", "CHANGELOG.md", "RELEASING.md", "CODE_OF_CONDUCT.md"].filter((s) => published.has(s));
   if (project.length) groups.push({ label: "Project", collapsed: true, items: project.map((s) => item(s, titles.get(s) ?? s)) });
-  // The guide's own index opens the first group.
-  groups[0]?.items.unshift({ label: "The guide", slug: "guide" });
+  // The overview and the guide's own index open the first group.
+  groups[0]?.items.unshift(...(published.has("README.md") ? [{ label: "Overview", slug: "overview" }] : []), { label: "The guide", slug: "guide" });
   return groups;
 }
 

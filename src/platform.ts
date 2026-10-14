@@ -14,7 +14,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { constants, lstatSync, openSync, statSync } from "node:fs";
-import { join, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 export const isWindows = (platform: string = process.platform): boolean => platform === "win32";
 
@@ -80,7 +80,8 @@ export function fileManagerCommand(
     const explorer = win32.join(windowsRoot(), "explorer.exe");
     return exists(explorer) ? { cmd: explorer, args: [folder] } : null;
   }
-  const xdg = ["/usr/bin", "/bin", "/usr/local/bin"].map((d) => join(d, "xdg-open")).find(exists);
+  // Linux paths whatever machine builds them: path.join would give \usr\bin on Windows.
+  const xdg = ["/usr/bin", "/bin", "/usr/local/bin"].map((d) => posix.join(d, "xdg-open")).find(exists);
   return xdg ? { cmd: xdg, args: [folder] } : null;
 }
 

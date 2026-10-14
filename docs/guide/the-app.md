@@ -21,12 +21,24 @@ machine, not just the folder you started it in.
   folders hush looks in, and **Add a folder** takes a single
   codebase the same way; either also takes a pasted path. **Look again**
   re-crawls in the background. Dropping a global key on a codebase that is not
-  set up sets it up with that key.
-- **Global keys** are yours, kept once, never in a repository. **Drag a key onto
-  a project** — in the sidebar or on Home — and it is part of that project: it
+  set up sets it up with that key. A long list has a filter (name, folder or
+  stack).
+- **Every project has a ⋯ menu**, on Home and in the sidebar: **Open**, **Show
+  in Finder** (Explorer on Windows, the file manager on Linux), **Copy path**,
+  **Rescan**, **Hide** and **Remove from list…**. Hidden projects wait under
+  **Hidden** on Home, where **Show** brings one back; a removed one is forgotten,
+  and looking through your folders won't add it back — adding the folder again
+  does. Neither touches the project's files, and using hush in a project never
+  undoes either.
+- **Global keys** are yours, kept once, never in a repository. They sit in the
+  **right sidebar**, grouped by set, with a search when there are more than a
+  few. **Drag a key onto a project** — in the left sidebar, on Home, or anywhere
+  on an open project's page — and it is part of that project: it
   gets the key whenever it runs. Nothing goes into the project's repository, and
   rotating the key is one edit that every project picks up. Without a mouse, a
-  key's menu has **Use in a project…**. A project can take just that one key
+  key's ⋯ menu has **Use in a project…**. Close the sidebar with its ×; the
+  **Keys** tab on the right edge opens it again (on a narrow window it opens
+  over the page). A project can take just that one key
   from a set, or the whole set.
 - **Keys here**, for the project you are looking at: what a run gets, in the
   order the sets apply; the global keys it uses, each with **Remove**; and what

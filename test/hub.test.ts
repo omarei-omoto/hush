@@ -5,14 +5,14 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { generateIdentity } from "../src/crypto.ts";
 import { Vault } from "../src/vault.ts";
 import { composeSets, globalVaultName, keyLinkName, loadLinks, parseKeyLink, saveLinks } from "../src/library.ts";
-import { addProject, findProjects, hideProject, isKnownProject, listProjects, rememberProject, searchOnce } from "../src/projects.ts";
+import { addProject, findProjects, hideProject, isKnownProject, isSetAside, listHidden, listProjects, rememberProject, removeProject, searchOnce, showProject } from "../src/projects.ts";
 import { looksLikeSecret } from "../src/ui-state.ts";
 
 const scratch = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
@@ -49,10 +49,44 @@ describe("the project list", () => {
       assert.deepEqual(listProjects().map((p) => p.root).sort(), [a, b]);
       hideProject(a);
       assert.deepEqual(listProjects().map((p) => p.root), [b]);
-      assert.ok(isKnownProject(a), "a hidden project is still one the app may act on once re-added");
+      assert.deepEqual(listHidden().map((p) => p.root), [a]);
+      assert.ok(isKnownProject(a), "a hidden project is still one the app may act on");
       rememberProject(a);
-      assert.ok(listProjects().some((p) => p.root === a), "using a hidden project again brings it back");
+      assert.deepEqual(listProjects().map((p) => p.root), [b], "using hush in a hidden project brought it back without being asked");
+      showProject(a);
+      assert.deepEqual(listProjects().map((p) => p.root).sort(), [a, b]);
+      assert.deepEqual(listHidden(), []);
       assert.throws(() => addProject(join(code, "plain-folder")), /not a codebase hush recognises/);
+    });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(code, { recursive: true, force: true });
+  });
+
+  test("a removed project stays off the list until it is added again, and its files are untouched", () => {
+    const home = scratch("hush-hub-home-");
+    const code = scratch("hush-hub-code-");
+    withHome(home, () => {
+      const a = makeProject(code, "api");
+      const site = join(code, "site");
+      mkdirSync(site);
+      writeFileSync(join(site, "package.json"), "{}");
+      rememberProject(a);
+      addProject(site);
+      removeProject(a);
+      removeProject(site);
+      assert.deepEqual(listProjects(), []);
+      assert.deepEqual(listHidden(), [], "a removed project is not merely hidden");
+      assert.ok(isSetAside(a) && !isKnownProject(a));
+      // Nothing automatic brings it back: using hush there, or a search of its folder.
+      rememberProject(a);
+      assert.equal(searchOnce([code]), 0);
+      assert.deepEqual(findProjects([code], { depth: 4, folders: 100, ms: 1000, codebases: true }).sort(), [a, site].sort(), "the search itself still sees them");
+      assert.deepEqual(listProjects(), []);
+      assert.ok(existsSync(join(a, ".hush", "envs.json")) && existsSync(join(site, "package.json")), "a file was touched");
+      // Adding it by hand does.
+      addProject(a);
+      assert.deepEqual(listProjects().map((p) => p.root), [a]);
+      assert.ok(!isSetAside(a));
     });
     rmSync(home, { recursive: true, force: true });
     rmSync(code, { recursive: true, force: true });

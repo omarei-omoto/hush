@@ -42,8 +42,10 @@ button,input,select,textarea{font:inherit;color:inherit}
 svg.i{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 /* ------------------------------------------------------------------ shell */
-.app{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:100vh;
+.app{display:grid;grid-template-columns:240px minmax(0,1fr) 280px;min-height:100vh;
   background:linear-gradient(to right,transparent 239px,var(--line) 239px 240px,transparent 240px)}
+.app.keys-closed{grid-template-columns:240px minmax(0,1fr)}
+.app.keys-closed .keys{display:none}
 .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:22px;padding:22px 16px}
 .brand{display:flex;align-items:center;padding:2px 8px 0;color:var(--ink)}
 .brand .lockup{height:21px;width:auto;display:block}
@@ -77,6 +79,48 @@ body.dragging-key .nav a.proj,body.dragging-key .pcard{box-shadow:inset 0 0 0 1p
 .pcard .pdir{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pcard .pmeta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
+/* The keys sidebar: every global key, ready to drag onto a project. */
+.keys{position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:22px 14px 22px 16px;border-left:1px solid var(--line);background:var(--bg)}
+.khead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.khead h2{margin:0;font-size:14.5px;font-weight:600;letter-spacing:-.01em}
+.khead p{margin:2px 0 0;color:var(--muted);font-size:12.5px}
+.keys .input{width:100%}
+.klist{display:flex;flex-direction:column;gap:14px}
+.kgroup{display:flex;flex-direction:column;gap:1px}
+.kset{padding:0 6px 4px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kitem{display:flex;align-items:center;gap:6px;padding:3px 3px 3px 6px;border:1px solid transparent;border-radius:8px}
+.kitem:hover{background:var(--surface);border-color:var(--line)}
+.kitem .k{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+.kitem .iconbtn{width:24px;height:24px;opacity:0}
+.kitem:hover .iconbtn,.kitem:focus-within .iconbtn,.kitem .iconbtn[aria-expanded=true]{opacity:1}
+.kempty{margin:0;font-size:13px}
+.kadd{align-self:flex-start}
+.keystab{display:none;position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:40;flex-direction:column;align-items:center;gap:6px;padding:12px 7px;
+  border:1px solid var(--line);border-right:0;border-radius:10px 0 0 10px;background:var(--surface);color:var(--ink-2);font:inherit;font-size:12px;font-weight:600;cursor:pointer;box-shadow:var(--shadow-lg)}
+.keystab span{writing-mode:vertical-rl}
+.keystab:hover{color:var(--ink)}
+.app.keys-closed~.keystab{display:flex}
+/* A project in the sidebar: its ⋯ menu shows on hover, in place of the key count. */
+.projrow{position:relative}
+.projrow>.iconbtn{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:24px;height:24px;opacity:0}
+.projrow:hover>.iconbtn,.projrow:focus-within>.iconbtn,.projrow>.iconbtn[aria-expanded=true]{opacity:1}
+.projrow:hover a .count,.projrow:focus-within a .count{visibility:hidden}
+/* A project card: the name is the link, stretched over the card; the menu sits above it. */
+.pcard{position:relative}
+.pcard .pcover{display:block;min-width:0;color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcard .pcover::after{content:"";position:absolute;inset:0;border-radius:12px}
+.pcard .pcover:focus-visible{outline:none}
+.pcard:focus-within{border-color:var(--ink)}
+.pcard .pend{margin-left:auto;display:flex;align-items:center;gap:2px;flex:0 0 auto}
+.pcard .pend .iconbtn{position:relative;z-index:1;width:24px;height:24px;margin:-4px -8px -4px 0}
+.filter{margin-top:22px}
+.filter .input{width:100%;max-width:420px}
+.hiddenlist summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14.5px;font-weight:600}
+.hiddenlist summary .count{color:var(--muted);font-weight:500;font-size:12.5px}
+.hiddenlist>p{margin:6px 0 10px;font-size:13px}
+.hiddenlist .li .btn{flex:0 0 auto}
+/* An open project's page takes a dropped key. */
+.page.drop-on{box-shadow:none!important;background:none!important;outline:2px dashed var(--ink);outline-offset:14px;border-radius:14px}
 .navmore{display:block;padding:4px 10px 4px 36px;font-size:12.5px;color:var(--muted);text-decoration:none}
 .navmore:hover{color:var(--ink)}
 .progress{height:4px;border-radius:2px;background:var(--line);margin-top:12px;overflow:hidden}
@@ -289,7 +333,15 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 48px)
 .toast button{background:none;border:1px solid currentColor;color:inherit;border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer;opacity:.9}
 
 /* -------------------------------------------------------------- responsive */
+/* Not enough room for three columns: the keys open as a drawer over the page. */
+@media (max-width:1180px){
+  .app,.app.keys-closed{grid-template-columns:240px minmax(0,1fr)}
+  .keys{position:fixed;top:0;right:0;bottom:0;height:auto;width:300px;z-index:45;box-shadow:var(--shadow-lg)}
+}
 @media (max-width:860px){
+  .app,.app.keys-closed{grid-template-columns:1fr}
+  .keys{width:min(320px,88vw);padding-bottom:96px}
+  .projrow{display:none}
   .app{grid-template-columns:1fr}
   .app{background:none}
   .side{position:static;height:auto;flex-direction:row;align-items:center;gap:12px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--line)}

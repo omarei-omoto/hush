@@ -3,7 +3,7 @@
  * agent, the ladder. `/api/state` returns this, and so does every write.
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { type CrawlStatus, crawlOnce, crawlRoots, crawlStatus, isProjectRoot, listProjects } from "./projects.ts";
+import { type CrawlStatus, crawlOnce, crawlRoots, crawlStatus, isProjectRoot, isSetAside, listHidden, listProjects } from "./projects.ts";
 import { join, basename, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
 import { scanTree, looksLikeSecret } from "./scan.ts";
@@ -459,7 +459,14 @@ export interface HubProject {
  * counts only: nothing is decrypted, and a project's vault is opened just far
  * enough to list its key names. The first call starts the background crawl.
  */
-export function hubState(startedRoot: string): { projects: HubProject[]; crawl: CrawlStatus; roots: string[]; rootsChosen: boolean } {
+export function hubState(startedRoot: string): {
+  projects: HubProject[];
+  hidden: { root: string; name: string }[];
+  crawl: CrawlStatus;
+  roots: string[];
+  rootsChosen: boolean;
+  platform: string;
+} {
   crawlOnce();
   const library = librarySets();
   const globalKeys = new Set(library.flatMap((s) => s.keys));
@@ -472,7 +479,9 @@ export function hubState(startedRoot: string): { projects: HubProject[]; crawl: 
       return startedRoot;
     }
   })();
-  if (isProjectRoot(realStart) && !listed.some((p) => p.root === realStart)) {
+  // The folder the app started in is listed even if hush has not remembered it
+  // yet — unless the person hid or removed it.
+  if (isProjectRoot(realStart) && !listed.some((p) => p.root === realStart) && !isSetAside(realStart)) {
     listed.unshift({ root: realStart, seen: new Date().toISOString(), hush: true });
   }
   const projects = listed.map((p): HubProject => {
@@ -521,7 +530,8 @@ export function hubState(startedRoot: string): { projects: HubProject[]; crawl: 
     };
   });
   const { roots, chosen } = crawlRoots();
-  return { projects, crawl: crawlStatus(), roots, rootsChosen: chosen };
+  const hidden = listHidden().map((p) => ({ root: p.root, name: basename(p.root) }));
+  return { projects, hidden, crawl: crawlStatus(), roots, rootsChosen: chosen, platform: process.platform };
 }
 
 export { looksLikeSecret } from "./scan.ts";

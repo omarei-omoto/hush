@@ -3,6 +3,7 @@
  * in the browser, until they are imported or discarded).
  */
 import { type IncomingMessage, type ServerResponse } from "node:http";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -12,7 +13,8 @@ import { loadPolicy, DEFAULT_POLICY } from "./mcp.ts";
 import { requestApproval } from "./approval.ts";
 import { Vault, namedVaultPath, audit, ValidationError, slugifyEnv, assertProjectHushDir } from "./vault.ts";
 import { librarySets, loadLinks, saveLinks, openGlobal, usedSets, globalVaultName, saveConfig, writeProjectDotfiles, linkNameFor, keyLinkName } from "./library.ts";
-import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, setCrawlRoots, startCrawl } from "./projects.ts";
+import { addProject, crawlRoots, hideProject, isKnownProject, isListedRoot, removeProject, rescanProject, setCrawlRoots, showProject, startCrawl } from "./projects.ts";
+import { fileManagerCommand } from "./platform.ts";
 import { chooseFolder, detectBackend } from "./dialogs.ts";
 import { hushHome, requireIdentity } from "./identity.ts";
 import { setLocalApprovals } from "./policy.ts";
@@ -248,11 +250,36 @@ export async function handleApi(ctx: UiCtx, req: IncomingMessage, res: ServerRes
       return json(res, 200, { path, picker: true });
     }
 
-    /** The project list: add a folder by hand, or take one off the list. */
+    /**
+     * The project list. "add" a folder by hand; for a project on it: "hide"
+     * (onto the hidden list), "show" (back again), "remove" (forget it — the
+     * crawl leaves it out from then on), "rescan" (describe it again), and
+     * "reveal" (show it in Finder, Explorer or the desktop's file manager).
+     * None of them touches the project's files.
+     */
     case "/api/projects": {
-      if (body.action === "add") addProject(String(body.root ?? ""));
-      else if (body.action === "hide") hideProject(String(body.root ?? ""));
-      else return json(res, 400, { error: 'action must be "add" or "hide"' });
+      const action = String(body.action ?? "");
+      if (action === "add") {
+        addProject(String(body.root ?? ""));
+        return json(res, 200, hubState(startedRoot));
+      }
+      if (!["hide", "show", "remove", "rescan", "reveal"].includes(action)) {
+        return json(res, 400, { error: 'action must be "add", "hide", "show", "remove", "rescan" or "reveal"' });
+      }
+      const root = knownRoot(body.root);
+      if (action === "reveal") {
+        // No desktop to show it on (HUSH_NO_DIALOG), or no file manager: say so.
+        const how = process.env.HUSH_NO_DIALOG === "1" ? null : fileManagerCommand(root);
+        if (!how) return json(res, 200, { revealed: false });
+        const child = spawn(how.cmd, how.args, { detached: true, stdio: "ignore", windowsHide: false });
+        child.on("error", () => { /* nothing more to say than revealed */ });
+        child.unref();
+        return json(res, 200, { revealed: true });
+      }
+      if (action === "hide") hideProject(root);
+      else if (action === "show") showProject(root);
+      else if (action === "remove") removeProject(root);
+      else rescanProject(root);
       return json(res, 200, hubState(startedRoot));
     }
   }

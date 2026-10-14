@@ -32,8 +32,9 @@ import { FOUNDATIONS } from "./ui/foundations.ts";
 import { ACTIONS } from "./ui/actions.ts";
 import { SECTIONS } from "./ui/sections.ts";
 import { AGENT } from "./ui/agent.ts";
+import { HUB_UI } from "./ui/hub.ts";
 import { IMPORT } from "./ui/import.ts";
 import { builtPage } from "./assets.ts";
 
 /** The whole document, in order — or, in the binary, the same document as its build embedded it (assets.ts). */
-export const PAGE = builtPage() ?? STYLES + FOUNDATIONS + ACTIONS + SECTIONS + AGENT + IMPORT;
+export const PAGE = builtPage() ?? STYLES + FOUNDATIONS + ACTIONS + SECTIONS + AGENT + HUB_UI + IMPORT;

@@ -4,10 +4,13 @@
  * ui` was started in.
  *
  * Kept in `~/.hush/projects.json`, paths only. A project is remembered when
- * hush is used in it (any command, or the app), found once by a bounded search
- * of the usual code folders, or added by hand; hiding one only takes it off the
- * list. Nothing here is a permission: what a project may use is still decided
- * by its own .hush/ and the confirmations in ~/.hush.
+ * hush is used in it (any command, or the app), found by the crawl of the
+ * folders hush looks in, or added by hand. Hiding one moves it to the hidden
+ * list; removing one forgets it, and the crawl leaves it out from then on.
+ * Only the person undoes either (Show, or adding the folder again): using hush
+ * there, or a crawl, never does. Neither touches the project's files. Nothing
+ * here is a permission: what a project may use is still decided by its own
+ * .hush/ and the confirmations in ~/.hush.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { setImmediate as nextTick } from "node:timers/promises";
@@ -36,6 +39,8 @@ interface Registry {
   crawled?: string;
   /** The folders the person chose for hush to look in for codebases. */
   roots?: string[];
+  /** Folders the person removed from the list: the crawl does not add them back. */
+  ignored?: string[];
 }
 
 const registryPath = (): string => join(hushHome(), "projects.json");
@@ -59,11 +64,13 @@ function load(): Registry {
       ? j.projects.filter((p) => p && typeof p.root === "string" && typeof p.seen === "string")
       : [];
     const roots = Array.isArray(j?.roots) ? j.roots.filter((x) => typeof x === "string") : undefined;
+    const ignored = Array.isArray(j?.ignored) ? j.ignored.filter((x) => typeof x === "string") : undefined;
     return {
       projects,
       ...(typeof j?.searched === "string" ? { searched: j.searched } : {}),
       ...(typeof j?.crawled === "string" ? { crawled: j.crawled } : {}),
       ...(roots ? { roots } : {}),
+      ...(ignored?.length ? { ignored } : {}),
     };
   } catch {
     return { projects: [] };
@@ -77,21 +84,22 @@ function save(r: Registry): void {
 
 /**
  * Remember that hush was used in `root`. Cheap enough to call on every
- * command: it writes only for a project not on the list yet, one not seen
- * for a day, or one the person had hidden and is now using again.
+ * command: it writes only for a project not on the list yet, or one not seen
+ * for a day. A project the person hid stays hidden, and one they removed
+ * stays off the list.
  */
 export function rememberProject(root: string): void {
   try {
     const at = real(root);
     if (at === real(hushHome()) || !isProjectRoot(at)) return;
     const r = load();
+    if (r.ignored?.includes(at)) return;
     const now = new Date().toISOString();
     const known = r.projects.find((p) => p.root === at);
     if (known) {
       const stale = Date.now() - Date.parse(known.seen) > 86_400_000;
-      if (!stale && !known.hidden) return;
+      if (!stale) return;
       known.seen = now;
-      delete known.hidden;
     } else {
       r.projects.push({ root: at, seen: now });
     }
@@ -118,17 +126,32 @@ export function listProjects(): (KnownProject & { hush: boolean })[] {
     .sort((a, b) => Number(b.hush) - Number(a.hush) || when(b).localeCompare(when(a)) || basename(a.root).localeCompare(basename(b.root)));
 }
 
+/** The hidden projects that are still there, so the person can bring them back. */
+export function listHidden(): KnownProject[] {
+  return load()
+    .projects.filter((p) => p.hidden && listable(p.root))
+    .sort((a, b) => basename(a.root).localeCompare(basename(b.root)));
+}
+
+/** Did the person take `root` off the list (hid or removed it)? */
+export function isSetAside(root: string): boolean {
+  const at = real(root);
+  const r = load();
+  return Boolean(r.ignored?.includes(at) || r.projects.find((p) => p.root === at)?.hidden);
+}
+
 /** Is `root` on the list (hidden ones included)? The app acts only on these. */
 export function isKnownProject(root: string): boolean {
   const at = real(root);
   return load().projects.some((p) => p.root === at);
 }
 
-/** Add a folder by hand: a hush project, or any codebase. */
+/** Add a folder by hand: a hush project, or any codebase. Undoes a hide or a removal. */
 export function addProject(root: string): KnownProject {
   const at = real(root);
   if (!listable(at)) throw new ValidationError(`${at} is not a codebase hush recognises: no .hush, .git or project file (package.json, pyproject.toml, …) in it`);
   const r = load();
+  if (r.ignored) r.ignored = r.ignored.filter((x) => x !== at);
   const known = r.projects.find((p) => p.root === at);
   if (known) {
     delete known.hidden;
@@ -140,13 +163,46 @@ export function addProject(root: string): KnownProject {
   return r.projects.find((p) => p.root === at)!;
 }
 
-/** Take a project off the list. Its files are untouched. */
+/** Take a project off the list, onto the hidden one. Its files are untouched. */
 export function hideProject(root: string): void {
   const at = real(root);
   const r = load();
   const known = r.projects.find((p) => p.root === at);
+  if (known) known.hidden = true;
+  else r.projects.push({ root: at, seen: new Date().toISOString(), hidden: true });
+  save(r);
+}
+
+/** Bring a hidden project back onto the list. */
+export function showProject(root: string): void {
+  const at = real(root);
+  const r = load();
+  const known = r.projects.find((p) => p.root === at);
+  if (!known?.hidden) return;
+  delete known.hidden;
+  save(r);
+}
+
+/**
+ * Forget a project: off the list, and the crawl leaves it out from now on.
+ * Its files, .hush/ included, are untouched; adding the folder again brings it back.
+ */
+export function removeProject(root: string): void {
+  const at = real(root);
+  const r = load();
+  r.projects = r.projects.filter((p) => p.root !== at);
+  r.ignored = [...new Set([...(r.ignored ?? []), at])];
+  save(r);
+}
+
+/** Describe one project again (its stack, branch, the credentials its code reads). */
+export function rescanProject(root: string): void {
+  const at = real(root);
+  const details = describeCodebase(at);
+  const r = load();
+  const known = r.projects.find((p) => p.root === at);
   if (!known) return;
-  known.hidden = true;
+  known.details = details;
   save(r);
 }
 
@@ -230,7 +286,7 @@ export function searchOnce(roots = searchRoots()): number {
   const now = new Date().toISOString();
   let added = 0;
   for (const root of findProjects(roots)) {
-    if (r.projects.some((p) => p.root === root)) continue;
+    if (r.projects.some((p) => p.root === root) || r.ignored?.includes(root)) continue;
     r.projects.push({ root, seen: now });
     added++;
   }
@@ -272,12 +328,12 @@ export function startCrawl(): CrawlStatus {
   const found = findProjects(roots, { depth: 4, folders: 40_000, ms: 4_000, codebases: true });
   const r = load();
   const now = new Date().toISOString();
-  for (const root of found) if (!r.projects.some((p) => p.root === root)) r.projects.push({ root, seen: now });
+  for (const root of found) if (!r.projects.some((p) => p.root === root) && !r.ignored?.includes(root)) r.projects.push({ root, seen: now });
   r.searched = now;
   r.crawled = now;
   save(r);
   // Every listed project gets described, not only the ones found this time.
-  const todo = [...new Set([...found, ...r.projects.filter((p) => !p.hidden).map((p) => p.root)])].filter(listable);
+  const todo = [...new Set([...found.filter((f) => !r.ignored?.includes(f)), ...r.projects.filter((p) => !p.hidden).map((p) => p.root)])].filter(listable);
   crawl = { running: true, done: 0, total: todo.length };
   void (async () => {
     for (const root of todo) {

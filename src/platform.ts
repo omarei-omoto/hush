@@ -14,7 +14,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { constants, lstatSync, openSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 export const isWindows = (platform: string = process.platform): boolean => platform === "win32";
 
@@ -56,6 +56,33 @@ export function system32(...parts: string[]): string | null {
 
 /** Windows PowerShell 5.1, which every supported Windows ships. */
 export const powershellPath = (): string | null => system32("WindowsPowerShell", "v1.0", "powershell.exe");
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How to show a folder in the system's file manager — Finder, Explorer, or
+ * the Linux desktop's own through xdg-open — by a fixed path, never one looked
+ * up on PATH. Null where there is none.
+ */
+export function fileManagerCommand(
+  folder: string,
+  platform: string = process.platform,
+  exists: (p: string) => boolean = isFile,
+): { cmd: string; args: string[] } | null {
+  if (platform === "darwin") return exists("/usr/bin/open") ? { cmd: "/usr/bin/open", args: [folder] } : null;
+  if (platform === "win32") {
+    const explorer = win32.join(windowsRoot(), "explorer.exe");
+    return exists(explorer) ? { cmd: explorer, args: [folder] } : null;
+  }
+  const xdg = ["/usr/bin", "/bin", "/usr/local/bin"].map((d) => join(d, "xdg-open")).find(exists);
+  return xdg ? { cmd: xdg, args: [folder] } : null;
+}
 
 /**
  * Make a file readable by its owner only. A no-op off Windows, where the 0600

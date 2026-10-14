@@ -12,7 +12,9 @@ export const FOUNDATIONS = String.raw`<div class="app">
     <a class="level" id="level" href="#agent"></a>
   </aside>
   <main class="main"><div class="page" id="page"></div></main>
+  <aside class="keys" id="keys" aria-label="Global keys"></aside>
 </div>
+<button type="button" class="keystab" id="keystab" aria-controls="keys" aria-label="Global keys" title="Global keys"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7a4 4 0 1 1-3.9 4.9L4 19v2h3v-2h2v-2h2l1.1-1.1A4 4 0 0 1 15 7zM16.5 9.5h.01"/></svg><span>Keys</span></button>
 <div class="drop" id="drop" aria-hidden="true">Drop to import<small>.env files — nothing is saved until you review them</small></div>
 <input type="file" id="picker" multiple hidden>
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
@@ -167,27 +169,33 @@ function draggableKey(el,set,key){
     ev.dataTransfer.effectAllowed="link";
     document.body.classList.add("dragging-key");
   });
-  el.addEventListener("dragend",function(){document.body.classList.remove("dragging-key")});
+  el.addEventListener("dragend",function(){
+    document.body.classList.remove("dragging-key");
+    [].forEach.call(document.querySelectorAll(".drop-on"),function(x){x.classList.remove("drop-on")});
+  });
 }
+/** project is the project, or a function giving the one to use when the key lands (null: not here). */
 function dropTarget(el,project){
+  const which=function(){return typeof project==="function"?project():project};
   el.addEventListener("dragover",function(ev){
-    if([].indexOf.call(ev.dataTransfer.types||[],KEY_MIME)<0)return;
+    if([].indexOf.call(ev.dataTransfer.types||[],KEY_MIME)<0||!which())return;
     ev.preventDefault();ev.dataTransfer.dropEffect="link";el.classList.add("drop-on");
   });
-  el.addEventListener("dragleave",function(){el.classList.remove("drop-on")});
+  el.addEventListener("dragleave",function(ev){if(!el.contains(ev.relatedTarget))el.classList.remove("drop-on")});
   el.addEventListener("drop",function(ev){
     el.classList.remove("drop-on");
     const raw=ev.dataTransfer.getData(KEY_MIME);
-    if(!raw)return;
+    const p=which();
+    if(!raw||!p)return;
     ev.preventDefault();ev.stopPropagation();
     const k=JSON.parse(raw);
-    giveKey(project,k.set,k.key);
+    giveKey(p,k.set,k.key);
   });
 }
 /** Make a global key part of a project: a key link, yours, nothing written into its repo's vault. */
 async function giveKey(project,set,key){
   const r=await api("/api/assign",{project:project.root,set:set,key:key});
-  HUB={projects:r.projects};
+  HUB=r;
   toast(r.assigned==="already"?project.name+" already gets "+key:key+" is now part of "+project.name);
   if(project.root===currentRoot())await refresh();else render();
 }
@@ -258,10 +266,14 @@ function setLabel(where,name){
 
 /* ------------------------------------------------------------ menus -- */
 
-let openMenuEl=null;
-function closeMenu(){if(openMenuEl){openMenuEl.remove();openMenuEl=null}}
+let openMenuEl=null,openMenuAnchor=null;
+function closeMenu(){
+  if(openMenuEl){openMenuEl.remove();openMenuEl=null}
+  if(openMenuAnchor){openMenuAnchor.setAttribute("aria-expanded","false");openMenuAnchor=null}
+}
 function menu(anchor,items){
   closeMenu();
+  openMenuAnchor=anchor;anchor.setAttribute("aria-expanded","true");
   const m=h("div",{class:"menu",role:"menu"});
   items.forEach(function(it){
     if(it==="-"){m.append(h("hr"));return}

@@ -1335,6 +1335,49 @@ test("/api/move carves one pile into named sets", async () => {
     assert.deepEqual(r.body, { path: null, picker: false });
   });
 
+  test("a project's menu: hide, show, rescan, reveal and remove it, without touching its files (hub)", async () => {
+    const code = realpathSync(mkdtempSync(join(tmpdir(), "hush-menu-")));
+    const site = join(code, "menu-site");
+    mkdirSync(site);
+    writeFileSync(join(site, "package.json"), JSON.stringify({ dependencies: { express: "5" } }));
+    writeFileSync(join(site, "server.js"), "process.env.MENU_SECRET_TOKEN;\n");
+    const act = (action: string) => libApi("/api/projects", { action, root: site });
+    const listed = (hub: any) => hub.projects.some((p: any) => p.root === site);
+    try {
+      let r = await libApi("/api/projects", { action: "add", root: site });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.ok(listed(r.body));
+      assert.ok(r.body.platform, "the menu cannot say Finder or Explorer without the platform");
+
+      r = await act("rescan");
+      const found = r.body.projects.find((p: any) => p.root === site);
+      assert.deepEqual(found.stack, ["Express", "JavaScript"]);
+      assert.deepEqual(found.credentials, ["MENU_SECRET_TOKEN"]);
+
+      r = await act("hide");
+      assert.ok(!listed(r.body), "a hidden project is still listed");
+      assert.ok(r.body.hidden.some((p: any) => p.root === site), "a hidden project is not on the hidden list");
+      r = await act("show");
+      assert.ok(listed(r.body) && !r.body.hidden.some((p: any) => p.root === site));
+
+      // This server has no desktop (HUSH_NO_DIALOG): nothing is opened, and it says so.
+      r = await act("reveal");
+      assert.deepEqual(r.body, { revealed: false });
+
+      r = await act("remove");
+      assert.ok(!listed(r.body) && !r.body.hidden.some((p: any) => p.root === site), "a removed project is still on a list");
+      assert.ok(existsSync(join(site, "package.json")) && existsSync(join(site, "server.js")), "removing it touched its files");
+      // Gone from the list means gone for the app too, until it is added again.
+      assert.equal((await act("hide")).status, 400);
+      const crawl = (await libApi("/api/crawl", { roots: [code] })).body;
+      assert.ok(!listed(crawl), "the crawl added a removed project back");
+
+      assert.equal((await libApi("/api/projects", { action: "delete", root: site })).status, 400, "an unknown action was accepted");
+    } finally {
+      rmSync(code, { recursive: true, force: true });
+    }
+  });
+
   test("the hub acts only on projects it knows: an unknown folder is refused by header and by body (hub)", async () => {
     const other = realpathSync(mkdtempSync(join(tmpdir(), "hush-hub-other-")));
     mkdirSync(join(other, ".hush"), { recursive: true });

@@ -181,3 +181,13 @@ describe("the app's folder picker on Windows", () => {
     assert.equal(r.stdout.trim(), "Pick", r.stderr);
   });
 });
+
+test("a folder is shown in the system's file manager by a fixed path, never one found on PATH", async () => {
+  const { fileManagerCommand } = await import("../src/platform.ts");
+  const all = () => true;
+  assert.deepEqual(fileManagerCommand("/Users/me/code", "darwin", all), { cmd: "/usr/bin/open", args: ["/Users/me/code"] });
+  assert.deepEqual(fileManagerCommand("C:\\code", "win32", all), { cmd: "C:\\Windows\\explorer.exe", args: ["C:\\code"] });
+  assert.deepEqual(fileManagerCommand("/home/me/code", "linux", all), { cmd: "/usr/bin/xdg-open", args: ["/home/me/code"] });
+  assert.deepEqual(fileManagerCommand("/home/me/code", "linux", (p) => p === "/usr/local/bin/xdg-open"), { cmd: "/usr/local/bin/xdg-open", args: ["/home/me/code"] });
+  assert.equal(fileManagerCommand("/home/me/code", "linux", () => false), null);
+});

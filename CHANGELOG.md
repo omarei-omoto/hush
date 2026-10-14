@@ -28,7 +28,16 @@ All notable changes to hush. The format follows [Keep a Changelog](https://keepa
   picker can be shown.
 - **The first crawl for codebases now runs** on a machine where an earlier
   build of the app had already searched for hush projects.
-- **Library is now Global keys**, with **Save a global key** on Home and there.
+- **Your global keys in a sidebar on the right**, grouped by set and
+  searchable, always a drag away: drop one on a project in the left sidebar, on
+  Home, or anywhere on an open project's page. It closes to a **Keys** tab, and
+  opens over the page on a narrow window.
+- **A ⋯ menu on every project**: Open, Show in Finder (Explorer, or the Linux
+  file manager), Copy path, Rescan, Hide, and Remove from list. Hidden projects
+  wait under **Hidden** on Home; a removed one stays off the list, and the
+  crawl leaves it out, until you add the folder again. Neither touches its
+  files. Home filters a long list by name, folder or stack.
+- **Library is now Global keys**, with **Save a global key** in the keys sidebar.
 - **Fewer false "missing" warnings.** Only variables that look like credentials,
   or that you already keep, are flagged; `NODE_ENV`, `PORT` and the like are
   not. A project page offers only the global sets that hold something its code

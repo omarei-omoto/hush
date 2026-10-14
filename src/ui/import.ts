@@ -262,7 +262,7 @@ function renderShell(){
       onclick:function(ev){ev.preventDefault();openProject(p.root)}},
       icon("folder"),h("span",{class:"pname",text:p.name}),h("span",{class:"count",text:String(p.keys)}));
     dropTarget(a,p);
-    nav.append(a);
+    nav.append(h("div",{class:"projrow"},a,projectMenu(p)));
   });
   const found=all.filter(function(p){return p.state==="codebase"}).length;
   if(found)nav.append(h("a",{href:"#home",class:"navmore"},plural(found,"more codebase")+" on Home"));
@@ -376,13 +376,15 @@ function foldersCard(){
 
 function projectCard(p){
   const lacking=p.lacking||[];
-  const card=h("button",{type:"button",class:"pcard"+(p.state==="codebase"?" fresh":""),onclick:function(){openProject(p.root)},title:p.root},
-    h("div",{class:"ptop"},icon("folder"),h("b",{text:p.name}),
-      p.state==="codebase"?h("span",{class:"badge",text:"not set up"}):null,
-      p.active?h("span",{class:"muted ago",text:ago(p.active)}):null),
+  // The name is the link, stretched over the whole card; the menu sits above it.
+  const card=h("div",{class:"pcard"+(p.state==="codebase"?" fresh":""),title:p.root},
+    h("div",{class:"ptop"},icon("folder"),
+      h("a",{href:"#project",class:"pcover",onclick:function(ev){ev.preventDefault();openProject(p.root)}},h("b",{text:p.name})),
+      h("span",{class:"pend"},p.active?h("span",{class:"muted ago",text:ago(p.active)}):null,projectMenu(p))),
     (p.stack&&p.stack.length)?h("div",{class:"techs"},p.stack.slice(0,3).map(function(t){return h("span",{class:"tech",text:t})})):null,
     h("div",{class:"mono pdir",text:tildePath(p.root)+(p.branch?" · "+p.branch:"")}),
     h("div",{class:"pmeta"},
+      p.state==="codebase"?h("span",{class:"badge",text:"not set up"}):null,
       p.state==="codebase"
         ?h("span",{class:"muted",text:p.credentials&&p.credentials.length?"reads "+plural(p.credentials.length,"credential"):"no credentials found in its code"})
         :h("span",{class:"badge"+(p.keys?" ok":""),text:plural(p.keys,"key")}),
@@ -393,55 +395,64 @@ function projectCard(p){
   return card;
 }
 
+/* Home's filter, kept while the app is open. */
+let HOME_QUERY="";
+function matches(p,q){
+  if(!q)return true;
+  return [p.name,p.root,(p.stack||[]).join(" "),p.branch||""].join(" ").toLowerCase().indexOf(q)>-1;
+}
+
 function renderHome(page){
   page.append(h("header",{class:"head"},
     h("div",null,h("h1",null,"Your projects"),
-      h("p",{text:"Every codebase in the folders hush looks in, and every project it's used in. Drag a global key onto one to make it part of it — it stays yours, and nothing goes into the repository."})),
+      h("p",{text:"Every codebase in the folders hush looks in, and every project it's used in. Drag a global key from the right onto one to make it part of it — it stays yours, and nothing goes into the repository."})),
     h("div",{class:"actions"},
-      h("button",{type:"button",class:"btn",onclick:addFolderDialog},icon("plus"),"Add a folder"),
-      h("button",{type:"button",class:"btn primary",onclick:function(){addSecretDialog({target:"library|default"})}},icon("key"),"Save a global key"))));
+      h("button",{type:"button",class:"btn",onclick:addFolderDialog},icon("plus"),"Add a folder"))));
 
   page.append(foldersCard());
   const projects=HUB?HUB.projects:[];
-  const setUp=projects.filter(function(p){return p.state!=="codebase"});
-  const fresh=projects.filter(function(p){return p.state==="codebase"});
   if(!projects.length){
     page.append(h("div",{class:"card"},h("div",{class:"empty"},h("h3",null,HUB&&HUB.crawl&&HUB.crawl.running?"Looking for codebases…":"No codebases found yet"),
       h("p",{text:"Add the folders you keep code in above, or add one project by hand."}))));
   }
+  const lists=h("div",null);
+  if(projects.length>6){
+    const q=h("input",{class:"input",type:"search",placeholder:"Filter by name, folder or stack",value:HOME_QUERY,"aria-label":"Filter projects",autocomplete:"off",spellcheck:"false"});
+    q.addEventListener("input",function(){HOME_QUERY=q.value;fillProjects(lists,projects)});
+    page.append(h("div",{class:"filter"},q));
+  }
+  page.append(lists);
+  fillProjects(lists,projects);
+  const hid=hiddenSection();
+  if(hid)page.append(hid);
+  watchCrawl();
+}
+
+function fillProjects(box,projects){
+  clear(box);
+  const q=HOME_QUERY.trim().toLowerCase();
+  const shown=projects.filter(function(p){return matches(p,q)});
+  const setUp=shown.filter(function(p){return p.state!=="codebase"});
+  const fresh=shown.filter(function(p){return p.state==="codebase"});
+  if(q&&!shown.length)box.append(h("p",{class:"muted",style:"margin-top:18px",text:"No project matches “"+HOME_QUERY.trim()+"”."}));
   if(setUp.length){
     const grid=h("div",{class:"pgrid"});
     setUp.forEach(function(p){grid.append(projectCard(p))});
-    page.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Using hush"}))),grid));
+    box.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Using hush"}))),grid));
   }
   if(fresh.length){
     const grid=h("div",{class:"pgrid"});
     fresh.forEach(function(p){grid.append(projectCard(p))});
-    page.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Other codebases"}),
-      h("p",{text:"Found in your folders, not set up for hush yet. Drop a global key on one to set it up with that key, or open it to choose."}))),grid));
+    box.append(h("section",{class:"section"},h("div",{class:"sechead"},h("div",null,h("h2",{text:"Other codebases"}),
+      h("p",{text:"Found in your folders, not set up for hush yet. Drop a global key on one to set it up with that key. Not one of yours? Hide it from its ⋯ menu."}))),grid));
   }
-
-  // Your global keys, ready to drag, without leaving the page.
-  const chips=h("div",{class:"chips"});
-  S.library.forEach(function(set){
-    set.keys.forEach(function(k){
-      const c=h("span",{class:"chip",title:"From "+set.label+" — drag onto a project"},icon("grip"),h("span",{class:"mono",text:k}),
-        set.name!=="default"?h("small",{text:set.label}):null);
-      draggableKey(c,set.name,k);
-      chips.append(c);
-    });
-  });
-  page.append(h("section",{class:"section"},
-    h("div",{class:"sechead"},h("div",null,h("h2",{text:"Global keys"}),
-      h("p",{text:S.library.length?"Drag any of these onto a project.":"Keys you keep once and use in any project. Save one to start."}))),
-    S.library.length?chips:null));
-  watchCrawl();
 }
 
 function render(){
   if(!S)return;
   closeMenu();
   renderShell();
+  renderKeys();
   const page=document.getElementById("page");clear(page);
   const r=route();
   // A vault that changed without anyone here accepting it: nothing in it is

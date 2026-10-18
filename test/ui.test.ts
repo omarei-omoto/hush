@@ -648,6 +648,15 @@ describe("the page script itself", () => {
     assert.match(body, /setTimeout\(hide,15000\)/, "a revealed value does not hide itself again");
   });
 
+  test("the Agent tab shows how protected the project is once, with the next step", async () => {
+    const { js } = await pageSource();
+    const start = js.indexOf("function renderAgent(");
+    const agent = js.slice(start, js.indexOf("\n}\n", start));
+    assert.equal((agent.match(/S\.posture\.rung/g) || []).length > 0, true, "the Agent tab no longer shows the level");
+    assert.equal((agent.match(/class:"meter big"|class:"meter"/g) || []).length, 1, "the level is shown more than once");
+    assert.match(agent, /S\.posture\.next\.command/, "the next step's command is not offered");
+  });
+
   test("the page pulls nothing from the network", async () => {
     const { html } = await pageSource();
     assert.ok(!/<script[^>]+src=/.test(html), "the page loads an external script");

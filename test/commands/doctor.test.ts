@@ -100,6 +100,36 @@ describe("hush doctor reports the whole setup", () => {
     p.cleanup();
   });
 
+  test("--json gives the same checks as data, with no private key and no value", () => {
+    const p = project();
+    try {
+      writeFileSync(join(p.home, "policy.json"), JSON.stringify({ requireApproval: ["run"] }));
+      writeFileSync(join(p.hushDir, "policy.json"), JSON.stringify({ unsafeAllowCommands: ["node"] }));
+      const r = p.run(["doctor", "--json"]);
+      assert.equal(r.code, 0, r.out);
+      const report = JSON.parse(r.out) as { version: string; checks: { id: string; ok: boolean; label: string; detail: string; notes?: string[] }[]; posture: { rung: number } };
+      // The checklist a person reads, line for line.
+      const text = p.run(["doctor"]).out;
+      const lines = text.split("\n").filter((l) => /^ {2}[✓✗] /.test(l));
+      assert.equal(report.checks.length, lines.length, `${report.checks.map((c) => c.id)}\n${text}`);
+      report.checks.forEach((c, i) => assert.ok(lines[i].includes((c.ok ? "✓ " : "✗ ") + c.label), `${c.id}: ${lines[i]}`));
+      const byId = Object.fromEntries(report.checks.map((c) => [c.id, c]));
+      // What is gated, as the checklist says it: the floor here gates only run.
+      assert.equal(byId.approval.detail, "run");
+      assert.match(text, /approval required\s+run\n/);
+      assert.match(byId["policy-floor"].notes?.join("\n") ?? "", /unsafeAllowCommands: node — ignored, below your floor/);
+      assert.match(byId.identity.notes?.[0] ?? "", /^hush_pk_/, "the public key is not with the identity");
+      assert.equal(typeof report.posture.rung, "number");
+      // A public key, never the private one, and never a value.
+      assert.ok(!r.out.includes(p.env.HUSH_IDENTITY!), "doctor --json printed the private key");
+      assert.ok(!r.out.includes("hush_sk_"), "doctor --json printed a private key");
+      assert.ok(!r.out.includes("sk_live_cli"), "doctor --json printed a value");
+      assert.ok(!r.out.includes("\x1b["), "doctor --json carries terminal colour codes");
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("it never prints a secret value", () => {
     const p = project();
     const out = p.run(["doctor"]).out;

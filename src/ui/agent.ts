@@ -74,16 +74,6 @@ function renderAgent(page){
     h("p",{text:"Written to .hush/policy.json, so the team gets the same rules. In your own terminal nothing is blocked outright — risky commands just say so in the prompt."}))),
     S.policy.promptAvailable?null:h("div",{class:"banner warn",style:"margin-bottom:12px"},icon("alert"),h("span",{text:"Nothing on this machine can show a prompt (no desktop dialog or fingerprint reader), so anything switched on below is refused."})),
     sw,how?h("p",{class:"muted",style:"font-size:13px;margin:10px 2px 0",text:how}):null));
-
-  const p=S.posture;
-  const meter=h("div",{class:"meter",style:"margin:10px 0 12px"});
-  for(let i=1;i<=5;i++)meter.append(h("i",{class:i<=p.rung?"on":""}));
-  page.append(h("section",{class:"card pad section","aria-label":"Security level"},
-    h("div",{class:"sechead",style:"margin:0"},h("div",null,h("h3",null,"How protected this is"),h("p",{class:"lead",text:"Level "+p.rung+" of 5 · "+p.name})),
-      p.rung>=5?h("span",{class:"badge ok"},icon("check"),"top level"):null),
-    meter,
-    p.next?h("div",null,h("div",{style:"font-weight:600"},"Next: "+p.next.label),p.next.why?h("div",{class:"muted",text:p.next.why}):null,
-      /^hush /.test(p.next.command)?copyCmd(p.next.command):h("div",{class:"muted mono",style:"font-size:12.5px;margin-top:4px",text:p.next.command})):null));
 }
 
 /* --------------------------------------------------------------- activity */

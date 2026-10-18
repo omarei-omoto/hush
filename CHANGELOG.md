@@ -2,6 +2,37 @@
 
 All notable changes to hush. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [semver](https://semver.org). Pre-1.0, minor versions may break things — each entry says so when it does.
 
+## 0.13.2 — 2026-10-18
+
+Nothing breaks.
+
+### Added
+
+- **`hush doctor --json`**: the same checks as the checklist, as data for a
+  script or the app: each check's id, whether it passed, its label and detail,
+  then the version and where the machine sits on the ladder. A public key,
+  never a private one, and never a value.
+- **`hush scan` reads Swift, Dart and Elixir**: `ProcessInfo.processInfo.environment["X"]`,
+  `Platform.environment['X']` and `String.fromEnvironment('X')`, and
+  `System.get_env` / `fetch_env!`. The app finds Swift packages
+  (`Package.swift`) among your codebases.
+
+### Fixed
+
+- **A global set used one key at a time, or through a group, shows as used.**
+  `hush doctor` marks it with its keys (`openai ● (OPENAI_API_KEY)`), and your
+  agent's `hush_list_sets` says "this project uses only OPENAI_API_KEY"; before,
+  it looked unused.
+- **The app's Agent tab shows how protected the project is once**, not twice.
+
+### Security
+
+- Advisories for fixes in earlier releases are published under the
+  repository's Security tab:
+  [GHSA-ghhf-9xj7-m75g](https://github.com/omarei-omoto/hush/security/advisories/GHSA-ghhf-9xj7-m75g)
+  and [GHSA-23rg-7h39-3h42](https://github.com/omarei-omoto/hush/security/advisories/GHSA-23rg-7h39-3h42)
+  (both fixed in 0.9.0).
+
 ## 0.13.1 — 2026-10-14
 
 ### The app has a new look

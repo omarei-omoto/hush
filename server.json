@@ -7,13 +7,13 @@
     "url": "https://github.com/omarei-omoto/hush",
     "source": "github"
   },
-  "version": "0.13.1",
+  "version": "0.13.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@omarei/hush",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "transport": {
         "type": "stdio"
       },

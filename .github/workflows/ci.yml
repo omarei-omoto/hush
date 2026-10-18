@@ -19,7 +19,9 @@ jobs:
       matrix:
         # macOS is where it is developed; ubuntu is where most people will run
         # it and where the platform-guarded paths actually get exercised.
-        os: [ubuntu-latest, macos-latest]
+        # Ubuntu is pinned in every workflow rather than -latest (which moved to
+        # Ubuntu 26 from 2026-10-19): a new runner image is a commit, not a surprise.
+        os: [ubuntu-24.04, macos-latest]
         node: ["22.x", "24.x"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,7 +59,7 @@ jobs:
 
   package:
     name: the published package runs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -93,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -199,7 +201,7 @@ jobs:
 
   fuzz:
     name: deeper fuzzing
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Nightly rather than per-PR: the same search, many times over, which is
     # worth doing but not worth waiting for on every push.
     if: github.event_name == 'push'

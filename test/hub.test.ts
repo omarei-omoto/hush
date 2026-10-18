@@ -229,6 +229,22 @@ describe("codebases, found and described", () => {
     }
   });
 
+  test("a Swift package is a codebase, and what its code reads is found", async () => {
+    const { describeCodebase, isCodebase } = await import("../src/codebase.ts");
+    const root = scratch("hush-cb-swift-");
+    try {
+      writeFileSync(join(root, "Package.swift"), "// swift-tools-version:5.9\nimport PackageDescription\n");
+      mkdirSync(join(root, "Sources", "App"), { recursive: true });
+      writeFileSync(join(root, "Sources", "App", "main.swift"), 'let key = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]\n');
+      assert.ok(isCodebase(root), "a Swift package was not taken for a codebase");
+      const d = describeCodebase(root);
+      assert.deepEqual(d.stack, ["Swift"]);
+      assert.deepEqual(d.credentials, ["OPENAI_API_KEY"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the crawl finds plain codebases as well as hush projects, and only in the folders chosen", async () => {
     const { setCrawlRoots, crawlRoots } = await import("../src/projects.ts");
     const home = scratch("hush-hub-home-");

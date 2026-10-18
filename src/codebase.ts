@@ -29,7 +29,7 @@ export interface CodebaseDetails {
 }
 
 /** Files that mark the top of a codebase. */
-const MARKERS = ["package.json", "pyproject.toml", "requirements.txt", "go.mod", "Cargo.toml", "Gemfile", "composer.json", "deno.json", "pom.xml", "build.gradle", "mix.exs", "pubspec.yaml"];
+const MARKERS = ["package.json", "pyproject.toml", "requirements.txt", "go.mod", "Cargo.toml", "Gemfile", "composer.json", "deno.json", "pom.xml", "build.gradle", "mix.exs", "pubspec.yaml", "Package.swift"];
 
 /** Is `dir` the top of a codebase: a git repository, or a folder with a project manifest? */
 export function isCodebase(dir: string): boolean {
@@ -79,6 +79,7 @@ function stackOf(root: string): string[] {
   if (existsSync(join(root, "pom.xml")) || existsSync(join(root, "build.gradle"))) stack.push("Java");
   if (existsSync(join(root, "mix.exs"))) stack.push("Elixir");
   if (existsSync(join(root, "pubspec.yaml"))) stack.push("Flutter");
+  if (existsSync(join(root, "Package.swift"))) stack.push("Swift");
   return [...new Set(stack)];
 }
 

@@ -14,7 +14,7 @@ import { DEFAULT_POLICY, loadPolicy } from "../mcp.ts";
 import { readPolicyFile, policyWeakenings, projectKey } from "../policy.ts";
 import { loadSchema, validate, describeProblems } from "../schema.ts";
 import { AGENTS, mcpRegistrations } from "../agents.ts";
-import { usedSets, composeSets, librarySets, linkNameFor } from "../library.ts";
+import { usedSets, composeSets, librarySets, libraryUse, openGlobal } from "../library.ts";
 import { VERSION } from "../version.ts";
 import { assess } from "../posture.ts";
 import { inspect, pendingChanges, hasProblems } from "../integrity.ts";
@@ -98,18 +98,24 @@ export function doctorReport(cwd: string = process.cwd()): DoctorReport {
   }
 
   // One vocabulary here too: every set, project and library, marked the way
-  // `hush ls` marks it.
+  // `hush ls` marks it. A library set the project gets one key of, or through
+  // a group, is used too: by those keys, or whole.
   const used = new Set(usedSets(loc.hushDir));
+  let fromLibrary = new Map<string, true | string[]>();
+  try {
+    fromLibrary = libraryUse(loc.hushDir, openGlobal());
+  } catch { /* no readable library: its sets are listed unmarked */ }
   const projectNames = vault ? vault.sets().map((s) => s.name) : [];
   const libraryNames = librarySets().map((s) => s.name).filter((n) => !projectNames.includes(n));
+  const mark = (set: string) => {
+    const got = fromLibrary.get(set);
+    return got === true ? " ●" : got ? ` ● (${got.join(", ")})` : "";
+  };
   check(
     "sets",
     true,
     "sets",
-    [
-      ...projectNames.map((s) => s + (used.has(s) ? " ●" : "")),
-      ...libraryNames.map((s) => s + (used.has(linkNameFor("library", s)) ? " ●" : "")),
-    ].join(", "),
+    [...projectNames.map((s) => s + (used.has(s) ? " ●" : "")), ...libraryNames.map((s) => s + mark(s))].join(", "),
   );
 
   const root = loc.hushDir.replace(/[/\\]\.hush$/, "");

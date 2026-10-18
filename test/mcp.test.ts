@@ -428,6 +428,28 @@ describe("mcp discovery — sets replace accounts", () => {
     p.cleanup();
   });
 
+  test("hush_list_sets marks a set used one key at a time, or through a group, and says which keys", async () => {
+    const p = project();
+    const libPath = join(p.home, "vaults", "global", "vault.json");
+    mkdirSync(dirname(libPath), { recursive: true });
+    const lib = Vault.create(libPath, "global", { name: "tester", pub: p.id.pub });
+    lib.set(p.id, "openai", "OPENAI_API_KEY", "sk-openai-value");
+    lib.set(p.id, "openai", "OPENAI_ORG_ID", "org-value");
+    lib.set(p.id, "anthropic", "ANTHROPIC_API_KEY", "sk-ant-value");
+    lib.describeEnv("anthropic", { group: "AI stack" });
+    lib.save();
+    saveLinks(join(p.root, ".hush"), ["openai#OPENAI_API_KEY", "group:ai-stack"]);
+
+    const s = await talk(p, [init, call(1, "hush_list_sets")]);
+    const text = s.replies.find((r) => r.id === 1)!.result!.content![0].text!;
+    // The flags in brackets after the set's name, not the list of its keys after them.
+    const flags = (name: string) => /\[([^\]]*)\]/.exec(text.split("\n").find((l) => new RegExp("^\\s+" + name + "\\s").test(l)) ?? "")?.[1] ?? "";
+    assert.equal(flags("openai"), "library, this project uses only OPENAI_API_KEY", text);
+    assert.equal(flags("anthropic"), "library, group: AI stack, used by this project", text);
+    for (const value of ["sk-openai-value", "org-value", "sk-ant-value"]) assert.ok(!text.includes(value), `leaked ${value}`);
+    p.cleanup();
+  });
+
   test("hush_list_accounts still answers, and its description says deprecated", async () => {
     const p = project();
     const s = await talk(p, [

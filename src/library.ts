@@ -331,6 +331,34 @@ export function usedSets(hushDir: string | null): string[] {
   return lastMentionWins(names);
 }
 
+/**
+ * What this project gets of each library set, by the set's name: all of it
+ * (named in the list, or through a group it is filed under), or only some of
+ * its keys ("openai#OPENAI_API_KEY"). A set the project does not use is
+ * absent. The plain "default" in a list is the project's own default set,
+ * never the library's ("library:default"), so it is not counted here.
+ */
+export function libraryUse(hushDir: string | null, library: Vault | null): Map<string, true | string[]> {
+  const use = new Map<string, true | string[]>();
+  for (const link of usedSets(hushDir)) {
+    if (link === "default") continue;
+    const group = parseGroupLink(link);
+    if (group !== null) {
+      for (const set of setsInGroup(library, group)) use.set(set, true);
+      continue;
+    }
+    const one = parseKeyLink(link);
+    if (one) {
+      const set = librarySetOf(one.set);
+      const had = use.get(set);
+      if (had !== true) use.set(set, [...(had ?? []), one.key]);
+      continue;
+    }
+    use.set(librarySetOf(link), true);
+  }
+  return use;
+}
+
 // -------------------------------------------------------------- composition
 
 export interface Composed {

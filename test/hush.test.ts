@@ -341,6 +341,19 @@ not a var
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("finds what Swift, Dart and Elixir read, and only names in capitals", () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "Config.swift"), `let key = ProcessInfo.processInfo.environment["SWIFT_TOKEN"]\nlet low = ProcessInfo.processInfo.environment["swift_lower"]\n`);
+    writeFileSync(join(dir, "main.dart"), `final a = Platform.environment['DART_TOKEN'];\nconst b = String.fromEnvironment('DART_DEFINE');\nconst c = bool.fromEnvironment("DART_FLAG");\n`);
+    writeFileSync(join(dir, "config.exs"), `config :app, key: System.get_env("ELIXIR_TOKEN")\nconfig :app, url: System.fetch_env!("ELIXIR_URL")\nconfig :app, low: System.get_env("elixir_lower")\n`);
+    const names = scanRepo(dir).map((u) => u.name);
+    for (const expected of ["SWIFT_TOKEN", "DART_TOKEN", "DART_DEFINE", "DART_FLAG", "ELIXIR_TOKEN", "ELIXIR_URL"]) {
+      assert.ok(names.includes(expected), `expected to find ${expected} in ${names}`);
+    }
+    assert.ok(!names.some((n) => /lower/i.test(n)), `a lowercase name was reported: ${names}`);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("reads declared vars out of .env.example", () => {
     const dir = scratch();
     writeFileSync(join(dir, ".env.example"), "DECLARED_ONLY=\nALSO_DECLARED=x");

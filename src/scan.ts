@@ -15,7 +15,7 @@ const SKIP_DIRS = new Set([
 
 const SCAN_EXT = new Set([
   ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
-  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".php", ".cs", ".ex", ".exs",
+  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".php", ".cs", ".ex", ".exs", ".swift", ".dart",
   ".sh", ".bash", ".zsh", ".yml", ".yaml", ".toml",
 ]);
 
@@ -39,6 +39,10 @@ const PATTERNS: RegExp[] = [
   /std::env::var(?:_os)?\(\s*"([A-Z_][A-Z0-9_]{2,})"/g,          // Rust
   /System\.getenv\(\s*"([A-Z_][A-Z0-9_]{2,})"/g,                 // Java/Kotlin
   /Environment\.GetEnvironmentVariable\(\s*"([A-Z_][A-Z0-9_]{2,})"/g, // C#
+  /ProcessInfo\.processInfo\.environment\[\s*"([A-Z_][A-Z0-9_]{2,})"\s*\]/g, // Swift
+  /Platform\.environment\[\s*["']([A-Z_][A-Z0-9_]{2,})["']\s*\]/g,      // Dart / Flutter
+  /\b(?:String|bool|int)\.fromEnvironment\(\s*["']([A-Z_][A-Z0-9_]{2,})["']/g,
+  /System\.(?:get_env|fetch_env!?)\(\s*"([A-Z_][A-Z0-9_]{2,})"/g,         // Elixir
   /getenv\(\s*["']([A-Z_][A-Z0-9_]{2,})["']/g,                   // PHP/C
   /\$\{?([A-Z_][A-Z0-9_]{2,})\}?/g,                              // shell / compose (noisy, filtered below)
 ];

@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 
 import { generateIdentity } from "../src/crypto.ts";
 import { Vault, assertVaultShape, type VaultFile } from "../src/vault.ts";
-import { composeSets, confirmedLinks, globalVaultName, librarySets, loadLinks, openGlobal, saveLinks, setsInGroup } from "../src/library.ts";
+import { composeSets, confirmedLinks, globalVaultName, librarySets, libraryUse, loadLinks, openGlobal, saveLinks, setsInGroup } from "../src/library.ts";
 import { fileUnder, keepHere, makeGlobal, projectsUsing, renameGroup, soleUsers, tidy, ungroup } from "../src/placement.ts";
 import { rememberProject } from "../src/projects.ts";
 
@@ -49,6 +49,26 @@ function world(sets: Record<string, Record<string, string>>) {
 }
 
 const run = (me: ReturnType<typeof generateIdentity>, hushDir: string) => composeSets(null, me, hushDir);
+
+describe("what a project gets of each global set", () => {
+  test("a set named whole, one through a group, and one key at a time are all used; the project's own default is not the library's", () => {
+    const w = world({ openai: { OPENAI_API_KEY: "a", OPENAI_ORG_ID: "b" }, anthropic: { ANTHROPIC_API_KEY: "c" }, stripe: { STRIPE_KEY: "d" }, default: { SHARED: "e" }, unused: { U: "f" } });
+    try {
+      fileUnder("anthropic", "AI stack");
+      const web = w.project("web", ["openai#OPENAI_API_KEY", "group:ai-stack", "stripe", "library:default#SHARED"]);
+      const use = libraryUse(web.hushDir, openGlobal());
+      assert.deepEqual(use.get("openai"), ["OPENAI_API_KEY"]);
+      assert.equal(use.get("anthropic"), true, "a set reached through its group was not counted");
+      assert.equal(use.get("stripe"), true);
+      assert.deepEqual(use.get("default"), ["SHARED"]);
+      assert.ok(!use.has("unused"));
+      // Every project lists its own "default"; that is never the library's.
+      assert.ok(!libraryUse(w.project("api").hushDir, openGlobal()).has("default"));
+    } finally {
+      w.done();
+    }
+  });
+});
 
 describe("groups of global sets", () => {
   test("a project given a group gets every set in it — including one filed there later", () => {

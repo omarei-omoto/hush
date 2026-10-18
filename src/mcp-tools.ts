@@ -7,7 +7,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { resolveVaultPath, Vault, audit, ValidationError, withoutControls } from "./vault.ts";
 import { serviceLabel, knownVars, setNameFor, serviceForTool } from "./services.ts";
-import { type Composed, composeSets, usedSets, librarySets, globalVaultName, openGlobal, linkNameFor, placeOf, allowedAt, libraryGroups, sameFolder } from "./library.ts";
+import { type Composed, composeSets, usedSets, librarySets, libraryUse, globalVaultName, openGlobal, placeOf, allowedAt, libraryGroups, sameFolder } from "./library.ts";
 import { HOSTS, hostById } from "./hosts.ts";
 import { planPush, programLine, recordPush, runPush, sourceOf, type PushPlan } from "./push.ts";
 import { requestApproval, promptForSecretNatively, nativeDialogsAvailable } from "./approval.ts";
@@ -121,6 +121,8 @@ interface ListedSet {
   keys: string[];
   where: "library" | "project";
   used: boolean;
+  /** Of a library set the project gets only some keys of: those keys. */
+  usedKeys?: string[];
   /** A library set kept for this project only, not one of the person's global keys. */
   own?: boolean;
   group?: string;
@@ -148,6 +150,11 @@ function listSets(ctx: Ctx): ListedSet[] {
     used: used.has(s.name),
   }));
   const place = placeOf(ctx.hushDir);
+  // A set this project gets whole (by name, or through a group), or one key at a time.
+  let fromLibrary = new Map<string, true | string[]>();
+  try {
+    fromLibrary = libraryUse(ctx.hushDir, openGlobal());
+  } catch { /* no readable library: nothing in it is marked used */ }
   // Another project's own sets are not this agent's to know about, let alone pick.
   const library: ListedSet[] = librarySets()
     .filter((s) => !s.project || sameFolder(s.project, place))
@@ -159,7 +166,8 @@ function listSets(ctx: Ctx): ListedSet[] {
       onlyIn: s.project ? undefined : s.onlyIn,
       keys: s.keys,
       where: "library",
-      used: used.has(linkNameFor("library", s.name)),
+      used: fromLibrary.has(s.name),
+      ...(Array.isArray(fromLibrary.get(s.name)) ? { usedKeys: fromLibrary.get(s.name) as string[] } : {}),
       ...(s.project ? { own: true } : {}),
       ...(s.group ? { group: s.group } : {}),
     }));
@@ -212,7 +220,11 @@ export async function callTool(name: string, args: any, injected?: Ctx): Promise
       const all = listSets(ctx);
       if (!all.length) return text("No sets in this vault or library yet.");
       const lines = all.map((s) => {
-        const flags = [s.own ? "only this project" : s.where, s.group ? `group: ${s.group}` : null, s.used ? "used by this project" : null].filter(Boolean).join(", ");
+        const flags = [
+          s.own ? "only this project" : s.where,
+          s.group ? `group: ${s.group}` : null,
+          s.usedKeys ? `this project uses only ${s.usedKeys.join(", ")}` : s.used ? "used by this project" : null,
+        ].filter(Boolean).join(", ");
         const label = s.label === s.name ? s.name : `${s.label} (${s.name})`;
         const limit = s.onlyIn
           ? allowedAt(s.onlyIn, placeOf(ctx.hushDir))

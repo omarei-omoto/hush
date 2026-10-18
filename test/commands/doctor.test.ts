@@ -27,6 +27,23 @@ describe("hush doctor reports the whole setup", () => {
     p.cleanup();
   });
 
+  test("a library set used one key at a time is marked, with the keys", () => {
+    const p = project();
+    try {
+      const made = p.run(["global", "--create"]);
+      assert.equal(made.code, 0, made.out);
+      writeFileSync(join(p.root, ".env.x"), "OPENAI_API_KEY=sk-1\nOPENAI_ORG_ID=org-1\n");
+      const added = p.run(["add", ".env.x", "--as", "openai", "--library"]);
+      assert.equal(added.code, 0, added.out);
+      rmSync(join(p.root, ".env.x"));
+      writeFileSync(join(p.hushDir, "envs.json"), JSON.stringify({ use: ["openai#OPENAI_API_KEY"] }));
+      const line = p.run(["doctor"]).out.match(/sets\s+(.*)/)?.[1] ?? "";
+      assert.match(line, /openai ● \(OPENAI_API_KEY\)/, `a key link is not marked: "${line}"`);
+    } finally {
+      p.cleanup();
+    }
+  });
+
   test("it reports the policy actually in force", () => {
     const p = project();
     assert.match(p.run(["doctor"]).out, /approval required\s+run, add, reveal, request/);
